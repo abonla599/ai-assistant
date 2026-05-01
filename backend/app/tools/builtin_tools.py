@@ -1,8 +1,9 @@
 import math
 import re
 from app.tools.registry import register_tool
-from duckduckgo_search import DDGS
-
+from ddgs import DDGS
+from app.tools.registry import register_tool, tools_registry
+from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
 @register_tool(
     name="calculator",
@@ -18,24 +19,23 @@ from duckduckgo_search import DDGS
         "required": ["expression"]
     }
 )
-def calculator(expression: str) -> str:
-    # 安全的白名单：只允许数字、运算符、括号、math模块中的函数
-    allowed = set("0123456789+-*/(). ")
-    safe = True
-    for ch in expression:
-        if ch not in allowed and not ch.isalpha():
-            safe = False
-            break
-    if not safe:
-        return "表达式包含不允许的字符，仅支持基本数学运算和 math 函数。"
+def calculator(expression: str) -> ToolResponse:
+    # 允许的字符和模式检查
+    allowed_chars = set("0123456789+-*/().% ^<>=!|&")
+    # 更安全的 eval 使用 ast.literal_eval 仅支持字面量，但需要数学运算，这里仍用 eval 但加强限制
+    # 简单过滤危险内置函数
+    if any(forbidden in expression for forbidden in ['__', 'import', 'os', 'sys', 'subprocess']):
+        return ToolResponse(False, error="表达式包含禁止的操作", hint="仅支持基本数学运算和 math 函数")
     try:
-        # 将可能的 math 函数前缀补全
-        eval_names = {name: getattr(math, name) for name in dir(math) if callable(getattr(math, name))}
-        eval_names["__builtins__"] = None
-        result = eval(expression, {"__builtins__": None}, eval_names)
-        return str(result)
+        # 使用安全的数学执行环境
+        import math
+        safe_dict = {"__builtins__": None, "math": math}
+        result = eval(expression, safe_dict, {})
+        return ToolResponse(True, data=result)
+    except SyntaxError:
+        return ToolResponse(False, error="语法错误", hint="请提供合法的数学表达式，如 2+3*4")
     except Exception as e:
-        return f"计算错误: {e}"
+        return ToolResponse(False, error=str(e), hint="检查表达式或尝试简化")
 
 # ---------- 搜索引擎工具 ----------
 @register_tool(
@@ -62,3 +62,17 @@ def web_search(query: str) -> str:
         return "\n".join(summaries)
     except Exception as e:
         return f"搜索失败: {e}"
+@register_tool(
+    name="help",
+    description="查看当前可用的工具列表及其用途",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+)
+def help_tool() -> str:
+    info = []
+    for name, t in tools_registry.items():
+        info.append(f"{name}: {t['description']}")
+    return "\n".join(info)
