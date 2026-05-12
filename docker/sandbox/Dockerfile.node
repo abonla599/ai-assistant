@@ -1,0 +1,10 @@
+# 基于 Node.js 官方轻量镜像
+FROM node:18-slim
+
+# 创建受限用户 sandbox
+RUN useradd -m sandbox && \
+    chown -R sandbox:sandbox /home/sandbox
+
+WORKDIR /home/sandbox
+USER sandbox
+CMD ["bash"]
