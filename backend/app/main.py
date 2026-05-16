@@ -1,22 +1,45 @@
+import sys
+import os
+
+# 将 backend 目录添加到 Python 路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI
-from pydantic import BaseModel  # 用于定义请求体格式
-import uvicorn
-# 创建 FastAPI 应用实例，就是你的后端“网站”
-app = FastAPI(title="AI 智能助手")
+from pydantic import BaseModel
+from typing import List, Optional
 
-# 定义请求体的格式：一个模型名字和一个消息列表
+# 导入记忆路由
+from app.memory.memory_router import router as memory_router
+
+app = FastAPI(
+    title="AI 智能助手 API",
+    description="多模型、工具调用、记忆管理的智能助手系统",
+    version="1.0.0"
+)
+
+# 注册记忆管理路由
+app.include_router(memory_router)
+
+
+# ============ 原有的聊天模型 ============
+
 class ChatRequest(BaseModel):
-    model: str
-    messages: list[dict]   # 例如 [{"role": "user", "content": "你好"}]
+    model: str = "deepseek-chat"
+    messages: List[dict]
+    temperature: Optional[float] = 0.7
 
-# 这是一个 API 端点，POST 方法访问 /v1/chat
+
 @app.post("/v1/chat")
 async def chat(request: ChatRequest):
-    # 现在先不管模型，直接返回一个假回复
-    user_msg = request.messages[-1]["content"]  # 取最后一条用户说的话
-    fake_response = f"你刚才说：{user_msg}，我是AI，你好！"
-    return {"reply": fake_response}
+    return {"reply": "这是聊天接口占位", "message_id": "msg_001"}
 
-# 这段代码只有在你直接运行这个文件时才执行，启动服务器
+
+@app.get("/")
+async def root():
+    return {"message": "AI 智能助手 API 运行中"}
+
+
+# 启动命令
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
