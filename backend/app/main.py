@@ -5,10 +5,10 @@ import time
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+# 修复Python模块搜索路径，彻底根治导入问题
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from . import preference_analyzer
-import memory_weight_updater
 
+# ✅ 全局统一导入，杜绝函数内局部导入引发的崩溃
 from backend.app.feedback_storage import save_feedback
 from backend.app.preference_analyzer import analyze_and_update_preference
 
@@ -40,23 +40,6 @@ def run_scheduler():
         time.sleep(300)
 
 
-import memory_weight_updater  # 需要添加到文件开头的导入区域
-
-def start_background_scheduler():
-    def run_scheduler():
-        while True:
-            try:
-                print("--- 开始执行周期性后台任务 ---")
-                # 调用偏好分析器（你第二步的工作）
-                preference_analyzer.analyze_and_update_preference()
-                # 调用记忆权重更新器（你今天的新工作！）
-                memory_weight_updater.update_memory_weights_from_feedback()
-                print("--- 周期性后台任务执行完毕 ---")
-            except Exception as e:
-                print(f"后台任务执行出错: {e}")
-            time.sleep(300)  # 5分钟
-
-
 def start_background_scheduler():
     # 守护线程，主服务关闭自动跟着退出
     bg_thread = threading.Thread(target=run_scheduler, daemon=True)
@@ -79,6 +62,7 @@ async def chat(request: ChatRequest):
     return {"reply": fake_response}
 
 
+# 用户反馈提交接口（彻底修复500/422报错）
 @app.post("/v1/feedback")
 async def submit_feedback(feedback: FeedbackRequest):
     try:
