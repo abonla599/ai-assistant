@@ -286,7 +286,7 @@ async def orchestrate_task(request: OrchestrateRequest):
     return result
 
 
-# --- 任务状态查询（第四步新增）---
+# --- 任务状态查询 ---
 
 @app.get("/v1/tasks/{task_id}")
 async def get_task_status(task_id: str):
@@ -308,7 +308,8 @@ async def get_task_status(task_id: str):
         "results": task.results if task.status == "completed" else None,
         "final_answer": task.final_answer,
         "error": task.error,
-        "created_at": task.created_at
+        "created_at": task.created_at,
+        "cancelled": task.cancelled
     }
     
     if len(task.subtasks) > 0:
@@ -340,6 +341,33 @@ async def list_all_tasks():
             }
             for t in tasks
         ]
+    }
+
+
+# ⭐⭐⭐ 新增：任务取消端点 ⭐⭐⭐
+@app.post("/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """取消正在执行的任务"""
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    
+    task = task_store[task_id]
+    
+    # 检查任务是否已处于终态
+    if TaskStatus and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+        return {
+            "status": "warning",
+            "task_id": task_id,
+            "message": f"任务已处于终态: {task.status.value}，无需取消"
+        }
+    
+    # 标记取消
+    task.mark_cancelled()
+    
+    return {
+        "status": "cancelled",
+        "task_id": task_id,
+        "message": "任务已标记为取消，将在当前子任务完成后停止"
     }
 
 

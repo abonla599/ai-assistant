@@ -15,6 +15,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"        # 执行中
     COMPLETED = "completed"    # 已完成
     FAILED = "failed"          # 执行失败
+    CANCELLED = "cancelled"    # ⭐ 新增：已取消
 
 
 class Task:
@@ -29,6 +30,12 @@ class Task:
         self.created_at = datetime.now().isoformat()  # 创建时间
         self.final_answer = None                  # 最终汇总答案
         self.error = None                         # 错误信息（如果失败）
+        self.cancelled = False                    # ⭐ 新增：取消标志
+
+    def mark_cancelled(self) -> None:             # ⭐ 新增方法
+        """标记任务为已取消"""
+        self.cancelled = True
+        self.status = TaskStatus.CANCELLED
 
 
 # 全局任务存储（内存字典，重启后丢失）

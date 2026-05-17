@@ -1,7 +1,7 @@
 """
 任务编排器模块
 负责将复杂目标分解为子任务，并协调ReAct Agent逐步执行
-支持任务状态持久化，可断点续传
+支持任务状态持久化，可断点续传，支持任务取消
 """
 from typing import List, Optional, Dict, Any
 from .task_store import Task, TaskStatus, task_store
@@ -17,6 +17,7 @@ class Orchestrator:
     2. 创建或恢复Task对象，管理任务生命周期
     3. 依次调用Executor执行每个子任务
     4. 汇总所有子任务结果，生成最终答案
+    5. 支持任务取消（每步执行前检查取消标志）
     """
 
     def __init__(self, model: str = "deepseek-chat"):
@@ -53,7 +54,16 @@ class Orchestrator:
         # --- 1. 尝试恢复任务或创建新任务 ---
         if task_id and task_id in task_store:
             task = task_store[task_id]
-            
+
+            # ⭐ 检查是否已被取消
+            if task.cancelled or task.status == TaskStatus.CANCELLED:
+                return {
+                    "task_id": task.task_id,
+                    "status": "cancelled",
+                    "goal": task.goal,
+                    "message": "任务已被取消"
+                }
+
             # 如果任务已完成，直接返回结果
             if task.status == TaskStatus.COMPLETED:
                 print(f"[Orchestrator] 任务 {task_id} 已完成，直接返回结果")
@@ -65,7 +75,7 @@ class Orchestrator:
                     "subtasks": task.subtasks,
                     "results": task.results
                 }
-            
+
             # 如果任务失败，询问是否重新执行
             if task.status == TaskStatus.FAILED:
                 print(f"[Orchestrator] 任务 {task_id} 之前失败，从断点重新执行")
@@ -86,28 +96,42 @@ class Orchestrator:
         try:
             # --- 3. 逐步执行子任务 ---
             while task.current_subtask < len(task.subtasks):
+                # ⭐⭐⭐ 每个子任务执行前检查取消标志 ⭐⭐⭐
+                if task.cancelled:
+                    task.mark_cancelled()
+                    print(f"[Orchestrator] 任务 {task.task_id} 在第 {task.current_subtask} 步被取消")
+                    return {
+                        "task_id": task.task_id,
+                        "status": "cancelled",
+                        "goal": task.goal,
+                        "message": f"任务在第 {task.current_subtask + 1} 步被取消",
+                        "completed_subtasks": task.current_subtask,
+                        "total_subtasks": len(task.subtasks),
+                        "results": task.results
+                    }
+
                 idx = task.current_subtask
                 subtask = task.subtasks[idx]
-                
+
                 print(f"[Orchestrator] ========== 执行子任务 {idx+1}/{len(task.subtasks)} ==========")
                 print(f"[Orchestrator] 子任务内容: {subtask}")
-                
+
                 # 使用Executor（内部调用ReAct Agent）执行单个子任务
                 result = self.executor.execute_task(subtask)
-                
+
                 # 保存结果
                 task.results.append(result)
                 task.current_subtask += 1
-                
+
                 print(f"[Orchestrator] 子任务 {idx+1} 完成")
                 print(f"[Orchestrator] 当前进度: {task.current_subtask}/{len(task.subtasks)}")
 
             # --- 4. 所有子任务完成，生成最终汇总 ---
             print(f"[Orchestrator] ========== 所有子任务完成，开始汇总 ==========")
-            
+
             # 构造汇总提示词
             summary_prompt = self._build_summary_prompt(task)
-            
+
             # 调用LLM生成最终答案
             from app.core.llm_client import get_llm_response
             final_answer = get_llm_response(
@@ -117,13 +141,13 @@ class Orchestrator:
                     {"role": "user", "content": summary_prompt}
                 ]
             )
-            
+
             # 保存最终答案
             task.final_answer = final_answer
             task.status = TaskStatus.COMPLETED
-            
+
             print(f"[Orchestrator] 任务 {task.task_id} 完成！")
-            
+
             return {
                 "task_id": task.task_id,
                 "status": "completed",
@@ -137,10 +161,10 @@ class Orchestrator:
             # --- 5. 异常处理 ---
             error_msg = str(e)
             print(f"[Orchestrator] 任务执行出错: {error_msg}")
-            
+
             task.status = TaskStatus.FAILED
             task.error = error_msg
-            
+
             return {
                 "task_id": task.task_id,
                 "status": "failed",
@@ -154,15 +178,15 @@ class Orchestrator:
         """构造汇总提示词"""
         parts = [f"用户原始目标：{task.goal}\n"]
         parts.append("以下是各子任务及其执行结果：\n")
-        
+
         for i, (subtask, result) in enumerate(zip(task.subtasks, task.results)):
             parts.append(f"--- 子任务 {i+1} ---")
             parts.append(f"任务内容：{subtask}")
             parts.append(f"执行结果：{result}")
             parts.append("")
-        
+
         parts.append("请将以上所有子任务的结果整合成一个完整、连贯的回答，直接呈现给用户。")
-        
+
         return "\n".join(parts)
 
     def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -176,7 +200,7 @@ class Orchestrator:
         task = task_store.get(task_id)
         if not task:
             return None
-        
+
         return {
             "task_id": task.task_id,
             "goal": task.goal,
@@ -185,5 +209,6 @@ class Orchestrator:
             "total_subtasks": len(task.subtasks),
             "final_answer": task.final_answer,
             "error": task.error,
-            "created_at": task.created_at
+            "created_at": task.created_at,
+            "cancelled": task.cancelled  # ⭐ 新增
         }
