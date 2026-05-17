@@ -3,10 +3,10 @@ import uuid
 from typing import List, Dict, Any
 
 # 导入你自己的模块（路径根据实际情况调整，这里假设都是 app.xxx）
-from app.core.llm_client import get_llm_response, MODEL_CONFIGS
-from app.memory.memory_manager import MemoryManager
-from app.tools.registry import get_all_tools_schema
-from app.tools.executor import execute_tool
+from core.llm_client import get_llm_response, MODEL_CONFIGS
+from memory.memory_manager import MemoryManager
+from tools.registry import get_all_tools_schema
+from tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 
 # 共享实例（简单单例，后续优化）
