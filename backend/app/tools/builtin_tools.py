@@ -1,3 +1,13 @@
+import sys
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir)) # 指向 backend 目录
+
+# 如果 project_root 不在 sys.path 中，则添加
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from app.sandbox.sandbox_manager import SandboxManager
 import math
 import re
 from app.tools.registry import register_tool
@@ -5,6 +15,7 @@ from ddgs import DDGS
 from app.tools.registry import register_tool, tools_registry
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
+sandbox = SandboxManager()
 @register_tool(
     name="calculator",
     description="执行数学计算，支持加减乘除、乘方、开方等。输入表达式字符串。",
@@ -76,3 +87,46 @@ def help_tool() -> str:
     for name, t in tools_registry.items():
         info.append(f"{name}: {t['description']}")
     return "\n".join(info)
+
+
+@register_tool(
+    name="execute_code",   # 工具名，模型会叫这个名字
+    description="执行一段代码并返回输出。支持 python 和 javascript。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "要执行的代码，注意必须是完整可运行的"
+            },
+            "language": {
+                "type": "string",
+                "enum": ["python", "javascript"],   # 只能选这两个
+                "default": "python",
+                "description": "编程语言，默认 python"
+            }
+        },
+        "required": ["code"]   # 必须提供代码，语言不提供则默认为 python
+    }
+)
+def execute_code(code: str, language: str = "python", max_retries=2) -> str:
+    for attempt in range(max_retries + 1):
+        result = sandbox.run_code(code, language)
+        if not result.get("error"):
+            break
+        if attempt < max_retries:
+            import time
+            time.sleep(0.5)
+  # 调用沙箱管理器的 run_code 方法
+    result = sandbox.run_code(code, language)
+
+    # 沙箱返回的是字典，里面有 stdout, stderr, error
+    if result.get("error"):
+        # 如果沙箱本身报错（比如超时、容器启动失败）
+        return f"执行错误: {result['error']}"
+
+    # 正常情况拼接标准输出和标准错误输出
+    out = result.get("stdout", "")
+    err = result.get("stderr", "")
+    # 返回给模型的文本（模型会看到这个字符串）
+    return f"输出:\n{out}\n错误:\n{err}"
