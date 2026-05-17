@@ -8,7 +8,7 @@ from app.memory.memory_manager import MemoryManager
 from app.tools.registry import get_all_tools_schema
 from app.tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
-
+from app.tools.builtin_tools import *
 # 共享实例（简单单例，后续优化）
 memory_manager = MemoryManager()
 
