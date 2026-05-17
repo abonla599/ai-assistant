@@ -30,15 +30,20 @@ sandbox = SandboxManager()
         "required": ["expression"]
     }
 )
+
 def calculator(expression: str) -> ToolResponse:
     # 允许的字符和模式检查
     allowed_chars = set("0123456789+-*/().% ^<>=!|&")
-    # 更安全的 eval 使用 ast.literal_eval 仅支持字面量，但需要数学运算，这里仍用 eval 但加强限制
+    
     # 简单过滤危险内置函数
     if any(forbidden in expression for forbidden in ['__', 'import', 'os', 'sys', 'subprocess']):
         return ToolResponse(False, error="表达式包含禁止的操作", hint="仅支持基本数学运算和 math 函数")
+
+    # 预检查：不允许连续的运算符（如 ++, --, +-, etc.）
+    if re.search(r'[+\-*/%]\s*[+\-*/%]', expression):
+        return ToolResponse(False, error="语法错误", hint="请提供合法的数学表达式，如 2+3*4")
+
     try:
-        # 使用安全的数学执行环境
         import math
         safe_dict = {"__builtins__": None, "math": math}
         result = eval(expression, safe_dict, {})
