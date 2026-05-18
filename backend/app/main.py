@@ -2,6 +2,7 @@ import sys
 import os
 import threading
 import time
+import auto_weight_adjuster
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -43,25 +44,31 @@ def run_scheduler():
 import memory_weight_updater  # 需要添加到文件开头的导入区域
 
 def start_background_scheduler():
-    def run_scheduler():
-        while True:
-            try:
-                print("--- 开始执行周期性后台任务 ---")
-                # 调用偏好分析器（你第二步的工作）
-                preference_analyzer.analyze_and_update_preference()
-                # 调用记忆权重更新器（你今天的新工作！）
-                memory_weight_updater.update_memory_weights_from_feedback()
-                print("--- 周期性后台任务执行完毕 ---")
-            except Exception as e:
-                print(f"后台任务执行出错: {e}")
-            time.sleep(300)  # 5分钟
-
-
-def start_background_scheduler():
     # 守护线程，主服务关闭自动跟着退出
     bg_thread = threading.Thread(target=run_scheduler, daemon=True)
     bg_thread.start()
     print("🚀 后台偏好分析定时任务已启动")
+
+def start_background_scheduler():
+    def run_scheduler():
+        while True:
+            try:
+                print("--- 开始执行周期性后台任务 ---")
+                preference_analyzer.analyze_and_update_preference()
+                memory_weight_updater.update_memory_weights_from_feedback()
+                print("--- 周期性后台任务执行完毕 ---")
+            except Exception as e:
+                print(f"后台任务执行出错: {e}")
+            time.sleep(300)
+    # 启动周期性任务线程
+    thread = threading.Thread(target=run_scheduler, daemon=True)
+    thread.start()
+    print("🚀 后台偏好分析器已启动，将每5分钟运行一次。")
+
+    # 启动反馈文件监听器（关键！）
+    watcher_thread = threading.Thread(target=auto_weight_adjuster.start_feedback_watcher, daemon=True)
+    watcher_thread.start()
+    print("🔁 实时反馈闭环监听器已启动！")
 
 
 # 服务启动钩子，服务完全就绪后再开启后台任务
