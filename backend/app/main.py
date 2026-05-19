@@ -1,5 +1,7 @@
 import sys
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # 将 backend 目录添加到 Python 路径（蒋厚宇的路径设置）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
