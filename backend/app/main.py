@@ -3,6 +3,8 @@ import os
 import threading
 import time
 import auto_weight_adjuster
+import tool_calling 
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -15,7 +17,6 @@ from backend.app.preference_analyzer import analyze_and_update_preference
 
 # 创建FastAPI应用
 app = FastAPI(title="AI 智能助手")
-
 
 # ---------------------- 数据模型定义（解决422参数错误） ----------------------
 class ChatRequest(BaseModel):
@@ -75,15 +76,6 @@ def start_background_scheduler():
 @app.on_event("startup")
 async def init_app():
     start_background_scheduler()
-
-
-# ---------------------- 核心业务API接口 ----------------------
-# 聊天对话接口
-@app.post("/v1/chat")
-async def chat(request: ChatRequest):
-    user_msg = request.messages[-1]["content"]
-    fake_response = f"你刚才说: {user_msg}，我是AI，你好！"
-    return {"reply": fake_response}
 
 
 @app.post("/v1/feedback")
@@ -214,48 +206,6 @@ async def root():
 async def health_check():
     """健康检查"""
     return {"status": "healthy"}
-
-
-# --- 聊天接口 ---
-
-@app.post("/v1/chat")
-async def chat(request: ChatRequest):
-    """聊天接口"""
-    user_msg = request.messages[-1]["content"]
-    
-    if USE_PIPELINE:
-        try:
-            user_id = "default_user"
-            pipeline = ChatPipeline(user_id=user_id)
-            result = pipeline.process(request.model, request.messages)
-            reply = result.get("reply", "抱歉，处理出错")
-        except Exception as e:
-            reply = f"处理出错: {str(e)}"
-    else:
-        try:
-            from app.core.llm_client import get_llm_response
-            reply = get_llm_response(
-                model=request.model,
-                messages=request.messages,
-                temperature=0.7
-            )
-        except ImportError:
-            reply = f"你刚才说：{user_msg}，我是AI，你好！"
-    
-    message_id = str(uuid.uuid4())
-    
-    if request.session_id and request.session_id in sessions_store:
-        session = sessions_store[request.session_id]
-        session["messages"].append(request.messages[-1])
-        session["messages"].append({"role": "assistant", "content": reply})
-        if len(session["messages"]) <= 2:
-            title = user_msg[:20]
-            session["title"] = title if title else "新对话"
-    
-    return {
-        "reply": reply,
-        "message_id": message_id
-    }
 
 
 # --- 会话管理 ---
@@ -495,3 +445,30 @@ async def delete_task(task_id: str):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ---------------------- 核心业务API接口 ----------------------
+# 聊天对话接口
+@app.post("/v1/chat")
+async def chat(request: ChatRequest):
+    from tool_calling import llm_with_tools, get_current_time
+    import json
+    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+    lc_messages = []
+    for msg in request.messages:
+        if msg["role"] == "user":
+            lc_messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            lc_messages.append(AIMessage(content=msg.get("content", "")))
+
+    response = llm_with_tools.invoke(lc_messages)
+    if response.tool_calls:
+        tool_results = []
+        for tool_call in response.tool_calls:
+            if tool_call["name"] == "get_current_time":
+                result = get_current_time()
+                tool_results.append(ToolMessage(content=json.dumps({"result": result}), tool_call_id=tool_call["id"]))
+        final_response = llm_with_tools.invoke(lc_messages + [response] + tool_results)
+        return {"reply": final_response.content}
+    else:
+        return {"reply": response.content}
