@@ -1,386 +1,437 @@
-"""
-FastAPI 主应用 - 第四步完整版
-包含：聊天、会话管理、流式输出、模型列表
-"""
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
 import sys
-import json
+import os
 import uuid
+import threading
+import time
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+# 添加项目根目录到路径，以便能够导入 app 模块
+# 假设目录结构为: ai-assistant/backend/app/main.py
+# 那么根目录是 ai-assistant/backend/ 或者 ai-assistant/
+# 这里根据你原有的 sys.path 调整，确保能找到 app 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import uvicorn
-from pathlib import Path
 
-# 确保 backend 在 sys.path 中
-sys.path.append(str(Path(__file__).parent.parent.parent))
+# ==================== 创建 FastAPI 应用实例 ====================
+app = FastAPI(title="AI 智能助手")
 
-# 导入核心模块
-from core.llm_client import get_llm_response
-from pipeline import ChatPipeline
+# ==================== 导入核心模块 ====================
 
-# ============================================================
-# 创建 FastAPI 应用实例
-# ============================================================
-app = FastAPI(
-    title="AI 智能助手",
-    description="支持多模型、会话管理、流式输出的智能助手 API",
-    version="1.0.0"
-)
+# 导入后台任务相关模块 (修正为绝对导入)
+try:
+    from app import preference_analyzer
+    from app import memory_weight_updater
+    HAS_BACKGROUND_TASKS = True
+except ImportError as e:
+    print(f"警告: 后台任务模块导入失败: {e}")
+    HAS_BACKGROUND_TASKS = False
 
-# 允许跨域（Flutter App 需要）
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制为具体域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 导入 ChatPipeline（来自 develop 分支）
+try:
+    from app.core.llm_client import get_llm_response
+    from app.pipeline import ChatPipeline
+    USE_PIPELINE = True
+except ImportError:
+    USE_PIPELINE = False
+
+# 导入智能体模块
+try:
+    from app.agents.orchestrator import Orchestrator
+    orchestrator = Orchestrator(model="deepseek-chat")
+except ImportError:
+    orchestrator = None
+
+try:
+    from app.agents.task_store import task_store, get_task, TaskStatus
+except ImportError:
+    task_store = {}
+    get_task = None
+    TaskStatus = None
+
+try:
+    from app.memory.memory_manager import MemoryManager
+    memory_manager = MemoryManager()
+except ImportError:
+    memory_manager = None
 
 
-# ============================================================
-# 数据模型定义
-# ============================================================
+# ==================== 数据模型定义 ====================
+
 class ChatRequest(BaseModel):
     """聊天请求体"""
-    model: str
-    messages: list[dict]  # 例如 [{"role": "user", "content": "你好"}]
-    session_id: Optional[str] = None  # 新增：关联的会话 ID
+    model: str = "deepseek-chat"
+    messages: list[dict]
+    session_id: Optional[str] = None
+
+
+class MemoryAddRequest(BaseModel):
+    """添加记忆请求体"""
+    user_id: str
+    content: str
+    metadata: Optional[dict] = None
+
+
+class MemorySearchRequest(BaseModel):
+    """搜索记忆请求体"""
+    user_id: str
+    query: str
+    top_k: int = 5
 
 
 class FeedbackRequest(BaseModel):
-    """反馈请求体"""
+    """用户反馈请求体"""
     message_id: str
-    rating: int  # 1-5 评分
+    rating: int
     comment: Optional[str] = None
 
 
-# ============================================================
-# 简易内存会话管理器（内嵌在 main.py 中）
-# ============================================================
-class SessionManager:
-    """
-    内存级会话存储
-    注意：服务重启后数据丢失，仅用于开发和演示
-    """
+class AgentRequest(BaseModel):
+    """智能体任务请求体"""
+    task: str
+    max_turns: Optional[int] = 10
+    max_duration: Optional[int] = 120
 
-    def __init__(self):
-        self._store: Dict[str, dict] = {}
 
-    def create_session(self, model: str = "deepseek-chat") -> dict:
-        """创建新会话"""
-        from datetime import datetime
+class OrchestrateRequest(BaseModel):
+    """编排器任务请求体"""
+    goal: str
+    task_id: Optional[str] = None
 
-        session_id = str(uuid.uuid4())
-        now = datetime.now().isoformat()
 
-        session = {
-            "session_id": session_id,
-            "title": "新对话",
-            "created_at": now,
-            "model": model,
-            "messages": []
-        }
-        self._store[session_id] = session
+# ==================== 内存中的会话存储 ====================
+sessions_store = {}
 
-        return {
-            "session_id": session_id,
-            "title": "新对话",
-            "created_at": now,
-            "model": model
-        }
 
-    def list_sessions(self) -> list:
-        """获取所有会话列表（按时间倒序）"""
-        result = []
-        for sid, data in self._store.items():
-            result.append({
-                "session_id": sid,
-                "title": data["title"],
-                "created_at": data["created_at"],
-                "model": data["model"]
-            })
-        result.sort(key=lambda x: x["created_at"], reverse=True)
-        return result
+# ==================== 后台定时任务 ====================
 
-    def get_session(self, session_id: str) -> Optional[dict]:
-        """获取指定会话的完整数据"""
-        return self._store.get(session_id)
+def run_scheduler():
+    """后台定时任务循环"""
+    while True:
+        try:
+            print("--- 开始执行周期性后台任务 ---")
+            if HAS_BACKGROUND_TASKS:
+                # 调用偏好分析器
+                preference_analyzer.analyze_and_update_preference()
+                # 调用记忆权重更新器
+                memory_weight_updater.update_memory_weights_from_feedback()
+            print("--- 周期性后台任务执行完毕 ---")
+        except Exception as e:
+            print(f"后台任务执行出错: {e}")
+        time.sleep(300)  # 5分钟
 
-    def add_message(self, session_id: str, role: str, content: str) -> bool:
-        """向指定会话添加一条消息"""
-        if session_id not in self._store:
-            return False
 
-        self._store[session_id]["messages"].append({
-            "role": role,
-            "content": content
+def start_background_scheduler():
+    """启动后台守护线程"""
+    bg_thread = threading.Thread(target=run_scheduler, daemon=True)
+    bg_thread.start()
+    print("🚀 后台偏好分析定时任务已启动")
+
+
+# 服务启动钩子
+@app.on_event("startup")
+async def init_app():
+    start_background_scheduler()
+
+
+# ==================== API 端点 ====================
+
+@app.get("/")
+async def root():
+    """根路径"""
+    return {
+        "status": "running",
+        "service": "AI 智能助手",
+        "version": "1.0.0",
+        "default_model": "deepseek-chat"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查"""
+    return {"status": "healthy"}
+
+
+# --- 聊天接口 ---
+
+@app.post("/v1/chat")
+async def chat(request: ChatRequest):
+    """聊天接口"""
+    user_msg = request.messages[-1]["content"]
+    
+    if USE_PIPELINE:
+        try:
+            user_id = "default_user"
+            pipeline = ChatPipeline(user_id=user_id)
+            result = pipeline.process(request.model, request.messages)
+            reply = result.get("reply", "抱歉，处理出错")
+        except Exception as e:
+            reply = f"处理出错: {str(e)}"
+    else:
+        try:
+            from app.core.llm_client import get_llm_response
+            reply = get_llm_response(
+                model=request.model,
+                messages=request.messages,
+                temperature=0.7
+            )
+        except ImportError:
+            reply = f"你刚才说：{user_msg}，我是AI，你好！"
+    
+    message_id = str(uuid.uuid4())
+    
+    if request.session_id and request.session_id in sessions_store:
+        session = sessions_store[request.session_id]
+        session["messages"].append(request.messages[-1])
+        session["messages"].append({"role": "assistant", "content": reply})
+        if len(session["messages"]) <= 2:
+            title = user_msg[:20]
+            session["title"] = title if title else "新对话"
+    
+    return {
+        "reply": reply,
+        "message_id": message_id
+    }
+
+
+# --- 会话管理 ---
+
+@app.post("/v1/sessions")
+async def create_session(model: str = "deepseek-chat"):
+    """创建新会话"""
+    session_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    sessions_store[session_id] = {
+        "session_id": session_id,
+        "title": "新对话",
+        "created_at": now,
+        "model": model,
+        "messages": []
+    }
+    return {"session_id": session_id, "created_at": now}
+
+
+@app.get("/v1/sessions")
+async def list_sessions():
+    """获取所有会话列表"""
+    result = []
+    for sid, data in sessions_store.items():
+        result.append({
+            "session_id": sid,
+            "title": data["title"],
+            "created_at": data["created_at"],
+            "model": data["model"]
         })
-
-        # 自动更新标题（取第一条用户消息的前20个字符）
-        if len(self._store[session_id]["messages"]) <= 2:
-            title = content[:20] if len(content) > 20 else content
-            self._store[session_id]["title"] = title
-
-        return True
-
-    def delete_session(self, session_id: str) -> bool:
-        """删除指定会话"""
-        if session_id in self._store:
-            del self._store[session_id]
-            return True
-        return False
-
-    def session_exists(self, session_id: str) -> bool:
-        """检查会话是否存在"""
-        return session_id in self._store
+    result.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"sessions": result}
 
 
-# 全局会话管理器实例
-session_manager = SessionManager()
+@app.get("/v1/sessions/{session_id}")
+async def get_session(session_id: str):
+    """获取特定会话"""
+    if session_id not in sessions_store:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return sessions_store[session_id]
 
 
-# ============================================================
-# 简易反馈存储
-# ============================================================
-feedback_store: Dict[str, dict] = {}
+@app.delete("/v1/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话"""
+    if session_id in sessions_store:
+        del sessions_store[session_id]
+        return {"status": "deleted", "session_id": session_id}
+    raise HTTPException(status_code=404, detail="会话不存在")
 
 
-# ============================================================
-# API 端点：模型列表
-# ============================================================
+# --- 模型列表 ---
+
 @app.get("/v1/models")
 async def list_models():
-    """返回支持的模型列表"""
+    """获取可用模型列表"""
     return {
         "models": [
             {"id": "deepseek-chat", "name": "DeepSeek Chat", "description": "快速、高性价比"},
             {"id": "gpt-4o", "name": "GPT-4o", "description": "多模态、高质量"},
             {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "description": "基础经济型"}
+        ],
+        "default": "deepseek-chat"
+    }
+
+
+# --- 记忆相关 ---
+
+@app.post("/v1/memory/add")
+async def add_memory(request: MemoryAddRequest):
+    """添加记忆"""
+    if memory_manager is None:
+        return {"status": "error", "message": "记忆模块尚未就绪"}
+    memory_manager.add_memory(
+        user_id=request.user_id,
+        content=request.content,
+        metadata=request.metadata
+    )
+    return {"status": "added"}
+
+
+@app.post("/v1/memory/search")
+async def search_memory(request: MemorySearchRequest):
+    """搜索记忆"""
+    if memory_manager is None:
+        return {"status": "error", "message": "记忆模块尚未就绪", "results": []}
+    results = memory_manager.search_memory(
+        user_id=request.user_id,
+        query=request.query,
+        top_k=request.top_k
+    )
+    return {"results": results}
+
+
+# --- 反馈 ---
+
+@app.post("/v1/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """提交用户反馈"""
+    print(f"[Feedback] message_id={request.message_id}, rating={request.rating}, comment={request.comment}")
+    if request.comment:
+        try:
+            from app.growth.feedback_processor import adjust_memory_weight
+            adjust_memory_weight(request.comment, request.rating)
+        except ImportError:
+            pass
+    return {"status": "received"}
+
+
+# --- 智能体 ---
+
+@app.post("/v1/agent/run")
+async def run_agent(request: AgentRequest):
+    """运行ReAct智能体"""
+    try:
+        from app.agents.react_agent import ReActAgent
+        agent = ReActAgent(
+            model="deepseek-chat",
+            max_turns=request.max_turns
+        )
+        result = agent.run(
+            task=request.task,
+            max_duration=request.max_duration
+        )
+        return {"result": result}
+    except ImportError:
+        return {"result": "智能体模块尚未就绪，请稍后再试"}
+
+
+@app.post("/v1/agent/orchestrate")
+async def orchestrate_task(request: OrchestrateRequest):
+    """通过编排器执行复杂任务，支持断点续传"""
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
+    result = orchestrator.run(
+        goal=request.goal,
+        task_id=request.task_id
+    )
+    return result
+
+
+# --- 任务状态查询 ---
+
+@app.get("/v1/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """查询任务执行状态"""
+    if get_task is None:
+        raise HTTPException(status_code=503, detail="任务存储模块尚未就绪")
+    
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    
+    response = {
+        "task_id": task.task_id,
+        "goal": task.goal,
+        "status": task.status,
+        "current_subtask": task.current_subtask,
+        "total_subtasks": len(task.subtasks),
+        "subtasks": task.subtasks,
+        "results": task.results if task.status == "completed" else None,
+        "final_answer": task.final_answer,
+        "error": task.error,
+        "created_at": task.created_at,
+        "cancelled": task.cancelled
+    }
+    
+    if len(task.subtasks) > 0:
+        response["progress_percent"] = round(
+            (task.current_subtask / len(task.subtasks)) * 100, 1
+        )
+    else:
+        response["progress_percent"] = 0
+    
+    return response
+
+
+@app.get("/v1/tasks")
+async def list_all_tasks():
+    """列出所有任务"""
+    if task_store is None:
+        return {"total": 0, "tasks": []}
+    
+    tasks = list(task_store.values())
+    return {
+        "total": len(tasks),
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "goal": t.goal[:50] + "..." if len(t.goal) > 50 else t.goal,
+                "status": t.status,
+                "progress": f"{t.current_subtask}/{len(t.subtasks)}",
+                "created_at": t.created_at
+            }
+            for t in tasks
         ]
     }
 
 
-# ============================================================
-# API 端点：会话管理
-# ============================================================
-@app.post("/v1/sessions")
-async def create_session(model: str = "deepseek-chat"):
-    """
-    创建新会话
-    返回 session_id 和创建时间
-    """
-    result = session_manager.create_session(model)
-    return {
-        "success": True,
-        "data": result
-    }
-
-
-@app.get("/v1/sessions")
-async def list_sessions():
-    """
-    获取所有会话列表
-    """
-    sessions = session_manager.list_sessions()
-    return {
-        "success": True,
-        "data": sessions,
-        "total": len(sessions)
-    }
-
-
-@app.get("/v1/sessions/{session_id}")
-async def get_session(session_id: str):
-    """
-    获取指定会话的完整详情（包含历史消息）
-    """
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    return {
-        "success": True,
-        "data": session
-    }
-
-
-@app.delete("/v1/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """
-    删除指定会话
-    """
-    if not session_manager.delete_session(session_id):
-        raise HTTPException(status_code=404, detail="会话不存在或已删除")
-    return {
-        "success": True,
-        "message": "会话已删除"
-    }
-
-
-# ============================================================
-# API 端点：聊天（非流式，支持 session_id）
-# ============================================================
-@app.post("/v1/chat")
-async def chat(request: ChatRequest):
-    """
-    发送消息并获取 AI 回复
-    如果提供了 session_id，消息会自动保存到对应会话
-    """
-    # 验证会话是否存在
-    if request.session_id and not session_manager.session_exists(request.session_id):
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    # 初始化聊天流水线
-    user_id = "default_user"  # 后续可从 Header 或请求体扩展
-    pipeline = ChatPipeline(user_id=user_id)
-
-    # 处理消息（调用你的核心逻辑）
-    result = pipeline.process(request.model, request.messages)
-
-    reply_content = result.get("reply", "")
-    message_id = str(uuid.uuid4())
-
-    # 如果提供了 session_id，保存对话历史
-    if request.session_id:
-        # 保存用户消息（取最后一条）
-        last_user_msg = request.messages[-1]
-        if last_user_msg["role"] == "user":
-            session_manager.add_message(
-                request.session_id,
-                "user",
-                last_user_msg["content"]
-            )
-
-        # 保存 AI 回复
-        session_manager.add_message(
-            request.session_id,
-            "assistant",
-            reply_content
-        )
-
-    return {
-        "reply": reply_content,
-        "message_id": message_id,
-        "session_id": request.session_id
-    }
-
-
-# ============================================================
-# API 端点：流式聊天（SSE）
-# ============================================================
-@app.post("/v1/chat/stream")
-async def chat_stream(request: ChatRequest):
-    """
-    流式聊天接口（Server-Sent Events）
-    实时返回 AI 生成的文本片段，支持打字机效果
-    """
-
-    # 验证会话是否存在
-    if request.session_id and not session_manager.session_exists(request.session_id):
-        raise HTTPException(status_code=404, detail="会话不存在")
-
-    async def event_generator():
-        """
-        SSE 事件生成器
-        逐个产出 text/event-stream 格式的数据
-        """
-        full_response = ""
-
-        # 发送开始事件
-        yield f"data: {json.dumps({'type': 'start', 'session_id': request.session_id}, ensure_ascii=False)}\n\n"
-
-        try:
-            # 初始化聊天流水线（获取完整回复）
-            user_id = "default_user"
-            pipeline = ChatPipeline(user_id=user_id)
-            result = pipeline.process(request.model, request.messages)
-            reply_content = result.get("reply", "")
-
-            # 模拟流式输出：逐字发送（每次 2-3 个字符）
-            i = 0
-            chunk_size = 3
-            while i < len(reply_content):
-                chunk = reply_content[i:i + chunk_size]
-                i += chunk_size
-                full_response += chunk
-                yield f"data: {json.dumps({'type': 'content', 'text': chunk}, ensure_ascii=False)}\n\n"
-
-            # 发送完成事件
-            yield f"data: {json.dumps({'type': 'done', 'full_response': full_response}, ensure_ascii=False)}\n\n"
-
-            # 如果有 session_id，保存对话
-            if request.session_id:
-                last_user_msg = request.messages[-1]
-                if last_user_msg["role"] == "user":
-                    session_manager.add_message(
-                        request.session_id,
-                        "user",
-                        last_user_msg["content"]
-                    )
-                session_manager.add_message(
-                    request.session_id,
-                    "assistant",
-                    full_response
-                )
-
-        except Exception as e:
-            # 发送错误事件
-            error_msg = f"流式输出错误: {str(e)}"
-            yield f"data: {json.dumps({'type': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲（部署时需要）
+# ⭐⭐⭐ 新增：任务取消端点 ⭐⭐⭐
+@app.post("/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """取消正在执行的任务"""
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    
+    task = task_store[task_id]
+    
+    # 检查任务是否已处于终态
+    if TaskStatus and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+        return {
+            "status": "warning",
+            "task_id": task_id,
+            "message": f"任务已处于终态: {task.status.value}，无需取消"
         }
-    )
-
-
-# ============================================================
-# API 端点：反馈
-# ============================================================
-@app.post("/v1/feedback")
-async def submit_feedback(feedback: FeedbackRequest):
-    """
-    提交消息反馈（点赞/踩）
-    """
-    feedback_store[feedback.message_id] = {
-        "rating": feedback.rating,
-        "comment": feedback.comment,
-        "message_id": feedback.message_id
-    }
-    print(f"[反馈] message_id={feedback.message_id}, rating={feedback.rating}, comment={feedback.comment}")
-
+    
+    # 标记取消
+    task.mark_cancelled()
+    
     return {
-        "success": True,
-        "message": "感谢您的反馈！"
+        "status": "cancelled",
+        "task_id": task_id,
+        "message": "任务已标记为取消，将在当前子任务完成后停止"
     }
 
 
-# ============================================================
-# 健康检查
-# ============================================================
-@app.get("/health")
-async def health_check():
-    """健康检查端点"""
-    return {
-        "status": "ok",
-        "service": "AI 智能助手",
-        "version": "1.0.0"
-    }
+@app.delete("/v1/tasks/{task_id}")
+async def delete_task(task_id: str):
+    """删除任务记录"""
+    if task_id in task_store:
+        del task_store[task_id]
+        return {"status": "deleted", "task_id": task_id}
+    raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
 
-# ============================================================
-# 启动服务器
-# ============================================================
+# ==================== 启动入口 ====================
+
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🚀 AI 智能助手后端启动中...")
-    print(f"📡 API 文档: http://0.0.0.0:8000/docs")
-    print(f"🔍 Swagger: http://0.0.0.0:8000/redoc")
-    print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=8000)

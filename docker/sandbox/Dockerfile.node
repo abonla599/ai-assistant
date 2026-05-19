@@ -1,0 +1,13 @@
+FROM node:18-slim
+
+# 创建非 root 用户 sandbox
+RUN useradd -m sandbox && \
+    chown -R sandbox:sandbox /home/sandbox
+
+# 创建临时工作目录
+RUN mkdir -p /home/sandbox/tmp && chown sandbox:sandbox /home/sandbox/tmp
+
+WORKDIR /home/sandbox
+USER sandbox
+
+CMD ["bash"]
