@@ -1,5 +1,6 @@
 import sys
 import os
+import uuid
 import threading
 import time
 import auto_weight_adjuster
@@ -96,22 +97,29 @@ async def submit_feedback(feedback: FeedbackRequest):
             "message": f"提交失败: {str(e)}"
         }
 
+# 添加项目根目录到路径，以便能够导入 app 模块
+# 假设目录结构为: ai-assistant/backend/app/main.py
+# 那么根目录是 ai-assistant/backend/ 或者 ai-assistant/
+# 这里根据你原有的 sys.path 调整，确保能找到 app 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ---------------------- 本地直接运行入口 ----------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
 import uvicorn
-import uuid
-from datetime import datetime
 
 # ==================== 创建 FastAPI 应用实例 ====================
 app = FastAPI(title="AI 智能助手")
 
 # ==================== 导入核心模块 ====================
+
+# 导入后台任务相关模块 (修正为绝对导入)
+try:
+    from app import preference_analyzer
+    from app import memory_weight_updater
+    HAS_BACKGROUND_TASKS = True
+except ImportError as e:
+    print(f"警告: 后台任务模块导入失败: {e}")
+    HAS_BACKGROUND_TASKS = False
 
 # 导入 ChatPipeline（来自 develop 分支）
 try:
@@ -187,6 +195,37 @@ class OrchestrateRequest(BaseModel):
 
 # ==================== 内存中的会话存储 ====================
 sessions_store = {}
+
+
+# ==================== 后台定时任务 ====================
+
+def run_scheduler():
+    """后台定时任务循环"""
+    while True:
+        try:
+            print("--- 开始执行周期性后台任务 ---")
+            if HAS_BACKGROUND_TASKS:
+                # 调用偏好分析器
+                preference_analyzer.analyze_and_update_preference()
+                # 调用记忆权重更新器
+                memory_weight_updater.update_memory_weights_from_feedback()
+            print("--- 周期性后台任务执行完毕 ---")
+        except Exception as e:
+            print(f"后台任务执行出错: {e}")
+        time.sleep(300)  # 5分钟
+
+
+def start_background_scheduler():
+    """启动后台守护线程"""
+    bg_thread = threading.Thread(target=run_scheduler, daemon=True)
+    bg_thread.start()
+    print("🚀 后台偏好分析定时任务已启动")
+
+
+# 服务启动钩子
+@app.on_event("startup")
+async def init_app():
+    start_background_scheduler()
 
 
 # ==================== API 端点 ====================
