@@ -29,7 +29,7 @@ class AddMemoryRequest(BaseModel):
 
 class SearchMemoryRequest(BaseModel):
     """搜索记忆请求"""
-    user_id: str = Field(..., description="用户ID", example="user_001")
+    user_id: str = Field(..., description="用户ID", json_schema_extra={"example": "user_001"})
     query: str = Field(..., description="搜索查询", example="用户叫什么名字")
     top_k: int = Field(default=3, description="返回结果数量", ge=1, le=20)
 

@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: ai-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env          # 确保 .env 里有 API Key 等配置
+    volumes:
+      - ./chroma_data:/app/chroma_data   # 持久化向量数据库
+    depends_on:
+      - chroma
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: ai-chroma
+    volumes:
+      - ./chroma_data:/chroma/chroma
+    ports:
+      - "8001:8000"      # 可选，调试时暴露
+    restart: unless-stopped
