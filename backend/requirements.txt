@@ -11,7 +11,7 @@ click==8.3.3
 colorama==0.4.6
 distro==1.9.0
 durationpy==0.10
-fastapi==0.111.0
+fastapi>=0.115.0,<0.140.0
 filelock==3.29.0
 flatbuffers==25.12.19
 fsspec==2024.6.1
