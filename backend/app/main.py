@@ -3,8 +3,99 @@ import os
 import uuid
 import threading
 import time
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+import auto_weight_adjuster
+import tool_calling 
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from . import preference_analyzer
+import memory_weight_updater
+
+from backend.app.feedback_storage import save_feedback
+from backend.app.preference_analyzer import analyze_and_update_preference
+
+# 创建FastAPI应用
+app = FastAPI(title="AI 智能助手")
+
+# ---------------------- 数据模型定义（解决422参数错误） ----------------------
+class ChatRequest(BaseModel):
+    model: str
+    messages: list[dict]
+
+
+class FeedbackRequest(BaseModel):
+    message_id: str
+    rating: int
+    comment: str
+
+
+# ---------------------- 后台定时偏好分析任务（不阻塞主线程） ----------------------
+def run_scheduler():
+    while True:
+        try:
+            analyze_and_update_preference()
+            print("✅ 定时用户偏好分析执行完成")
+        except Exception as e:
+            print(f"❌ 后台定时任务出错: {e}")
+        # 每5分钟(300秒)执行一次
+        time.sleep(300)
+
+
+import memory_weight_updater  # 需要添加到文件开头的导入区域
+
+def start_background_scheduler():
+    # 守护线程，主服务关闭自动跟着退出
+    bg_thread = threading.Thread(target=run_scheduler, daemon=True)
+    bg_thread.start()
+    print("🚀 后台偏好分析定时任务已启动")
+
+def start_background_scheduler():
+    def run_scheduler():
+        while True:
+            try:
+                print("--- 开始执行周期性后台任务 ---")
+                preference_analyzer.analyze_and_update_preference()
+                memory_weight_updater.update_memory_weights_from_feedback()
+                print("--- 周期性后台任务执行完毕 ---")
+            except Exception as e:
+                print(f"后台任务执行出错: {e}")
+            time.sleep(300)
+    # 启动周期性任务线程
+    thread = threading.Thread(target=run_scheduler, daemon=True)
+    thread.start()
+    print("🚀 后台偏好分析器已启动，将每5分钟运行一次。")
+
+    # 启动反馈文件监听器（关键！）
+    watcher_thread = threading.Thread(target=auto_weight_adjuster.start_feedback_watcher, daemon=True)
+    watcher_thread.start()
+    print("🔁 实时反馈闭环监听器已启动！")
+
+
+# 服务启动钩子，服务完全就绪后再开启后台任务
+@app.on_event("startup")
+async def init_app():
+    start_background_scheduler()
+
+
+@app.post("/v1/feedback")
+async def submit_feedback(feedback: FeedbackRequest):
+    try:
+        # 调用保存反馈的函数
+        save_feedback(feedback.message_id, feedback.rating, feedback.comment)
+        return {
+            "code": 200,
+            "status": "success",
+            "message": "反馈提交成功"
+        }
+    except Exception as e:
+        print(f"反馈保存异常: {e}")
+        return {
+            "code": 500,
+            "status": "error",
+            "message": f"提交失败: {str(e)}"
+        }
 
 # 添加项目根目录到路径，以便能够导入 app 模块
 # 假设目录结构为: ai-assistant/backend/app/main.py
@@ -154,48 +245,6 @@ async def root():
 async def health_check():
     """健康检查"""
     return {"status": "healthy"}
-
-
-# --- 聊天接口 ---
-
-@app.post("/v1/chat")
-async def chat(request: ChatRequest):
-    """聊天接口"""
-    user_msg = request.messages[-1]["content"]
-    
-    if USE_PIPELINE:
-        try:
-            user_id = "default_user"
-            pipeline = ChatPipeline(user_id=user_id)
-            result = pipeline.process(request.model, request.messages)
-            reply = result.get("reply", "抱歉，处理出错")
-        except Exception as e:
-            reply = f"处理出错: {str(e)}"
-    else:
-        try:
-            from app.core.llm_client import get_llm_response
-            reply = get_llm_response(
-                model=request.model,
-                messages=request.messages,
-                temperature=0.7
-            )
-        except ImportError:
-            reply = f"你刚才说：{user_msg}，我是AI，你好！"
-    
-    message_id = str(uuid.uuid4())
-    
-    if request.session_id and request.session_id in sessions_store:
-        session = sessions_store[request.session_id]
-        session["messages"].append(request.messages[-1])
-        session["messages"].append({"role": "assistant", "content": reply})
-        if len(session["messages"]) <= 2:
-            title = user_msg[:20]
-            session["title"] = title if title else "新对话"
-    
-    return {
-        "reply": reply,
-        "message_id": message_id
-    }
 
 
 # --- 会话管理 ---
@@ -435,3 +484,30 @@ async def delete_task(task_id: str):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ---------------------- 核心业务API接口 ----------------------
+# 聊天对话接口
+@app.post("/v1/chat")
+async def chat(request: ChatRequest):
+    from tool_calling import llm_with_tools, get_current_time
+    import json
+    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+    lc_messages = []
+    for msg in request.messages:
+        if msg["role"] == "user":
+            lc_messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            lc_messages.append(AIMessage(content=msg.get("content", "")))
+
+    response = llm_with_tools.invoke(lc_messages)
+    if response.tool_calls:
+        tool_results = []
+        for tool_call in response.tool_calls:
+            if tool_call["name"] == "get_current_time":
+                result = get_current_time()
+                tool_results.append(ToolMessage(content=json.dumps({"result": result}), tool_call_id=tool_call["id"]))
+        final_response = llm_with_tools.invoke(lc_messages + [response] + tool_results)
+        return {"reply": final_response.content}
+    else:
+        return {"reply": response.content}
