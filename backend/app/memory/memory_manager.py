@@ -1,5 +1,6 @@
 import os
 import uuid
+import traceback
 import chromadb
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -14,41 +15,57 @@ class MemoryManager:
     """记忆管理器：负责存储和检索用户记忆"""
 
     def __init__(self, collection_name="user_memories", persist_dir="./chroma_db"):
-        self.use_local_embed = False
-        api_key = os.getenv("api_key")
+        try:
+            self.use_local_embed = False
+            self._dummy_embed = False   # 伪嵌入标记
+            api_key = os.getenv("api_key")
 
-        if api_key:
-            try:
-                self.client = OpenAI(
-                    api_key=api_key,
-                    base_url="https://api.apiyi.com/v1"
-                )
-                self.embed_model = "text-embedding-3-small"
-                # 验证 API 是否可用
-                self.client.embeddings.create(model=self.embed_model, input=["test"])
-                print("✅ 使用 OpenAI 嵌入模型")
-            except Exception as e:
-                print(f"⚠️ OpenAI 嵌入初始化失败: {e}，降级为本地嵌入模型")
+            if api_key:
+                try:
+                    self.client = OpenAI(
+                        api_key=api_key,
+                        base_url="https://api.apiyi.com/v1"
+                    )
+                    self.embed_model = "text-embedding-3-small"
+                    # 验证 API 是否可用
+                    self.client.embeddings.create(model=self.embed_model, input=["test"])
+                    print("✅ 使用 OpenAI 嵌入模型")
+                except Exception as e:
+                    print(f"⚠️ OpenAI 嵌入不可用: {e}，尝试本地模型")
+                    self._init_local_embed()
+            else:
+                print("⚠️ 未配置 api_key，尝试本地模型")
                 self._init_local_embed()
-        else:
-            print("⚠️ 未配置 api_key，降级为本地嵌入模型")
-            self._init_local_embed()
 
-        self.chroma_client = chromadb.PersistentClient(path=persist_dir)
-        self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
-        print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {'本地' if self.use_local_embed else '云端'})")
+            self.chroma_client = chromadb.PersistentClient(path=persist_dir)
+            self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
+
+            mode = "云端" if not (self.use_local_embed or self._dummy_embed) else ("本地" if self.use_local_embed else "伪嵌入")
+            print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {mode})")
+        except Exception as e:
+            print("❌ MemoryManager 初始化失败，详细异常如下：")
+            traceback.print_exc()
+            raise e
 
     def _init_local_embed(self):
-        """初始化本地嵌入模型（无需 API key）"""
-        from sentence_transformers import SentenceTransformer
-        # all-MiniLM-L6-v2 是轻量模型，适合 CI 环境
-        self.local_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.embed_model = "local"
-        self.use_local_embed = True
+        """初始化本地嵌入模型（无需 API key），失败则降级为伪嵌入"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.local_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.embed_model = "local"
+            self.use_local_embed = True
+            print("✅ 使用本地嵌入模型")
+        except Exception as e:
+            print(f"⚠️ 本地模型加载失败: {e}，将使用伪嵌入（全零向量）")
+            self.embed_model = "dummy"
+            self._dummy_embed = True
+            self._dummy_embed_dim = 384   # 保持与常见模型一致的维度
 
     def _embed(self, text: str) -> list:
         if self.use_local_embed:
             return self.local_model.encode(text).tolist()
+        elif self._dummy_embed:
+            return [0.0] * self._dummy_embed_dim
         else:
             response = self.client.embeddings.create(
                 model=self.embed_model,
@@ -57,8 +74,9 @@ class MemoryManager:
             return response.data[0].embedding
 
     def _summarize(self, text: str, max_length: int = 100) -> str:
-        if self.use_local_embed:
-            return text[:max_length]  # 本地模式不支持摘要，直接截断
+        # 本地模型或伪嵌入模式不支持摘要，直接截断
+        if self.use_local_embed or self._dummy_embed:
+            return text[:max_length]
         if len(text) <= max_length:
             return text
         try:
@@ -79,7 +97,7 @@ class MemoryManager:
 
     def add_memory(self, user_id: str, content: str, metadata: dict = None,
                    summarize: bool = False) -> str:
-        if summarize and not self.use_local_embed:
+        if summarize and not (self.use_local_embed or self._dummy_embed):
             content = self._summarize(content)
         else:
             content = content[:200]
@@ -103,7 +121,7 @@ class MemoryManager:
         print(f"📝 记忆已添加: [{user_id}] {content[:50]}...")
         return mem_id
 
-    # 以下方法保持不变（你原有代码）
+    # 以下方法保持不变
     def search_memory(self, user_id: str, query: str, top_k: int = 5) -> list:
         query_embed = self._embed(query)
         results = self.collection.query(
