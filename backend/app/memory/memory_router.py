@@ -107,90 +107,95 @@ class UpdateMemoryRequest(BaseModel):
     new_weight: Optional[float] = Field(None, ge=0.1, le=5.0)
 
 
+# ---------- 辅助函数 ----------
+def safe_call(real_method, fake_method, *args, **kwargs):
+    """如果 real_method 可用且不抛异常则调用，否则调用 fake_method"""
+    if memory_manager is not None:
+        try:
+            return real_method(*args, **kwargs)
+        except Exception:
+            pass  # 回退到 fake_store
+    return fake_method(*args, **kwargs)
+
+
 # ---------- API 端点 ----------
 
 @router.post("/add")
 async def add_memory(req: AddMemoryRequest):
-    try:
-        if memory_manager is not None:
-            try:
-                mem_id = memory_manager.add_memory(
-                    user_id=req.user_id,
-                    content=req.content,
-                    metadata=req.metadata,
-                    summarize=req.summarize
-                )
-            except Exception as e:
-                mem_id = fake_store.add(req.user_id, req.content, req.metadata)
-        else:
-            mem_id = fake_store.add(req.user_id, req.content, req.metadata)
-        return {"status": "success", "message": "记忆添加成功", "memory_id": mem_id}
-    except Exception as e:
-        return {"status": "success", "memory_id": str(uuid.uuid4())}
+    def real_add():
+        return memory_manager.add_memory(
+            user_id=req.user_id,
+            content=req.content,
+            metadata=req.metadata,
+            summarize=req.summarize
+        )
+
+    def fake_add():
+        return fake_store.add(req.user_id, req.content, req.metadata)
+
+    mem_id = safe_call(real_add, fake_add)
+    return {"status": "success", "message": "记忆添加成功", "memory_id": mem_id}
 
 
 @router.post("/search")
 async def search_memory(req: SearchMemoryRequest):
-    try:
-        if memory_manager is not None:
-            try:
-                results = memory_manager.search_memory(req.user_id, req.query, req.top_k)
-                formatted = []
-                for doc, distance, meta in results:
-                    formatted.append({
-                        "content": doc,
-                        "relevance_score": round(1 - distance, 4) if distance else 0,
-                        "distance": round(distance, 4) if distance else 0,
-                        "weight": meta.get("weight", 1.0),
-                        "metadata": meta
-                    })
-            except Exception:
-                formatted = fake_store.search(req.user_id, req.query, req.top_k)
-        else:
-            formatted = fake_store.search(req.user_id, req.query, req.top_k)
-        return {
-            "status": "success",
-            "query": req.query,
-            "total_results": len(formatted),
-            "results": formatted
-        }
-    except Exception:
-        return {"status": "success", "query": req.query, "total_results": 0, "results": []}
+    def real_search():
+        raw = memory_manager.search_memory(req.user_id, req.query, req.top_k)
+        formatted = []
+        for doc, distance, meta in raw:
+            formatted.append({
+                "content": doc,
+                "relevance_score": round(1 - distance, 4) if distance else 0,
+                "distance": round(distance, 4) if distance else 0,
+                "weight": meta.get("weight", 1.0),
+                "metadata": meta
+            })
+        return formatted
+
+    def fake_search():
+        return fake_store.search(req.user_id, req.query, req.top_k)
+
+    results = safe_call(real_search, fake_search)
+    return {
+        "status": "success",
+        "query": req.query,
+        "total_results": len(results),
+        "results": results
+    }
 
 
 @router.delete("/delete")
 async def delete_memories(req: DeleteMemoryRequest):
-    try:
-        deleted = 0
-        if memory_manager is not None:
-            try:
-                result = memory_manager.delete_memories_batch(req.memory_ids)
-                if "error" not in result:
-                    deleted = result.get("count", 0)
-            except:
-                deleted = fake_store.delete_batch(req.memory_ids)
-        else:
-            deleted = fake_store.delete_batch(req.memory_ids)
-        return {"status": "success", "message": f"已删除 {deleted} 条记忆", "deleted_count": deleted}
-    except:
-        return {"status": "success", "deleted_count": 0}
+    def real_delete():
+        result = memory_manager.delete_memories_batch(req.memory_ids)
+        if "error" in result:
+            return 0
+        return result.get("count", 0)
+
+    def fake_delete():
+        return fake_store.delete_batch(req.memory_ids)
+
+    deleted = safe_call(real_delete, fake_delete)
+    return {
+        "status": "success",
+        "message": f"已删除 {deleted} 条记忆",
+        "deleted_count": deleted
+    }
 
 
 @router.put("/update")
 async def update_memory(req: UpdateMemoryRequest):
-    try:
-        if memory_manager is not None:
-            try:
-                result = memory_manager.update_memory(req.memory_id, req.new_content, req.new_weight)
-                if "error" in result:
-                    fake_store.update(req.memory_id, req.new_content, req.new_weight)
-            except:
-                fake_store.update(req.memory_id, req.new_content, req.new_weight)
-        else:
-            fake_store.update(req.memory_id, req.new_content, req.new_weight)
-        return {"status": "success", "message": "记忆更新成功"}
-    except:
-        return {"status": "success", "message": "记忆更新成功（降级）"}
+    def real_update():
+        result = memory_manager.update_memory(req.memory_id, req.new_content, req.new_weight)
+        if "error" in result:
+            return False
+        return True
+
+    def fake_update():
+        return fake_store.update(req.memory_id, req.new_content, req.new_weight)
+
+    ok = safe_call(real_update, fake_update)
+    return {"status": "success", "message": "记忆更新成功" if ok else "记忆不存在"}
 
 
 @router.post("/decay")
@@ -198,44 +203,40 @@ async def decay_memories(
     user_id: str = Query(...),
     decay_factor: float = Query(0.95)
 ):
-    try:
-        if memory_manager is not None:
-            try:
-                memory_manager.decay_weights(user_id, decay_factor)
-            except:
-                fake_store.decay(user_id, decay_factor)
-        else:
-            fake_store.decay(user_id, decay_factor)
-        return {"status": "success", "message": f"用户 {user_id} 的记忆权重已衰减"}
-    except:
-        return {"status": "success", "message": "衰减操作已记录（降级）"}
+    def real_decay():
+        memory_manager.decay_weights(user_id, decay_factor)
+
+    def fake_decay():
+        fake_store.decay(user_id, decay_factor)
+
+    safe_call(real_decay, fake_decay)  # 忽略返回值
+    return {"status": "success", "message": f"用户 {user_id} 的记忆权重已衰减"}
 
 
 @router.get("/list/{user_id}")
 async def list_user_memories(user_id: str, limit: int = 20):
-    try:
-        if memory_manager is not None:
-            try:
-                memories = memory_manager.get_user_memories(user_id, limit)
-            except:
-                memories = fake_store.list(user_id, limit)
-        else:
-            memories = fake_store.list(user_id, limit)
-        return {"status": "success", "user_id": user_id, "total": len(memories), "memories": memories}
-    except:
-        return {"status": "success", "user_id": user_id, "total": 0, "memories": []}
+    def real_list():
+        return memory_manager.get_user_memories(user_id, limit)
+
+    def fake_list():
+        return fake_store.list(user_id, limit)
+
+    memories = safe_call(real_list, fake_list)
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "total": len(memories),
+        "memories": memories
+    }
 
 
 @router.get("/stats")
 async def get_stats():
-    try:
-        if memory_manager is not None:
-            try:
-                stats = memory_manager.get_collection_stats()
-            except:
-                stats = fake_store.stats()
-        else:
-            stats = fake_store.stats()
-        return {"status": "success", **stats}
-    except:
-        return {"status": "success", "collection_name": "unknown", "total_memories": 0}
+    def real_stats():
+        return memory_manager.get_collection_stats()
+
+    def fake_stats():
+        return fake_store.stats()
+
+    stats = safe_call(real_stats, fake_stats)
+    return {"status": "success", **stats}
