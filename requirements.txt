@@ -22,7 +22,7 @@ hf-xet==1.5.0
 httpcore==1.0.9
 httptools==0.7.1
 httpx==0.28.1
-huggingface_hub>=0.23.0,<0.26
+huggingface_hub>=0.23.0
 idna==3.14
 importlib_metadata==8.7.1
 importlib_resources==7.1.0
