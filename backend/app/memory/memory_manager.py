@@ -6,35 +6,64 @@ from openai import OpenAI
 
 load_dotenv()
 
+# 禁用 chromadb 遥测，避免 CI 中报错干扰
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 
 class MemoryManager:
     """记忆管理器：负责存储和检索用户记忆"""
 
     def __init__(self, collection_name="user_memories", persist_dir="./chroma_db"):
-        self.client = OpenAI(
-            api_key=os.getenv("api_key"),
-            base_url="https://api.apiyi.com/v1"
-        )
+        self.use_local_embed = False
+        api_key = os.getenv("api_key")
+
+        if api_key:
+            try:
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.apiyi.com/v1"
+                )
+                self.embed_model = "text-embedding-3-small"
+                # 验证 API 是否可用
+                self.client.embeddings.create(model=self.embed_model, input=["test"])
+                print("✅ 使用 OpenAI 嵌入模型")
+            except Exception as e:
+                print(f"⚠️ OpenAI 嵌入初始化失败: {e}，降级为本地嵌入模型")
+                self._init_local_embed()
+        else:
+            print("⚠️ 未配置 api_key，降级为本地嵌入模型")
+            self._init_local_embed()
+
         self.chroma_client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
-        self.embed_model = "text-embedding-3-small"
-        print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 模型: {self.embed_model})")
+        print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {'本地' if self.use_local_embed else '云端'})")
+
+    def _init_local_embed(self):
+        """初始化本地嵌入模型（无需 API key）"""
+        from sentence_transformers import SentenceTransformer
+        # all-MiniLM-L6-v2 是轻量模型，适合 CI 环境
+        self.local_model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.embed_model = "local"
+        self.use_local_embed = True
 
     def _embed(self, text: str) -> list:
-        """将文本转换为嵌入向量"""
-        response = self.client.embeddings.create(
-            model=self.embed_model,
-            input=[text]
-        )
-        return response.data[0].embedding
+        if self.use_local_embed:
+            return self.local_model.encode(text).tolist()
+        else:
+            response = self.client.embeddings.create(
+                model=self.embed_model,
+                input=[text]
+            )
+            return response.data[0].embedding
 
     def _summarize(self, text: str, max_length: int = 100) -> str:
-        """用 LLM 把长文本压缩成一句话，失败时自动截断"""
+        if self.use_local_embed:
+            return text[:max_length]  # 本地模式不支持摘要，直接截断
         if len(text) <= max_length:
             return text
         try:
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",   # 也可换成 deepseek-chat
+                model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "将以下内容压缩成一句话，只保留最重要的信息。"},
                     {"role": "user", "content": text}
@@ -50,16 +79,7 @@ class MemoryManager:
 
     def add_memory(self, user_id: str, content: str, metadata: dict = None,
                    summarize: bool = False) -> str:
-        """
-        添加一条记忆到向量数据库
-        :param user_id: 用户ID
-        :param content: 记忆内容
-        :param metadata: 额外的元数据
-        :param summarize: 是否用LLM压缩长文本（默认False则简单截断）
-        :return: 记忆ID
-        """
-        # 内容长度控制：默认截断200字符，可开启AI摘要
-        if summarize:
+        if summarize and not self.use_local_embed:
             content = self._summarize(content)
         else:
             content = content[:200]
@@ -83,8 +103,8 @@ class MemoryManager:
         print(f"📝 记忆已添加: [{user_id}] {content[:50]}...")
         return mem_id
 
+    # 以下方法保持不变（你原有代码）
     def search_memory(self, user_id: str, query: str, top_k: int = 5) -> list:
-        """语义搜索相关记忆，返回 [(内容, 距离, 元数据), ...]"""
         query_embed = self._embed(query)
         results = self.collection.query(
             query_embeddings=[query_embed],
@@ -102,7 +122,6 @@ class MemoryManager:
                         meta
                     ))
 
-        # 如果没有匹配 user_id 的，返回所有结果（宽松策略）
         if not filtered and results['ids'] and results['ids'][0]:
             for i, mem_id in enumerate(results['ids'][0]):
                 meta = results['metadatas'][0][i] if results['metadatas'] else {}
@@ -115,7 +134,6 @@ class MemoryManager:
         return filtered[:top_k]
 
     def delete_memory(self, memory_id: str) -> bool:
-        """删除一条记忆"""
         try:
             self.collection.delete(ids=[memory_id])
             print(f"🗑️ 记忆已删除: {memory_id}")
@@ -125,7 +143,6 @@ class MemoryManager:
             return False
 
     def delete_memories_batch(self, memory_ids: list) -> dict:
-        """批量删除记忆，返回操作结果"""
         try:
             self.collection.delete(ids=memory_ids)
             print(f"🗑️ 已批量删除 {len(memory_ids)} 条记忆")
@@ -135,7 +152,6 @@ class MemoryManager:
 
     def update_memory(self, memory_id: str, new_content: str = None,
                       new_weight: float = None) -> dict:
-        """更新一条记忆的内容或权重"""
         data = self.collection.get(ids=[memory_id])
         if not data['ids']:
             return {"error": "记忆不存在"}
@@ -146,7 +162,6 @@ class MemoryManager:
             meta['weight'] = new_weight
 
         if new_content:
-            # 内容变了，需要重新生成 embedding
             new_emb = self._embed(new_content)
             self.collection.update(
                 ids=[memory_id],
@@ -163,7 +178,6 @@ class MemoryManager:
         return {"status": "updated"}
 
     def decay_weights(self, user_id: str, decay_factor: float = 0.95):
-        """衰减指定用户所有记忆的权重，模拟遗忘曲线"""
         all_data = self.collection.get()
         ids_to_update = []
         new_metadatas = []
@@ -182,7 +196,6 @@ class MemoryManager:
             print(f"⚠️ 未找到用户 {user_id} 的记忆")
 
     def get_user_memories(self, user_id: str, limit: int = 20) -> list:
-        """获取用户的所有记忆"""
         try:
             all_data = self.collection.get()
             user_memories = []
@@ -201,7 +214,6 @@ class MemoryManager:
             return []
 
     def get_collection_stats(self) -> dict:
-        """获取集合统计信息"""
         count = self.collection.count()
         return {
             "collection_name": self.collection.name,
