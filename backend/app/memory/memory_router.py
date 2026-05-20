@@ -1,19 +1,26 @@
+import os
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from app.memory.memory_manager import MemoryManager
 import uuid
+from app.memory.memory_manager import MemoryManager
 
 router = APIRouter(prefix="/v1/memory", tags=["记忆管理"])
 
-# 实例化记忆管理器（单例）
-try:
-    memory_manager = MemoryManager()
-except Exception as e:
-    memory_manager = None
-    print(f"❌ 记忆管理器初始化完全失败: {e}")
+# ---------- 根据环境决定是否使用真实 MemoryManager ----------
+force_fake = os.getenv("CI", "").lower() == "true" or os.getenv("USE_FAKE_STORE", "").lower() == "true"
 
-# 用于 CI 环境的简易内存存储（始终创建，作为后备）
+if force_fake:
+    print("🔧 CI/强制模拟存储模式，使用内存存储")
+    memory_manager = None
+else:
+    try:
+        memory_manager = MemoryManager()
+    except Exception as e:
+        memory_manager = None
+        print(f"❌ MemoryManager 初始化失败，使用模拟存储: {e}")
+
+# ---------- 用于 CI 环境的简易内存存储（始终创建） ----------
 class FakeMemoryStore:
     def __init__(self):
         self.memories = {}  # {memory_id: {content, user_id, metadata}}
@@ -82,7 +89,7 @@ class FakeMemoryStore:
 fake_store = FakeMemoryStore()  # 始终可用
 
 
-# ============ 请求体模型 ============
+# ---------- 请求体模型 ----------
 class AddMemoryRequest(BaseModel):
     user_id: str = Field(..., description="用户ID", json_schema_extra={"example": "user_001"})
     content: str = Field(..., description="记忆内容", json_schema_extra={"example": "我叫张三，今年25岁"})
@@ -109,7 +116,7 @@ class UpdateMemoryRequest(BaseModel):
 
 # ---------- 辅助函数 ----------
 def safe_call(real_method, fake_method, *args, **kwargs):
-    """如果 real_method 可用且不抛异常则调用，否则调用 fake_method"""
+    """如果 memory_manager 可用且不抛异常则调用，否则调用 fake_method"""
     if memory_manager is not None:
         try:
             return real_method(*args, **kwargs)
@@ -209,7 +216,7 @@ async def decay_memories(
     def fake_decay():
         fake_store.decay(user_id, decay_factor)
 
-    safe_call(real_decay, fake_decay)  # 忽略返回值
+    safe_call(real_decay, fake_decay)
     return {"status": "success", "message": f"用户 {user_id} 的记忆权重已衰减"}
 
 

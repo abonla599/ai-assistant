@@ -3,11 +3,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# 将 backend 目录添加到 Python 路径（蒋厚宇的路径设置）
+# 将 backend 目录添加到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# 如果需要更上层目录，可以再加一行（张恒旭原来有 sys.path.insert(0, ...)，但我们现在用统一的方式）
-# 实际上张恒旭的某些导入可能需要从 backend 目录开始，用 app.xxx 即可
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -21,15 +18,13 @@ import time
 # --- 导入记忆路由（蒋厚宇）---
 from app.memory.memory_router import router as memory_router
 
-# --- 张恒旭的模块（根据实际结构调整）---
-# 假设 feedback_storage, preference_analyzer, memory_weight_updater, auto_weight_adjuster 都在 app.xxx 下
+# --- 张恒旭的模块 ---
 try:
     from app.growth.feedback_storage import save_feedback
     from app.growth.preference_analyzer import analyze_and_update_preference
     import app.growth.memory_weight_updater as memory_weight_updater
     import app.growth.auto_weight_adjuster as auto_weight_adjuster
 except ImportError:
-    # 如果路径不对，尝试原样导入（可能会失败，但先保留）
     try:
         from backend.app.feedback_storage import save_feedback
         from backend.app.preference_analyzer import analyze_and_update_preference
@@ -42,7 +37,7 @@ except ImportError:
         memory_weight_updater = None
         auto_weight_adjuster = None
 
-# --- 智能体、管道、记忆管理器（蒋厚宇）---
+# --- 智能体、管道 ---
 try:
     from app.core.llm_client import get_llm_response
     from app.pipeline import ChatPipeline
@@ -63,12 +58,6 @@ except ImportError:
     get_task = None
     TaskStatus = None
 
-try:
-    from app.memory.memory_manager import MemoryManager
-    memory_manager = MemoryManager()
-except ImportError:
-    memory_manager = None
-
 
 # ==================== 创建 FastAPI 应用实例 ====================
 app = FastAPI(
@@ -77,28 +66,15 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 注册记忆管理路由
+# 注册记忆管理路由（包含 /v1/memory/add、/v1/memory/search 等所有记忆端点）
 app.include_router(memory_router)
 
 
 # ==================== 数据模型定义 ====================
 class ChatRequest(BaseModel):
-    """聊天请求体"""
     model: str = "deepseek-chat"
     messages: list[dict]
     session_id: Optional[str] = None
-
-
-class MemoryAddRequest(BaseModel):
-    user_id: str
-    content: str
-    metadata: Optional[dict] = None
-
-
-class MemorySearchRequest(BaseModel):
-    user_id: str
-    query: str
-    top_k: int = 5
 
 
 class FeedbackRequest(BaseModel):
@@ -137,19 +113,16 @@ def run_scheduler():
         time.sleep(300)
 
 def start_background_scheduler():
-    # 守护线程，主服务关闭自动跟着退出
     bg_thread = threading.Thread(target=run_scheduler, daemon=True)
     bg_thread.start()
     print("🚀 后台偏好分析器已启动，将每5分钟运行一次。")
 
-    # 启动反馈文件监听器（张恒旭的自动权重调整）
     if auto_weight_adjuster:
         watcher_thread = threading.Thread(target=auto_weight_adjuster.start_feedback_watcher, daemon=True)
         watcher_thread.start()
         print("🔁 实时反馈闭环监听器已启动！")
 
 
-# 服务启动钩子
 @app.on_event("startup")
 async def init_app():
     start_background_scheduler()
@@ -267,32 +240,7 @@ async def list_models():
     }
 
 
-# --- 记忆相关 ---
-@app.post("/v1/memory/add")
-async def add_memory(request: MemoryAddRequest):
-    if memory_manager is None:
-        return {"status": "error", "message": "记忆模块尚未就绪"}
-    memory_manager.add_memory(
-        user_id=request.user_id,
-        content=request.content,
-        metadata=request.metadata
-    )
-    return {"status": "added"}
-
-
-@app.post("/v1/memory/search")
-async def search_memory(request: MemorySearchRequest):
-    if memory_manager is None:
-        return {"status": "error", "message": "记忆模块尚未就绪", "results": []}
-    results = memory_manager.search_memory(
-        user_id=request.user_id,
-        query=request.query,
-        top_k=request.top_k
-    )
-    return {"results": results}
-
-
-# --- 反馈（张恒旭的完整逻辑） ---
+# --- 反馈 ---
 @app.post("/v1/feedback")
 async def submit_feedback(feedback: FeedbackRequest):
     try:
