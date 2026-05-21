@@ -10,5 +10,7 @@ preference.txt
 
 # Python 虚拟环境与缓存
 venv/
+.env
+.env.txt
 __pycache__/
 *.pyc
