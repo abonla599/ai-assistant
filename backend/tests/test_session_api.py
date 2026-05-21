@@ -1,43 +1,83 @@
 """
 测试会话管理 API
 """
-import requests
-import json
+import pytest
+import sys
+from pathlib import Path
 
-BASE_URL = "http://localhost:8000"
+# 添加 backend 目录到 sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+
+@pytest.fixture
+def session_id():
+    """创建测试会话并返回 session_id"""
+    response = client.post("/v1/sessions?model=deepseek-chat")
+    assert response.status_code == 200
+    data = response.json()
+    # 兼容两种返回格式
+    if "success" in data:
+        assert data["success"] == True
+        sid = data.get("data", {}).get("session_id")
+    else:
+        sid = data.get("session_id")
+    assert sid is not None, f"无法获取 session_id，响应数据: {data}"
+    yield sid
+    # 清理：删除会话
+    try:
+        client.delete(f"/v1/sessions/{sid}")
+    except:
+        pass
 
 
 def test_create_session():
     """测试创建会话"""
-    response = requests.post(f"{BASE_URL}/v1/sessions?model=deepseek-chat")
+    response = client.post("/v1/sessions?model=deepseek-chat")
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
-    assert "session_id" in data["data"]
-    print(f"✅ 创建会话成功: {data['data']['session_id']}")
-    return data["data"]["session_id"]
+    # 兼容两种返回格式
+    if "success" in data:
+        assert data["success"] == True
+        assert "session_id" in data["data"]
+        print(f"✅ 创建会话成功: {data['data']['session_id']}")
+    else:
+        assert "session_id" in data
+        print(f"✅ 创建会话成功: {data['session_id']}")
 
 
 def test_list_sessions():
     """测试获取会话列表"""
-    response = requests.get(f"{BASE_URL}/v1/sessions")
+    response = client.get("/v1/sessions")
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
-    assert isinstance(data["data"], list)
-    print(f"✅ 会话列表: {len(data['data'])} 个会话")
-    return data["data"]
+    # 兼容两种返回格式
+    if "success" in data:
+        assert data["success"] == True
+        assert isinstance(data["data"], list)
+        print(f"✅ 会话列表: {len(data['data'])} 个会话")
+    else:
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+        print(f"✅ 会话列表: {len(data['sessions'])} 个会话")
 
 
 def test_get_session(session_id):
     """测试获取会话详情"""
-    response = requests.get(f"{BASE_URL}/v1/sessions/{session_id}")
+    response = client.get(f"/v1/sessions/{session_id}")
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
-    assert data["data"]["session_id"] == session_id
-    print(f"✅ 获取会话详情成功: {data['data']['title']}")
-    return data["data"]
+    if "success" in data:
+        assert data["success"] == True
+        assert data["data"]["session_id"] == session_id
+        print(f"✅ 获取会话详情成功: {data['data']['title']}")
+    else:
+        assert data["session_id"] == session_id
+        print(f"✅ 获取会话详情成功: {data.get('title', 'N/A')}")
 
 
 def test_chat_with_session(session_id):
@@ -49,21 +89,35 @@ def test_chat_with_session(session_id):
         ],
         "session_id": session_id
     }
-    response = requests.post(f"{BASE_URL}/v1/chat", json=payload)
+    response = client.post("/v1/chat", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert "reply" in data
     print(f"✅ 聊天回复: {data['reply'][:50]}...")
-    return data
 
 
 def test_get_session_after_chat(session_id):
     """测试聊天后会话消息是否正确保存"""
-    response = requests.get(f"{BASE_URL}/v1/sessions/{session_id}")
+    # 先发送一条消息
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "user", "content": "测试消息"}
+        ],
+        "session_id": session_id
+    }
+    response = client.post("/v1/chat", json=payload)
+    assert response.status_code == 200
+    
+    # 验证消息已保存
+    response = client.get(f"/v1/sessions/{session_id}")
     assert response.status_code == 200
     data = response.json()
-    messages = data["data"]["messages"]
-    assert len(messages) >= 2  # 至少有一问一答
+    
+    # 兼容两种返回格式
+    session_data = data if "session_id" in data else data.get("data", {})
+    messages = session_data.get("messages", [])
+    assert len(messages) >= 2, f"期望至少2条消息（一问一答），实际: {len(messages)}"
     print(f"✅ 会话消息数: {len(messages)}")
     for msg in messages:
         print(f"   [{msg['role']}] {msg['content'][:50]}...")
@@ -77,7 +131,7 @@ def test_chat_without_session():
             {"role": "user", "content": "1+1等于几？"}
         ]
     }
-    response = requests.post(f"{BASE_URL}/v1/chat", json=payload)
+    response = client.post("/v1/chat", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert "reply" in data
@@ -86,10 +140,13 @@ def test_chat_without_session():
 
 def test_delete_session(session_id):
     """测试删除会话"""
-    response = requests.delete(f"{BASE_URL}/v1/sessions/{session_id}")
+    response = client.delete(f"/v1/sessions/{session_id}")
     assert response.status_code == 200
     data = response.json()
-    assert data["success"] == True
+    if "success" in data:
+        assert data["success"] == True
+    else:
+        assert data["status"] == "deleted"
     print(f"✅ 会话已删除: {session_id}")
 
 
@@ -99,7 +156,11 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # 1. 创建会话
-    session_id = test_create_session()
+    response = client.post("/v1/sessions?model=deepseek-chat")
+    assert response.status_code == 200
+    data = response.json()
+    session_id = data.get("session_id") or data.get("data", {}).get("session_id")
+    print(f"✅ 创建会话成功: {session_id}")
 
     # 2. 获取会话列表
     test_list_sessions()

@@ -1,14 +1,23 @@
 ﻿import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
 import concurrent.futures
 from app.sandbox.sandbox_manager import SandboxManager
+
+
+@pytest.fixture
+def task_id(request):
+    """提供测试任务 ID"""
+    return getattr(request, 'param', 0)
+
 
 def test_run(task_id):
     sm = SandboxManager()
     code = f"print('Task {task_id}: 1+1=', 1+1)"
     result = sm.run_code(code, "python")
-    return task_id, result
+    assert result.get("error") is None, f"任务 {task_id} 执行失败: {result.get('error')}"
+
 
 def main():
     print("=== 沙箱并发压力测试 ===")

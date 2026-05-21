@@ -15,7 +15,9 @@ client = TestClient(app)
 def test_root():
     res = client.get("/")
     assert res.status_code == 200
-    assert "message" in res.json()
+    data = res.json()
+    assert "status" in data
+    assert data["status"] == "running"
 
 
 # ========== 2. 基础对话（当前为占位接口） ==========

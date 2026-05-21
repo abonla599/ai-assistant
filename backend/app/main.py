@@ -201,6 +201,41 @@ async def chat(request: ChatRequest):
             session["title"] = title if title else "新对话"
     return {"reply": reply, "message_id": message_id}
 
+# ---------- 流式聊天接口 ----------
+from fastapi.responses import StreamingResponse
+import json as json_module
+
+@app.post("/v1/chat/stream")
+async def stream_chat_endpoint(request: ChatRequest):
+    """流式聊天端点，返回 Server-Sent Events"""
+    from app.core.streaming import stream_chat
+    
+    async def generate():
+        # 发送开始事件
+        yield f"data: {json_module.dumps({'type': 'start'})}\n\n"
+        
+        full_text = ""
+        try:
+            async for chunk in stream_chat(request.model, request.messages):
+                full_text += chunk
+                yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
+            
+            # 保存消息到会话（如果提供了 session_id）
+            if request.session_id and request.session_id in sessions_store:
+                session = sessions_store[request.session_id]
+                session["messages"].append(request.messages[-1])
+                session["messages"].append({"role": "assistant", "content": full_text})
+                if len(session["messages"]) <= 2:
+                    title = request.messages[-1]["content"][:20]
+                    session["title"] = title if title else "新对话"
+            
+            # 发送完成事件
+            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text})}\n\n"
+        except Exception as e:
+            yield f"data: {json_module.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 # ---------- 会话管理 ----------
 @app.post("/v1/sessions")
 async def create_session(model: str = "deepseek-chat"):

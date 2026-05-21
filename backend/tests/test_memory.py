@@ -94,5 +94,8 @@ def test_decay():
         "query": "记忆",
         "top_k": 5
     })
-    weights = [r["weight"] for r in search_res.json()["results"]]
+    results = search_res.json()["results"]
+    assert len(results) > 0, "应该找到至少一条记忆"
+    weights = [r["weight"] for r in results]
+    # 衰减后权重应该小于原始权重 1.0
     assert all(w < 1.0 for w in weights), f"权重应全部小于1.0，实际: {weights}"
