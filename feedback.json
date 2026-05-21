@@ -53,5 +53,35 @@
     "message_id": "test_1",
     "rating": 1,
     "comment": "回答简洁明了，很好"
+  },
+  {
+    "message_id": "deeaaddf-f1d3-474c-b577-92766a4c5d32",
+    "rating": 5,
+    "comment": "回答准确，记住了我的信息"
+  },
+  {
+    "message_id": "test_msg_999",
+    "rating": 3,
+    "comment": "一般般"
+  },
+  {
+    "message_id": "72741bf7-78e3-4b0e-a2ae-aa064d19f1c2",
+    "rating": 5,
+    "comment": "回答准确，记住了我的信息"
+  },
+  {
+    "message_id": "test_msg_999",
+    "rating": 3,
+    "comment": "一般般"
+  },
+  {
+    "message_id": "26d76f8f-09db-4531-8b65-aa5150a4def7",
+    "rating": 5,
+    "comment": "回答准确，记住了我的信息"
+  },
+  {
+    "message_id": "test_msg_999",
+    "rating": 3,
+    "comment": "一般般"
   }
 ]

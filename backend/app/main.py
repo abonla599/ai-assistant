@@ -5,38 +5,53 @@ import threading
 import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # ---------- 路径设置 ----------
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 确保项目根目录 (backend) 在路径中，以便支持 from app.xxx import xxx
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # 指向 backend/
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # ---------- 可选导入：张恒旭的后台任务模块 ----------
+
+# 1. auto_weight_adjuster (假设它在 app 目录下)
 try:
-    import auto_weight_adjuster
+    from app import auto_weight_adjuster
 except ImportError:
     auto_weight_adjuster = None
     print("⚠️ auto_weight_adjuster 未安装，实时反馈监听不可用")
 
+# 2. preference_analyzer 和 memory_weight_updater (假设它们在 app 目录下)
 try:
     from app import preference_analyzer
     from app import memory_weight_updater
     HAS_BG_TASKS = True
-except ImportError:
+except ImportError as e:
     HAS_BG_TASKS = False
     preference_analyzer = None
     memory_weight_updater = None
-    print("⚠️ 偏好分析/记忆更新模块未找到，后台定时任务将跳过")
+    print(f"⚠️ 偏好分析/记忆更新模块未找到: {e}")
 
+# 3. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
+# 注意：如果 preference_analyzer 已经在上面导入成功，这里可以直接从 app.preference_analyzer 导入函数
 try:
-    from backend.app.feedback_storage import save_feedback
-    from backend.app.preference_analyzer import analyze_and_update_preference
-except ImportError:
+    from app.feedback_storage import save_feedback
+    # 如果 preference_analyzer 模块存在，从中导入具体函数
+    if preference_analyzer:
+        from app.preference_analyzer import analyze_and_update_preference
+    else:
+        analyze_and_update_preference = None
+except ImportError as e:
     save_feedback = None
     analyze_and_update_preference = None
-    print("⚠️ 反馈存储/偏好分析模块未找到，反馈功能可能受限")
+    print(f"⚠️ 反馈存储/偏好分析模块未找到: {e}")
 
 # ---------- 其他核心导入 ----------
 try:
@@ -59,6 +74,16 @@ except ImportError:
     get_task = None
     TaskStatus = None
 
+# ... (其余代码保持不变) ...
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行
+    start_background_scheduler()
+    yield
+    # 关闭时执行（如果需要清理资源）
+    print("服务正在关闭...")
+
 # 记忆模块路由（包含完整的 /v1/memory/* 端点）
 from app.memory.memory_router import router as memory_router
 
@@ -66,7 +91,8 @@ from app.memory.memory_router import router as memory_router
 app = FastAPI(
     title="AI 智能助手",
     description="多模型、工具调用、记忆管理的智能助手系统",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan  # 注册 lifespan
 )
 
 # 注册记忆路由（优先使用 Router 中的端点）
@@ -127,9 +153,7 @@ def start_background_scheduler():
     else:
         print("⚠️ 实时反馈监听未启动（缺少 auto_weight_adjuster 或 watchdog）")
 
-@app.on_event("startup")
-async def init_app():
-    start_background_scheduler()
+
 
 # ---------- API 端点 ----------
 @app.get("/")

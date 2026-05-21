@@ -13,18 +13,7 @@ load_dotenv()
 MODEL_CONFIGS = {
     "deepseek-chat": {
         "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url": "https://api.deepseek.com/v1",
-"""
-import os
-from openai import OpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
-
-MODEL_CONFIGS = {
-    "deepseek-chat": {
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url": "https://api.deepseek.com",
+        "base_url": "https://api.deepseek.com/v1",  # 注意：DeepSeek 兼容 OpenAI 接口通常需要 /v1
         "model_name": "deepseek-chat"
     },
     "gpt-4o": {

@@ -161,12 +161,24 @@ class MemoryManager:
             return False
 
     def delete_memories_batch(self, memory_ids: list) -> dict:
+        if not memory_ids:
+            return {"status": "deleted", "count": 0}
+        
         try:
+            # 直接删除，ChromaDB 会忽略不存在的 ID
+            # 注意：ChromaDB delete 不返回实际删除的数量，所以我们假设传入的有效 ID 都被删除
+            # 为了避免 ChromaDB 内部 get 的 bug，我们不预先检查 ID 是否存在
             self.collection.delete(ids=memory_ids)
-            print(f"🗑️ 已批量删除 {len(memory_ids)} 条记忆")
+            
+            # 由于无法从 delete 获取确切计数，我们返回传入的 ID 数量
+            # 如果业务逻辑强依赖确切删除数，可能需要后续通过查询验证，但这会慢
+            print(f"🗑️ 已执行批量删除操作，涉及 {len(memory_ids)} 个 ID")
             return {"status": "deleted", "count": len(memory_ids)}
+            
         except Exception as e:
-            return {"error": str(e)}
+            print(f"❌ 批量删除记忆失败: {e}")
+            traceback.print_exc()
+            return {"error": str(e), "count": 0}
 
     def update_memory(self, memory_id: str, new_content: str = None,
                       new_weight: float = None) -> dict:
