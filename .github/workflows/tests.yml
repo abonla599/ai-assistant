@@ -11,6 +11,6 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir --force-reinstall -r requirements.txt
+          pip install --no-cache-dir --force-reinstall -r backend/requirements.txt
       - name: Run tests
         run: pytest backend/tests/test_memory.py backend/tests/test_integration.py -v
