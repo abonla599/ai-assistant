@@ -2,9 +2,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  // 修改为你的后端地址
-  static const String baseUrl = 'http://10.0.2.2:8000'; // Android 模拟器
-  // static const String baseUrl = 'http://localhost:8000'; // iOS 模拟器 / Web
+  // Windows 桌面版使用本地后端地址
+  static const String baseUrl = 'http://127.0.0.1:8000';
+  // Android 模拟器: http://10.0.2.2:8000
+  // iOS 模拟器 / Web: http://localhost:8000
 
   /// 获取模型列表
   static Future<List<dynamic>> getModels() async {
