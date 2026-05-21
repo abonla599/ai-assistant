@@ -1,6 +1,14 @@
+# 本地数据库与数据文件
+data/
+*.sqlite3
+feedback.json
+preference.txt
+
+# 其他临时文件
+*.log
+*.tmp
+
+# Python 虚拟环境与缓存
 venv/
-.env
-.env.txt
 __pycache__/
 *.pyc
-.vscode/
