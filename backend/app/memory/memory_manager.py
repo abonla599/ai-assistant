@@ -1,4 +1,5 @@
 import os
+import sys
 import uuid
 import traceback
 import chromadb
@@ -11,10 +12,26 @@ load_dotenv()
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 
+def _default_persist_dir() -> str:
+    """记忆库位置的唯一事实来源，避免依赖进程工作目录。
+
+    优先级：CHROMA_DB_PATH 环境变量 > 打包后 EXE 同级目录 > 仓库根目录。
+    """
+    env_path = os.getenv("CHROMA_DB_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), "chroma_db")
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    return os.path.join(repo_root, "chroma_db")
+
+
 class MemoryManager:
     """记忆管理器：负责存储和检索用户记忆"""
 
-    def __init__(self, collection_name="user_memories", persist_dir="./chroma_db"):
+    def __init__(self, collection_name="user_memories", persist_dir=None):
+        self.persist_dir = os.path.abspath(persist_dir or _default_persist_dir())
         try:
             self.use_local_embed = False
             self._dummy_embed = False   # 伪嵌入标记
@@ -37,15 +54,55 @@ class MemoryManager:
                 print("⚠️ 未配置 api_key，尝试本地模型")
                 self._init_local_embed()
 
-            self.chroma_client = chromadb.PersistentClient(path=persist_dir)
-            self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
+            if self._dummy_embed:
+                print("⚠️ 记忆检索已降级为伪嵌入（全零向量），语义检索结果不可信。"
+                      "请配置 api_key 或安装 sentence-transformers。")
+
+            self.chroma_client = chromadb.PersistentClient(path=self.persist_dir)
+            self.collection = self._open_collection(collection_name)
 
             mode = "云端" if not (self.use_local_embed or self._dummy_embed) else ("本地" if self.use_local_embed else "伪嵌入")
-            print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {mode})")
+            print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {mode}, "
+                  f"维度: {self.embed_dim}, 库路径: {self.persist_dir})")
         except Exception as e:
             print("❌ MemoryManager 初始化失败，详细异常如下：")
             traceback.print_exc()
             raise e
+
+    def _open_collection(self, name: str):
+        """打开 collection，并校验它记录的嵌入后端与当前后端是否一致。
+
+        ChromaDB 在首次写入时按当次向量锁定维度，之后切换嵌入后端只会在
+        add/query 时抛出难以定位的 InvalidArgumentError，因此提前到启动阶段
+        给出明确的冲突原因和处理方式。
+        """
+        self.embed_dim = len(self._embed("__dimension_probe__"))
+        expected = {"embedding_model": self.embed_model, "embedding_dim": str(self.embed_dim)}
+
+        collection = self.chroma_client.get_or_create_collection(name=name, metadata=expected)
+        stored = collection.metadata or {}
+        stored_dim = stored.get("embedding_dim")
+        stored_model = stored.get("embedding_model")
+
+        if stored_dim and str(stored_dim) != str(self.embed_dim):
+            raise RuntimeError(
+                f"记忆库嵌入维度冲突：collection '{name}' 以 {stored_dim} 维"
+                f"（模型 {stored_model or '未知'}）建立，当前后端返回 {self.embed_dim} 维"
+                f"（模型 {self.embed_model}）。请固定使用同一嵌入后端，"
+                f"或删除 {self.persist_dir} 重建（会丢失已有记忆）。"
+            )
+        if stored_model and stored_model != self.embed_model:
+            raise RuntimeError(
+                f"记忆库嵌入模型冲突：collection '{name}' 由 {stored_model} 建立，当前为 "
+                f"{self.embed_model}。两者维度相同但向量空间不通用，混用会让检索结果失真，"
+                f"请固定使用同一嵌入后端，或删除 {self.persist_dir} 重建（会丢失已有记忆）。"
+            )
+        if not stored_model or not stored_dim:
+            try:
+                collection.modify(metadata=expected)
+            except Exception as e:
+                print(f"⚠️ 无法为 collection 记录嵌入配置（不影响使用）: {e}")
+        return collection
 
     def _init_local_embed(self):
         """初始化本地嵌入模型（无需 API key），失败则降级为伪嵌入"""

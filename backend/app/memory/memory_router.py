@@ -7,30 +7,30 @@ from app.memory.memory_manager import MemoryManager
 
 router = APIRouter(prefix="/v1/memory", tags=["记忆管理"])
 
-# ---------- 根据环境决定是否使用真实 MemoryManager ----------
-# 默认使用 fake store，避免 ChromaDB 维度不匹配问题
-# 如需使用真实 MemoryManager，设置环境变量 USE_REAL_MEMORY=true
+# ---------- 选择记忆存储后端 ----------
+# 默认使用真实的 ChromaDB 持久化存储；仅在 pytest/CI 或显式 USE_FAKE_STORE=true
+# 时退化为内存假存储。此前默认走假存储，使桌面版重启即失忆且不做语义检索。
 import sys
 in_pytest = "pytest" in sys.modules
 
-use_real_memory = os.getenv("USE_REAL_MEMORY", "").lower() == "true"
-
-force_fake = (
-    os.getenv("CI", "").lower() == "true" or 
-    os.getenv("USE_FAKE_STORE", "").lower() == "true" or
+use_fake_store = (
     in_pytest or
-    not use_real_memory  # 默认使用 fake store
+    os.getenv("CI", "").lower() == "true" or
+    os.getenv("USE_FAKE_STORE", "").lower() == "true"
 )
 
-if force_fake:
-    print("🔧 使用内存存储模式（FakeMemoryStore）- 开发/测试环境")
-    memory_manager = None
+memory_init_error = None
+memory_manager = None
+
+if use_fake_store:
+    print("🔧 测试/CI 模式，记忆模块使用内存存储（FakeMemoryStore）")
 else:
     try:
         memory_manager = MemoryManager()
+        print("✅ 记忆模块使用 ChromaDB 持久化存储")
     except Exception as e:
-        memory_manager = None
-        print(f"❌ MemoryManager 初始化失败，使用模拟存储: {e}")
+        memory_init_error = str(e)
+        print(f"❌ MemoryManager 初始化失败，记忆接口将返回 503: {e}")
 
 # ---------- 用于 CI 环境的简易内存存储（始终创建） ----------
 class FakeMemoryStore:
@@ -174,14 +174,15 @@ class UpdateMemoryRequest(BaseModel):
 
 # ---------- 辅助函数 ----------
 def safe_call(real_method, fake_method, *args, **kwargs):
-    """如果 memory_manager 可用且不抛异常则调用，否则调用 fake_method"""
+    """按后端可用性选择实现，不再吞掉真实存储的异常。
+
+    真实存储抛错时静默回退假存储会把故障伪装成正常返回，并让写入与读取
+    落到不同存储上造成数据不一致，因此异常一律向上抛出。
+    """
     if memory_manager is not None:
-        try:
-            return real_method(*args, **kwargs)
-        except Exception as e:
-            print(f"⚠️ Real memory_manager failed, falling back to fake_store: {e}")
-            import traceback
-            traceback.print_exc()
+        return real_method(*args, **kwargs)
+    if memory_init_error is not None:
+        raise HTTPException(status_code=503, detail=f"记忆服务不可用：{memory_init_error}")
     return fake_method(*args, **kwargs)
 
 

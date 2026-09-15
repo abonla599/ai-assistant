@@ -37,3 +37,11 @@ COP15_生物多样性笔记.csv
 COP15_生物多样性笔记.md
 generate_docx.py
 费丙乾-*.md
+
+# 本地工具产物与临时备份（不属于源码，勿提交）
+.qoder/
+PATH_backup_*.txt
+path_fix.ps1
+path_inspect.ps1
+_diag_*.py
+_verify_*.py
