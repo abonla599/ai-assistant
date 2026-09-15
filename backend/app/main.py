@@ -119,7 +119,9 @@ class OrchestrateRequest(BaseModel):
     task_id: Optional[str] = None
 
 # ---------- 会话存储 ----------
-sessions_store = {}
+from app.session.session_store import SessionStore
+
+sessions_store = SessionStore()
 
 # ---------- 后台定时任务 ----------
 def run_scheduler():
@@ -192,13 +194,9 @@ async def chat(request: ChatRequest):
             reply = f"你刚才说：{user_msg}，我是AI，你好！"
     
     message_id = str(uuid.uuid4())
-    if request.session_id and request.session_id in sessions_store:
-        session = sessions_store[request.session_id]
-        session["messages"].append(request.messages[-1])
-        session["messages"].append({"role": "assistant", "content": reply})
-        if len(session["messages"]) <= 2:
-            title = user_msg[:20]
-            session["title"] = title if title else "新对话"
+    if request.session_id:
+        sessions_store.add_message(request.session_id, "user", user_msg)
+        sessions_store.add_message(request.session_id, "assistant", reply)
     return {"reply": reply, "message_id": message_id}
 
 # ---------- 流式聊天接口 ----------
@@ -221,13 +219,10 @@ async def stream_chat_endpoint(request: ChatRequest):
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             
             # 保存消息到会话（如果提供了 session_id）
-            if request.session_id and request.session_id in sessions_store:
-                session = sessions_store[request.session_id]
-                session["messages"].append(request.messages[-1])
-                session["messages"].append({"role": "assistant", "content": full_text})
-                if len(session["messages"]) <= 2:
-                    title = request.messages[-1]["content"][:20]
-                    session["title"] = title if title else "新对话"
+            if request.session_id:
+                sessions_store.add_message(
+                    request.session_id, "user", request.messages[-1]["content"])
+                sessions_store.add_message(request.session_id, "assistant", full_text)
             
             # 发送完成事件
             yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text})}\n\n"
@@ -239,40 +234,22 @@ async def stream_chat_endpoint(request: ChatRequest):
 # ---------- 会话管理 ----------
 @app.post("/v1/sessions")
 async def create_session(model: str = "deepseek-chat"):
-    session_id = str(uuid.uuid4())
-    now = datetime.now().isoformat()
-    sessions_store[session_id] = {
-        "session_id": session_id,
-        "title": "新对话",
-        "created_at": now,
-        "model": model,
-        "messages": []
-    }
-    return {"session_id": session_id, "created_at": now}
+    return sessions_store.create(model)
 
 @app.get("/v1/sessions")
 async def list_sessions():
-    result = []
-    for sid, data in sessions_store.items():
-        result.append({
-            "session_id": sid,
-            "title": data["title"],
-            "created_at": data["created_at"],
-            "model": data["model"]
-        })
-    result.sort(key=lambda x: x["created_at"], reverse=True)
-    return {"sessions": result}
+    return {"sessions": sessions_store.list_summaries()}
 
 @app.get("/v1/sessions/{session_id}")
 async def get_session(session_id: str):
-    if session_id not in sessions_store:
+    session = sessions_store.get(session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return sessions_store[session_id]
+    return session
 
 @app.delete("/v1/sessions/{session_id}")
 async def delete_session(session_id: str):
-    if session_id in sessions_store:
-        del sessions_store[session_id]
+    if sessions_store.delete(session_id):
         return {"status": "deleted", "session_id": session_id}
     raise HTTPException(status_code=404, detail="会话不存在")
 
