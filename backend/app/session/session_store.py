@@ -109,3 +109,28 @@ class SessionStore:
             del self._sessions[session_id]
             self._flush()
             return True
+
+    def replace(self, session_id: str, messages: list) -> bool:
+        """整体替换会话消息，使前端编辑/删除/重新生成后的视图与存储一致。"""
+        cleaned = []
+        for item in messages or []:
+            if not isinstance(item, dict):
+                continue
+            role, content = item.get("role"), item.get("content")
+            if not isinstance(role, str) or not isinstance(content, str):
+                continue
+            entry = {"role": role, "content": content}
+            if item.get("message_id"):
+                entry["message_id"] = str(item["message_id"])
+            cleaned.append(entry)
+
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return False
+            session["messages"] = cleaned
+            first_user = next((m for m in cleaned if m["role"] == "user"), None)
+            if first_user:
+                session["title"] = first_user["content"][:20]
+            self._flush()
+            return True

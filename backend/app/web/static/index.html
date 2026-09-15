@@ -9,59 +9,139 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.png" type="image/png">
   <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="vendor/hljs-github-dark.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <button id="menuBtn" class="icon-btn" aria-label="会话列表">☰</button>
-    <h1>AI 智能助手</h1>
-    <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
-  </header>
-
-  <div id="scrim" class="scrim hidden"></div>
-  <aside id="drawer" class="drawer" aria-label="侧栏">
-    <section class="drawer-block">
-      <div class="drawer-head">
-        <h2>会话</h2>
-        <button id="newChatBtn" class="btn btn-small">新建</button>
+  <div class="app">
+    <!-- 侧栏：会话管理 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sb-head">
+        <div class="brand">
+          <img src="icon.png" alt="" class="brand-logo">
+          <span>AI 智能助手</span>
+        </div>
+        <button class="icon-btn only-mobile" id="closeSidebar" aria-label="关闭侧栏">×</button>
       </div>
-      <ul id="sessionList" class="session-list"></ul>
-    </section>
 
-    <section class="drawer-block">
-      <div class="drawer-head">
-        <h2>长期记忆</h2>
-        <button id="refreshMemoryBtn" class="btn btn-small">刷新</button>
+      <button class="btn btn-primary btn-block" id="newChatBtn">＋ 新对话</button>
+
+      <div class="search-box">
+        <input id="sessionSearch" type="search" placeholder="搜索会话" autocomplete="off">
       </div>
-      <form id="memoryForm" class="memory-form">
-        <input id="memoryInput" type="text" placeholder="记住一件事，如：我叫张三" autocomplete="off">
-        <button class="btn btn-small" type="submit">添加</button>
-      </form>
-      <ul id="memoryList" class="memory-list"></ul>
-    </section>
 
-    <p class="conn-note" id="connNote"></p>
-  </aside>
+      <nav class="sb-list" id="sessionGroups" aria-label="会话列表"></nav>
 
-  <main id="chat" class="chat" aria-live="polite"></main>
+      <div class="sb-foot">
+        <button class="btn btn-ghost" id="settingsBtn">⚙︎ 设置</button>
+        <button class="icon-btn" id="themeBtn" aria-label="切换主题" title="切换主题">◐</button>
+      </div>
+    </aside>
+    <div class="backdrop" id="backdrop"></div>
 
-  <footer class="composer">
-    <form id="chatForm" class="composer-form">
-      <textarea id="msgInput" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
-      <button id="sendBtn" class="btn btn-send" type="submit">发送</button>
-    </form>
-  </footer>
+    <!-- 主区 -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="openSidebar" aria-label="打开侧栏">☰</button>
+        <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
+        <span class="spacer"></span>
+        <button class="chip" id="personaChip" title="角色设定">无角色</button>
+        <button class="icon-btn" id="exportBtn" title="导出当前会话" aria-label="导出">⇩</button>
+      </header>
 
-  <template id="msgTpl">
-    <div class="msg">
-      <div class="bubble"></div>
-      <div class="actions hidden">
-        <button class="fb-btn" data-rating="1" title="有帮助">👍</button>
-        <button class="fb-btn" data-rating="-1" title="没帮到">👎</button>
+      <section class="messages" id="messages" aria-live="polite"></section>
+
+      <div class="composer">
+        <div class="suggestions" id="suggestions"></div>
+        <form class="input-card" id="chatForm">
+          <textarea id="input" rows="1" placeholder="发消息，Shift + Enter 换行" autocomplete="off"></textarea>
+          <div class="input-foot">
+            <span class="hint" id="statusHint"></span>
+            <button type="button" class="btn hidden" id="stopBtn">停止</button>
+            <button type="submit" class="btn btn-primary" id="sendBtn">发送</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设置面板 -->
+  <div class="modal hidden" id="settings" role="dialog" aria-modal="true" aria-label="设置">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div class="tabs" id="settingsTabs">
+          <button class="tab active" data-tab="memory">长期记忆</button>
+          <button class="tab" data-tab="model">模型参数</button>
+          <button class="tab" data-tab="persona">角色设定</button>
+          <button class="tab" data-tab="about">关于</button>
+        </div>
+        <button class="icon-btn" id="closeSettings" aria-label="关闭">×</button>
+      </div>
+
+      <div class="modal-body">
+        <section class="pane active" data-pane="memory">
+          <p class="pane-note">记忆存在后端向量库里，按用户隔离、跨重启保留。对话中提到的事实可在此查看、搜索或删除。</p>
+          <form class="row" id="memoryAddForm">
+            <input id="memoryInput" type="text" placeholder="让助手记住一件事，例如：我叫张三" autocomplete="off">
+            <button class="btn" type="submit">添加</button>
+          </form>
+          <form class="row" id="memorySearchForm">
+            <input id="memoryQuery" type="search" placeholder="语义搜索记忆…" autocomplete="off">
+            <button class="btn" type="submit">搜索</button>
+          </form>
+          <ul class="mem-list" id="memoryList"></ul>
+        </section>
+
+        <section class="pane" data-pane="model">
+          <label class="field">
+            <span>温度 temperature <b id="tempVal">0.7</b></span>
+            <input type="range" id="tempRange" min="0" max="2" step="0.1" value="0.7">
+            <em>越低越严谨，越高越发散</em>
+          </label>
+          <label class="field">
+            <span>携带上下文条数 <b id="ctxVal">10</b></span>
+            <input type="range" id="ctxRange" min="2" max="40" step="2" value="10">
+            <em>每次请求附带的历史消息数量</em>
+          </label>
+          <p class="pane-note" id="paramNote">参数保存在本机。当前后端接口尚未支持透传 temperature，此项在接口补齐前仅作记录。</p>
+        </section>
+
+        <section class="pane" data-pane="persona">
+          <p class="pane-note">角色设定会作为系统提示词随每次请求发送，仅对当前会话生效，保存在本机。</p>
+          <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
+          <div class="row">
+            <button class="btn btn-primary" id="savePersonaBtn">保存</button>
+            <button class="btn" id="clearPersonaBtn">清除</button>
+          </div>
+        </section>
+
+        <section class="pane" data-pane="about">
+          <dl class="about" id="aboutInfo"></dl>
+        </section>
       </div>
     </div>
+  </div>
+
+  <template id="msgTpl">
+    <article class="msg">
+      <div class="msg-role"></div>
+      <div class="msg-body"></div>
+      <div class="msg-tools">
+        <button data-act="copy">复制</button>
+        <button data-act="edit">编辑</button>
+        <button data-act="regen">重新生成</button>
+        <button data-act="good" title="有帮助">👍</button>
+        <button data-act="bad" title="没帮助">👎</button>
+        <button data-act="del">删除</button>
+      </div>
+    </article>
   </template>
 
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script src="markdown.js"></script>
+  <script src="api.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

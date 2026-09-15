@@ -264,6 +264,16 @@ async def delete_session(session_id: str):
         return {"status": "deleted", "session_id": session_id}
     raise HTTPException(status_code=404, detail="会话不存在")
 
+class SessionMessagesRequest(BaseModel):
+    messages: List[Dict[str, Any]] = []
+
+@app.put("/v1/sessions/{session_id}/messages")
+async def replace_session_messages(session_id: str, req: SessionMessagesRequest):
+    """整体替换会话消息，使前端编辑/删除/重新生成后的视图与后端一致。"""
+    if not sessions_store.replace(session_id, req.messages):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"status": "updated", "count": len(req.messages)}
+
 # ---------- 模型列表 ----------
 @app.get("/v1/models")
 async def list_models():
