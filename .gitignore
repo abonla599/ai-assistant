@@ -32,3 +32,9 @@ AI智能助手_Setup.exe
 # IDE 配置
 .vscode/
 .idea/
+
+# 个人文件（与本项目无关，勿提交到公开仓库）
+COP15_生物多样性笔记.csv
+COP15_生物多样性笔记.md
+generate_docx.py
+费丙乾-*.md

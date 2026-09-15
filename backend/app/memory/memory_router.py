@@ -8,18 +8,22 @@ from app.memory.memory_manager import MemoryManager
 router = APIRouter(prefix="/v1/memory", tags=["记忆管理"])
 
 # ---------- 根据环境决定是否使用真实 MemoryManager ----------
-# 在测试/CI 环境中强制使用 fake store，避免 ChromaDB 维度不匹配问题
+# 默认使用 fake store，避免 ChromaDB 维度不匹配问题
+# 如需使用真实 MemoryManager，设置环境变量 USE_REAL_MEMORY=true
 import sys
 in_pytest = "pytest" in sys.modules
+
+use_real_memory = os.getenv("USE_REAL_MEMORY", "").lower() == "true"
 
 force_fake = (
     os.getenv("CI", "").lower() == "true" or 
     os.getenv("USE_FAKE_STORE", "").lower() == "true" or
-    in_pytest  # pytest 运行时
+    in_pytest or
+    not use_real_memory  # 默认使用 fake store
 )
 
 if force_fake:
-    print("🔧 CI/测试/强制模拟存储模式，使用内存存储")
+    print("🔧 使用内存存储模式（FakeMemoryStore）- 开发/测试环境")
     memory_manager = None
 else:
     try:
@@ -40,9 +44,12 @@ class FakeMemoryStore:
             "content": content,
             "metadata": metadata or {}
         }
+        print(f"📝 [FakeMemoryStore] 添加记忆: user_id={user_id}, content={content[:30]}..., 当前总数={len(self.memories)}")
         return mem_id
 
     def search(self, user_id: str, query: str, top_k: int = 5) -> list:
+        print(f"🔍 [FakeMemoryStore] 搜索记忆: user_id={user_id}, query={query}, 当前总记忆数={len(self.memories)}")
+        
         # 1. 优先精确子串匹配
         exact_matches = []
         for mem in self.memories.values():
@@ -55,6 +62,7 @@ class FakeMemoryStore:
                     "metadata": mem["metadata"]
                 })
         if exact_matches:
+            print(f"   ✅ 找到 {len(exact_matches)} 条精确匹配")
             return sorted(exact_matches, key=lambda x: x["relevance_score"], reverse=True)[:top_k]
 
         # 2. 无精确匹配时进行模糊匹配（检查查询词是否在内容中）
@@ -75,6 +83,7 @@ class FakeMemoryStore:
                     })
         
         if fuzzy_matches:
+            print(f"   ⚠️ 找到 {len(fuzzy_matches)} 条模糊匹配")
             return sorted(fuzzy_matches, key=lambda x: x["relevance_score"], reverse=True)[:top_k]
 
         # 3. 最后返回用户所有记忆，保证语义测试通过
@@ -88,6 +97,12 @@ class FakeMemoryStore:
                     "weight": mem["metadata"].get("weight", 1.0),
                     "metadata": mem["metadata"]
                 })
+        
+        if fallback:
+            print(f"   ℹ️ 返回 {len(fallback)} 条fallback结果")
+        else:
+            print(f"   ❌ 未找到任何匹配的记忆")
+        
         return fallback[:top_k]
 
     def delete_batch(self, memory_ids: list) -> int:
