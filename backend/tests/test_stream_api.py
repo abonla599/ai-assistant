@@ -40,8 +40,8 @@ def test_stream_chat():
         assert len(response.content) > 0
 
 
-def test_stream_with_session():
-    """测试流式聊天 + 会话保存"""
+def test_stream_with_session(monkeypatch):
+    """测试流式聊天 + 会话保存（打桩模型输出，不依赖真实密钥）"""
     # 创建会话
     create_res = client.post("/v1/sessions?model=deepseek-chat")
     assert create_res.status_code == 200
@@ -50,6 +50,16 @@ def test_stream_with_session():
     # 兼容两种返回格式
     session_id = create_data.get("session_id") or create_data.get("data", {}).get("session_id")
     assert session_id is not None
+
+    # 打桩模型输出：本测试要验证的是"流式回复会写进会话"，
+    # 不应依赖真实密钥是否有效（此前错误文本被当成回复保存，才让断言假性通过）。
+    from app.core import streaming
+
+    async def fake_stream(model, messages):
+        for piece in ("你", "好", "呀"):
+            yield piece
+
+    monkeypatch.setattr(streaming, "stream_chat", fake_stream)
 
     # 流式发送消息
     payload = {
@@ -70,7 +80,9 @@ def test_stream_with_session():
     
     # 兼容两种返回格式
     messages = session_data.get("data", session_data).get("messages", [])
-    assert len(messages) >= 2, f"期望至少2条消息，实际: {len(messages)}"
+    assert [m["role"] for m in messages] == ["user", "assistant"], f"实际: {messages}"
+    assert messages[1]["content"] == "你好呀", "流式分块未正确拼接后保存"
+    assert messages[1].get("message_id"), "助手消息未保存 message_id，反馈无法关联"
 
     # 清理
     client.delete(f"/v1/sessions/{session_id}")

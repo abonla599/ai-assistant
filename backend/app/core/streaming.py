@@ -40,31 +40,27 @@ async def stream_chat(model: str, messages: list) -> AsyncGenerator[str, None]:
 
     api_key = os.getenv(config["api_key_env"])
     if not api_key:
-        yield f"[错误] 缺少 API Key: {config['api_key_env']}"
-        return
+        raise RuntimeError(f"缺少 API Key: {config['api_key_env']}")
 
     client = OpenAI(
         api_key=api_key,
         base_url=config["base_url"]
     )
 
-    try:
-        # 发起流式请求
-        stream = client.chat.completions.create(
-            model=config["model_name"],
-            messages=messages,
-            stream=True,
-            temperature=0.7,
-            max_tokens=4096
-        )
+    # 发起流式请求
+    stream = client.chat.completions.create(
+        model=config["model_name"],
+        messages=messages,
+        stream=True,
+        temperature=0.7,
+        max_tokens=4096
+    )
 
-        # 逐块产出内容
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
-
-    except Exception as e:
-        yield f"\n[流式错误] {str(e)}"
+    # 逐块产出内容。异常一律向上抛出：若在这里被转成文本 yield，
+    # 调用方无法区分正常回答与故障，错误文本还会被写进会话历史。
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 async def stream_chat_with_tools(

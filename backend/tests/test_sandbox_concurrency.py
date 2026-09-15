@@ -14,6 +14,8 @@ def task_id(request):
 
 def test_run(task_id):
     sm = SandboxManager()
+    if sm.client is None:
+        pytest.skip(f"沙箱需要 Docker Desktop 运行，当前不可用：{sm.unavailable_reason}")
     code = f"print('Task {task_id}: 1+1=', 1+1)"
     result = sm.run_code(code, "python")
     assert result.get("error") is None, f"任务 {task_id} 执行失败: {result.get('error')}"

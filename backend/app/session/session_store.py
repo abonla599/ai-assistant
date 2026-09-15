@@ -87,12 +87,16 @@ class SessionStore:
             data = self._sessions.get(session_id)
             return json.loads(json.dumps(data)) if data else None
 
-    def add_message(self, session_id: str, role: str, content: str) -> bool:
+    def add_message(self, session_id: str, role: str, content: str,
+                    message_id: str = None) -> bool:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return False
-            session["messages"].append({"role": role, "content": content})
+            entry = {"role": role, "content": content}
+            if message_id:
+                entry["message_id"] = message_id
+            session["messages"].append(entry)
             if len(session["messages"]) == 1 and content:
                 session["title"] = content[:20]
             self._flush()

@@ -5,7 +5,9 @@ a = Analysis(
     ['run_backend.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # PWA 静态资源不是 .py，PyInstaller 不会自动收集；目标路径须与
+    # app/web/web_router.py 中 frozen 分支拼接的 app/web/static 保持一致。
+    datas=[('backend/app/web/static', 'app/web/static')],
     hiddenimports=['uvicorn.logging', 'uvicorn.loops', 'uvicorn.protocols', 'chromadb'],
     hookspath=[],
     hooksconfig={},

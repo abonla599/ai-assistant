@@ -87,6 +87,9 @@ async def lifespan(app: FastAPI):
 # 记忆模块路由（包含完整的 /v1/memory/* 端点）
 from app.memory.memory_router import router as memory_router
 
+# PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
+from app.web.web_router import mount_pwa
+
 # ---------- 创建 FastAPI 应用 ----------
 app = FastAPI(
     title="AI 智能助手",
@@ -97,6 +100,9 @@ app = FastAPI(
 
 # 注册记忆路由（优先使用 Router 中的端点）
 app.include_router(memory_router)
+
+# 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
+mount_pwa(app)
 
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):
@@ -196,7 +202,7 @@ async def chat(request: ChatRequest):
     message_id = str(uuid.uuid4())
     if request.session_id:
         sessions_store.add_message(request.session_id, "user", user_msg)
-        sessions_store.add_message(request.session_id, "assistant", reply)
+        sessions_store.add_message(request.session_id, "assistant", reply, message_id)
     return {"reply": reply, "message_id": message_id}
 
 # ---------- 流式聊天接口 ----------
@@ -209,23 +215,28 @@ async def stream_chat_endpoint(request: ChatRequest):
     from app.core.streaming import stream_chat
     
     async def generate():
+        message_id = str(uuid.uuid4())
         # 发送开始事件
-        yield f"data: {json_module.dumps({'type': 'start'})}\n\n"
-        
+        yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id})}\n\n"
+
+        # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
+        if request.session_id:
+            sessions_store.add_message(
+                request.session_id, "user", request.messages[-1]["content"])
+
         full_text = ""
         try:
             async for chunk in stream_chat(request.model, request.messages):
                 full_text += chunk
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             
-            # 保存消息到会话（如果提供了 session_id）
+            # 保存助手回复到会话（如果提供了 session_id）
             if request.session_id:
                 sessions_store.add_message(
-                    request.session_id, "user", request.messages[-1]["content"])
-                sessions_store.add_message(request.session_id, "assistant", full_text)
+                    request.session_id, "assistant", full_text, message_id)
             
             # 发送完成事件
-            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text})}\n\n"
+            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id})}\n\n"
         except Exception as e:
             yield f"data: {json_module.dumps({'type': 'error', 'message': str(e)})}\n\n"
     

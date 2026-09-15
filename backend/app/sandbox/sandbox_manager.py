@@ -20,9 +20,17 @@ class SandboxManager:
     }
 
     def __init__(self):
-        self.client = docker.from_env()
         self.default_mem_limit = "64m"
         self.default_timeout = 10
+        self.client = None
+        self.unavailable_reason = None
+        try:
+            self.client = docker.from_env()
+        except Exception as e:
+            # 导入期就实例化本类，因此 Docker 不可用只能降级，
+            # 抛异常会让整个后端起不来（打包后表现为 EXE 闪退）。
+            self.unavailable_reason = str(e)
+            print(f"⚠️ Docker 不可用，代码执行沙箱暂时停用：{self.unavailable_reason}")
 
     def run_code(self, code: str, language: str = "python", timeout: int = None) -> dict:
         """
@@ -32,6 +40,12 @@ class SandboxManager:
         if language not in self.LANGUAGE_IMAGES:
             supported = list(self.LANGUAGE_IMAGES.keys())
             return {"error": f"不支持的语言: {language}。当前支持: {supported}"}
+
+        if self.client is None:
+            return {
+                "error": "代码执行沙箱不可用：Docker 未运行或未安装。"
+                         f"（{self.unavailable_reason}）"
+            }
 
         if timeout is None:
             timeout = self.default_timeout

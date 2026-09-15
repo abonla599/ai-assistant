@@ -211,10 +211,13 @@ async def search_memory(req: SearchMemoryRequest):
         raw = memory_manager.search_memory(req.user_id, req.query, req.top_k)
         formatted = []
         for doc, distance, meta in raw:
+            # 距离越小越相关。旧写法 `if distance else 0` 会把完全匹配
+            # （distance 为 0，最相关）判成 0 分，排序语义颠倒。
+            relevance = max(0.0, min(1.0, 1 - distance))
             formatted.append({
                 "content": doc,
-                "relevance_score": round(1 - distance, 4) if distance else 0,
-                "distance": round(distance, 4) if distance else 0,
+                "relevance_score": round(relevance, 4),
+                "distance": round(distance, 4),
                 "weight": meta.get("weight", 1.0),
                 "metadata": meta
             })

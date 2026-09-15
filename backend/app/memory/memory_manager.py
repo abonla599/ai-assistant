@@ -77,7 +77,13 @@ class MemoryManager:
         给出明确的冲突原因和处理方式。
         """
         self.embed_dim = len(self._embed("__dimension_probe__"))
-        expected = {"embedding_model": self.embed_model, "embedding_dim": str(self.embed_dim)}
+        # hnsw:space 仅在集合创建时生效，必须在此处声明；
+        # 默认 L2 距离会让 1-distance 的相关度公式算出负值。
+        expected = {
+            "embedding_model": self.embed_model,
+            "embedding_dim": str(self.embed_dim),
+            "hnsw:space": "cosine",
+        }
 
         collection = self.chroma_client.get_or_create_collection(name=name, metadata=expected)
         stored = collection.metadata or {}

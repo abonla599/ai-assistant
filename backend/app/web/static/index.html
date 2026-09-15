@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>AI 智能助手</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button id="menuBtn" class="icon-btn" aria-label="会话列表">☰</button>
+    <h1>AI 智能助手</h1>
+    <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
+  </header>
+
+  <div id="scrim" class="scrim hidden"></div>
+  <aside id="drawer" class="drawer" aria-label="侧栏">
+    <section class="drawer-block">
+      <div class="drawer-head">
+        <h2>会话</h2>
+        <button id="newChatBtn" class="btn btn-small">新建</button>
+      </div>
+      <ul id="sessionList" class="session-list"></ul>
+    </section>
+
+    <section class="drawer-block">
+      <div class="drawer-head">
+        <h2>长期记忆</h2>
+        <button id="refreshMemoryBtn" class="btn btn-small">刷新</button>
+      </div>
+      <form id="memoryForm" class="memory-form">
+        <input id="memoryInput" type="text" placeholder="记住一件事，如：我叫张三" autocomplete="off">
+        <button class="btn btn-small" type="submit">添加</button>
+      </form>
+      <ul id="memoryList" class="memory-list"></ul>
+    </section>
+
+    <p class="conn-note" id="connNote"></p>
+  </aside>
+
+  <main id="chat" class="chat" aria-live="polite"></main>
+
+  <footer class="composer">
+    <form id="chatForm" class="composer-form">
+      <textarea id="msgInput" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
+      <button id="sendBtn" class="btn btn-send" type="submit">发送</button>
+    </form>
+  </footer>
+
+  <template id="msgTpl">
+    <div class="msg">
+      <div class="bubble"></div>
+      <div class="actions hidden">
+        <button class="fb-btn" data-rating="1" title="有帮助">👍</button>
+        <button class="fb-btn" data-rating="-1" title="没帮到">👎</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
