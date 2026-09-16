@@ -1,26 +1,30 @@
-"""附件上传存储：文本/代码与图片。
+"""附件上传存储：文本/代码、图片与 PDF。
 
 落盘在 data/uploads/，文件名一律用生成的 uuid，绝不采用客户端给出的路径或
 文件名，避免目录穿越与互相覆盖；原始文件名只作为元数据保存用于界面展示。
 
-图片类型按文件头字节判定，不信任浏览器上报的 MIME。
+图片类型按文件头字节判定，不信任浏览器上报的 MIME。PDF 在上传时即抽取为纯文本
+再落盘，因此下游的预览与上下文注入不必区分来源格式。
 """
 import base64
 import json
 import os
-import sys
 import threading
 import uuid
 from datetime import datetime
 
+from app.core.paths import data_root
+
 MAX_TEXT_BYTES = 1 * 1024 * 1024          # 文本/代码 1MB
 MAX_IMAGE_BYTES = 10 * 1024 * 1024        # 图片 10MB
+MAX_DOC_BYTES = 10 * 1024 * 1024          # 文档类按原始体积计，解析后转文本再截断
 MAX_INJECT_CHARS = 20000                  # 注入模型的文本上限，防止长文件撑爆上下文
 
 TEXT_EXTS = {".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
              ".csv", ".tsv", ".log", ".ini", ".cfg", ".html", ".css", ".c", ".h",
              ".cpp", ".java", ".go", ".rs", ".sh", ".bat", ".ps1", ".sql", ".xml"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+DOC_EXTS = {".pdf"}
 
 # 文件头签名 -> 规范 MIME，避免伪造扩展名或 Content-Type
 MAGIC = (
@@ -36,20 +40,36 @@ def _default_dir() -> str:
     env_path = os.getenv("UPLOAD_DIR")
     if env_path:
         return os.path.abspath(env_path)
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-    return os.path.join(base, "data", "uploads")
+    return os.path.join(data_root(), "data", "uploads")
 
 
 class UploadError(Exception):
     pass
 
 
+def _pdf_text(blob: bytes) -> str:
+    """提取 PDF 全文。fitz 延迟导入：缺少该组件时只让本次上传失败，不拖垮模块。"""
+    try:
+        import fitz
+    except ImportError as e:
+        raise UploadError(f"服务器缺少 PDF 解析组件（pip install pymupdf）：{e}")
+    try:
+        doc = fitz.open(stream=blob, filetype="pdf")
+    except Exception as e:
+        raise UploadError(f"PDF 无法打开：{type(e).__name__}: {str(e)[:120]}")
+    try:
+        if doc.needs_pass:
+            raise UploadError("该 PDF 已加密，无法提取文本")
+        return "\n".join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+
+
+DOC_EXTRACTORS = {".pdf": _pdf_text}
+
+
 def detect_kind(filename: str, blob: bytes):
-    """返回 (kind, mime)。kind 为 text / image，无法识别则抛 UploadError。"""
+    """返回 (kind, mime)。kind 为 text / image / doc，无法识别则抛 UploadError。"""
     ext = os.path.splitext(filename or "")[1].lower()
 
     if ext in IMAGE_EXTS:
@@ -63,9 +83,14 @@ def detect_kind(filename: str, blob: bytes):
     if ext in TEXT_EXTS:
         return "text", "text/plain"
 
+    if ext in DOC_EXTS:
+        # 内容是否真是 PDF 交给解析器判定，不必再维护一份文件头签名
+        return "doc", "application/pdf"
+
     raise UploadError(
         f"不支持的文件类型 {ext or '(无扩展名)'}。"
-        f"文本类支持 {len(TEXT_EXTS)} 种扩展名，图片支持 {', '.join(sorted(IMAGE_EXTS))}")
+        f"文本/代码支持 {len(TEXT_EXTS)} 种扩展名，图片支持 {', '.join(sorted(IMAGE_EXTS))}，"
+        f"文档支持 {', '.join(sorted(DOC_EXTS))}")
 
 
 class UploadStore:
@@ -99,14 +124,24 @@ class UploadStore:
             raise UploadError("文件内容为空")
 
         kind, mime = detect_kind(filename, blob)
-        limit = MAX_IMAGE_BYTES if kind == "image" else MAX_TEXT_BYTES
+        ext = os.path.splitext(filename or "")[1].lower()
+        display_size = len(blob)
+
+        limit = {"text": MAX_TEXT_BYTES, "image": MAX_IMAGE_BYTES, "doc": MAX_DOC_BYTES}[kind]
         if len(blob) > limit:
             raise UploadError(
                 f"{filename} 超过上限 {limit // 1024 // 1024 or limit // 1024}MB"
                 f"（实际 {len(blob) // 1024}KB）")
 
+        if kind == "doc":
+            text = DOC_EXTRACTORS[ext](blob)
+            if not text.strip():
+                raise UploadError(
+                    f"{filename} 未提取到文字，可能是扫描版（整页图片）PDF，需要先做 OCR")
+            # 转成文本后走既有的预览与注入链路，模型看到的仍是可读文字
+            blob, ext, kind, mime = text.encode("utf-8"), ".txt", "text", "text/plain"
+
         upload_id = uuid.uuid4().hex[:16]
-        ext = os.path.splitext(filename or "")[1].lower()
         stored = os.path.join(self.dir, upload_id + ext)
 
         with open(stored, "wb") as f:
@@ -117,7 +152,7 @@ class UploadStore:
             "name": os.path.basename(filename or "unnamed"),
             "kind": kind,
             "mime": mime or claimed_mime,
-            "size": len(blob),
+            "size": display_size,
             "path": stored,
             "created_at": datetime.now().isoformat(),
         }

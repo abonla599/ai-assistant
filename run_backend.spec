@@ -5,14 +5,17 @@ from PyInstaller.utils.hooks import collect_all
 # chromadb_rust_bindings 里，静态分析两者都发现不了，必须显式整体收集。
 chroma_datas, chroma_binaries, chroma_hiddenimports = collect_all("chromadb")
 binding_datas, binding_binaries, binding_hiddenimports = collect_all("chromadb_rust_bindings")
+# PDF 解析用 PyMuPDF（导入名 fitz）：带原生二进制，且只在上传时函数内延迟导入，
+# 静态分析抓不到，漏收会让冻结版一上传 PDF 就 ImportError。
+fitz_datas, fitz_binaries, fitz_hiddenimports = collect_all("fitz")
 
 
 a = Analysis(
     ['run_backend.py'],
     # 入口以顶层包名 app 导入（见 run_backend.py），分析阶段需要能找到 backend/app
     pathex=['backend'],
-    binaries=chroma_binaries + binding_binaries,
-    datas=[('backend/app/web/static', 'app/web/static')] + chroma_datas + binding_datas,
+    binaries=chroma_binaries + binding_binaries + fitz_binaries,
+    datas=[('backend/app/web/static', 'app/web/static')] + chroma_datas + binding_datas + fitz_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
@@ -21,7 +24,7 @@ a = Analysis(
         'uvicorn.protocols.websockets.wsproto_impl',
         # FastAPI 在函数内条件导入，静态分析抓不到；缺失会让附件上传直接崩
         'multipart',
-    ] + chroma_hiddenimports + binding_hiddenimports,
+    ] + chroma_hiddenimports + binding_hiddenimports + fitz_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

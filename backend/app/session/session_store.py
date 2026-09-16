@@ -5,22 +5,18 @@ os.replace 原子替换，避免进程中途退出留下半截 JSON。
 """
 import json
 import os
-import sys
 import threading
 import uuid
 from datetime import datetime
+
+from app.core.paths import data_root
 
 
 def _default_path() -> str:
     env_path = os.getenv("SESSION_DB_PATH")
     if env_path:
         return os.path.abspath(env_path)
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-    return os.path.join(base, "data", "sessions.json")
+    return os.path.join(data_root(), "data", "sessions.json")
 
 
 class SessionStore:

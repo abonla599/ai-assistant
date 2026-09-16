@@ -84,11 +84,12 @@
           </div>
         </div>
 
-        <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项 -->
-        <input type="file" id="cameraInput" hidden accept="image/*" capture="environment">
-        <input type="file" id="imageInput" hidden multiple accept="image/*">
+        <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
+             accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->
+        <input type="file" id="imageInput" hidden multiple
+               accept="image/png,image/jpeg,image/gif,image/webp,image/bmp">
         <input type="file" id="fileInput" hidden multiple
-               accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.ini,.cfg,.html,.htm,.css,.py,.js,.ts,.c,.h,.cpp,.hpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.tar,.gz">
+               accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.ini,.cfg,.html,.css,.py,.js,.ts,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml,.pdf">
 
         <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
         <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">

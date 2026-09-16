@@ -2,9 +2,12 @@ import json
 import os
 from datetime import datetime
 
+from app.core.paths import data_root
+from app.feedback_storage import FEEDBACK_FILE
+
 # --- 配置文件 ---
-FEEDBACK_FILE = "feedback.json"       # 存储用户反馈的文件
-PREFERENCE_FILE = "preference.txt"    # 我们最终要生成的，存放用户偏好的文件
+# 反馈路径只有一个定义处（feedback_storage），避免两边写到不同文件
+PREFERENCE_FILE = os.path.join(data_root(), "preference.txt")    # 我们最终要生成的，存放用户偏好的文件
 
 # --- 核心分析函数 ---
 def analyze_and_update_preference():

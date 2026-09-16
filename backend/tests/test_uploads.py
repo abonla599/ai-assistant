@@ -1,4 +1,5 @@
 """附件上传与注入测试。"""
+import re
 import sys
 from pathlib import Path
 
@@ -114,3 +115,83 @@ def test_attachment_deleted_and_download_roundtrip():
     assert "标题" in got.text
     assert client.delete(f"/v1/uploads/{up['id']}").status_code == 200
     assert client.get(f"/v1/uploads/{up['id']}/file").status_code == 404
+
+
+# ---------- PDF ----------
+
+def _make_pdf(text: str) -> bytes:
+    fitz = pytest.importorskip("fitz", reason="PDF 支持需要 pymupdf")
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), text, fontname="helv")
+    blob = doc.tobytes()
+    doc.close()
+    return blob
+
+
+def test_pdf_upload_is_parsed_into_text():
+    blob = _make_pdf("quantum key distribution")
+    res = _upload("论文.pdf", blob, "application/pdf")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "text"
+    # 界面上仍显示原文件名，用户不必知道自己传的不是 txt
+    assert body["name"] == "论文.pdf"
+    assert "quantum key distribution" in body["preview"]
+
+
+def test_pdf_size_reported_as_original_file():
+    """转换后只剩几 KB 文本，若按转换后计体积会误导用户。"""
+    blob = _make_pdf("hello")
+    body = _upload("doc.pdf", blob, "application/pdf").json()
+    assert body["size"] == len(blob)
+
+
+def test_garbage_named_pdf_is_rejected():
+    res = _upload("evil.pdf", b"definitely not a pdf", "application/pdf")
+    assert res.status_code == 400
+    assert "PDF" in res.json()["detail"]
+
+
+# ---------- 前端 accept 与后端白名单必须一致 ----------
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "app" / "web" / "static"
+# 图片按钮用 MIME，后端用扩展名，这里做一层桥接
+IMAGE_MIME_TO_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+                     "image/webp": ".webp", "image/bmp": ".bmp"}
+
+
+def _accept_of(html: str, element_id: str) -> list:
+    tag = re.search(rf'<input[^>]*id="{element_id}"[^>]*>', html)
+    assert tag, f"index.html 里找不到 #{element_id}"
+    accept = re.search(r'accept="([^"]+)"', tag.group(0))
+    assert accept, f"#{element_id} 没有 accept，系统选择器会列出全部类型"
+    return [t.strip() for t in accept.group(1).split(",") if t.strip()]
+
+
+@pytest.mark.parametrize("element_id", ["imageInput", "fileInput"])
+def test_picker_accept_only_offers_types_the_server_accepts(element_id):
+    """选择器里能选中的东西，后端必须真的收得下。
+
+    放开一个后端不支持的类型，比干脆不提供更糟：用户费事选完文件，
+    换来的是一句"不支持的文件类型"。
+    """
+    from app.core.uploads import IMAGE_EXTS, detect_kind
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    tokens = _accept_of(html, element_id)
+    assert tokens, f"#{element_id} 的 accept 为空"
+
+    for token in tokens:
+        if element_id == "imageInput":
+            assert token in IMAGE_MIME_TO_EXT, f"图片选择器出现后端不认的 {token}"
+            assert IMAGE_MIME_TO_EXT[token] in IMAGE_EXTS
+        else:
+            assert token.startswith("."), f"文件选择器只应列扩展名，出现 MIME {token}"
+            detect_kind("sample" + token, b"arbitrary bytes")   # 不抛错即后端接受
+
+
+def test_file_picker_does_not_offer_images():
+    """图片有专门的入口，混在文件里会让用户不知道模型能不能看懂。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+    assert not image_exts & set(_accept_of(html, "fileInput"))

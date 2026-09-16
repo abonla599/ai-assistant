@@ -8,16 +8,16 @@
 import json
 import os
 import re
-import sys
 import threading
 import uuid
 
 from openai import OpenAI
-from dotenv import load_dotenv
+
+from app.core.paths import data_root, load_project_env
 
 # 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
 # 否则首次运行时读不到 DEEPSEEK_API_KEY、播种不出任何模型配置。
-load_dotenv()
+load_project_env()
 
 PLACEHOLDER_HINTS = ("your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme")
 
@@ -30,12 +30,7 @@ def _default_path() -> str:
     env_path = os.getenv("PROVIDERS_DB_PATH")
     if env_path:
         return os.path.abspath(env_path)
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))))
-    return os.path.join(base, "data", "providers.json")
+    return os.path.join(data_root(), "data", "providers.json")
 
 
 def mask_key(key: str) -> str:

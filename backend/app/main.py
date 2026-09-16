@@ -53,7 +53,7 @@ except ImportError as e:
 # 3. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
 # 注意：如果 preference_analyzer 已经在上面导入成功，这里可以直接从 app.preference_analyzer 导入函数
 try:
-    from app.feedback_storage import save_feedback
+    from app.feedback_storage import save_feedback, FEEDBACK_FILE
     # 如果 preference_analyzer 模块存在，从中导入具体函数
     if preference_analyzer:
         from app.preference_analyzer import analyze_and_update_preference
@@ -61,6 +61,7 @@ try:
         analyze_and_update_preference = None
 except ImportError as e:
     save_feedback = None
+    FEEDBACK_FILE = None
     analyze_and_update_preference = None
     print(f"⚠️ 反馈存储/偏好分析模块未找到: {e}")
 
@@ -195,9 +196,10 @@ def start_background_scheduler():
     print("🚀 后台偏好分析定时任务已启动")
 
     # 启动反馈文件监听器（仅当 auto_weight_adjuster 可用时）
-    if auto_weight_adjuster is not None:
+    if auto_weight_adjuster is not None and FEEDBACK_FILE:
         watcher_thread = threading.Thread(
             target=auto_weight_adjuster.start_feedback_watcher,
+            kwargs={"feedback_file_path": FEEDBACK_FILE},
             daemon=True
         )
         watcher_thread.start()

@@ -1033,7 +1033,6 @@ function bind() {
     const menu = $("attachMenu");
     if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
   });
-  $("cameraInput").onchange = (e) => pickFiles(e.target);
   $("imageInput").onchange = (e) => pickFiles(e.target);
   $("fileInput").onchange = (e) => pickFiles(e.target);
 

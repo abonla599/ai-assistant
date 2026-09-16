@@ -1,12 +1,12 @@
 import os
-import sys
 import uuid
 import traceback
 import chromadb
-from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
+from app.core.paths import data_root, load_project_env
+
+load_project_env()
 
 # 禁用 chromadb 遥测，避免 CI 中报错干扰
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -15,16 +15,14 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 def _default_persist_dir() -> str:
     """记忆库位置的唯一事实来源，避免依赖进程工作目录。
 
-    优先级：CHROMA_DB_PATH 环境变量 > 打包后 EXE 同级目录 > 仓库根目录。
+    优先级：CHROMA_DB_PATH 环境变量 > 项目根目录。
+    打包版原先落在 EXE 同级目录，而 dist/run_backend 每次重建都会被整体删除，
+    等于一次构建抹光长期记忆；改为项目根后桌面版与源码版共用同一份记忆库。
     """
     env_path = os.getenv("CHROMA_DB_PATH")
     if env_path:
         return os.path.abspath(env_path)
-    if getattr(sys, "frozen", False):
-        return os.path.join(os.path.dirname(sys.executable), "chroma_db")
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))))
-    return os.path.join(repo_root, "chroma_db")
+    return os.path.join(data_root(), "chroma_db")
 
 
 class MemoryManager:
