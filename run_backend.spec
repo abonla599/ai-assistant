@@ -3,7 +3,8 @@
 
 a = Analysis(
     ['run_backend.py'],
-    pathex=[],
+    # 入口以顶层包名 app 导入（见 run_backend.py），分析阶段需要能找到 backend/app
+    pathex=['backend'],
     binaries=[],
     # PWA 静态资源不是 .py，PyInstaller 不会自动收集；目标路径须与
     # app/web/web_router.py 中 frozen 分支拼接的 app/web/static 保持一致。
@@ -12,7 +13,8 @@ a = Analysis(
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
         'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto',
-        'uvicorn.protocols.websockets.wsproto_impl', 'uvicorn.protocols.websockets_impl',
+        'uvicorn.protocols.websockets.websockets_impl',
+        'uvicorn.protocols.websockets.wsproto_impl',
         'chromadb',
         # FastAPI 在函数内条件导入，静态分析抓不到；缺失会让附件上传直接崩
         'multipart',
