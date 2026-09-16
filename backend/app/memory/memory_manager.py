@@ -28,38 +28,53 @@ def _default_persist_dir() -> str:
 class MemoryManager:
     """记忆管理器：负责存储和检索用户记忆"""
 
-    def __init__(self, collection_name="user_memories", persist_dir=None):
+    def __init__(self, collection_name="user_memories", persist_dir=None, embedding_fn=None):
         self.persist_dir = os.path.abspath(persist_dir or _default_persist_dir())
         try:
             self.use_local_embed = False
             self._dummy_embed = False   # 伪嵌入标记
-            api_key = os.getenv("api_key")
+            self._injected_embed = embedding_fn
 
-            if api_key:
-                try:
-                    self.client = OpenAI(
-                        api_key=api_key,
-                        base_url="https://api.apiyi.com/v1"
-                    )
-                    self.embed_model = "text-embedding-3-small"
-                    # 验证 API 是否可用
-                    self.client.embeddings.create(model=self.embed_model, input=["test"])
-                    print("✅ 使用 OpenAI 嵌入模型")
-                except Exception as e:
-                    print(f"⚠️ OpenAI 嵌入不可用: {e}，尝试本地模型")
-                    self._init_local_embed()
+            if embedding_fn is not None:
+                # 测试注入确定性向量：既不打付费嵌入接口，也不依赖本机是否装得下
+                # 本地模型。借用 _dummy_embed 标记走"不做 LLM 摘要"那条既有分支。
+                self.embed_model = "injected"
+                self._dummy_embed = True
             else:
-                print("⚠️ 未配置 api_key，尝试本地模型")
-                self._init_local_embed()
+                api_key = os.getenv("api_key")
 
-            if self._dummy_embed:
-                print("⚠️ 记忆检索已降级为伪嵌入（全零向量），语义检索结果不可信。"
-                      "请配置 api_key 或安装 sentence-transformers。")
+                if api_key:
+                    try:
+                        self.client = OpenAI(
+                            api_key=api_key,
+                            base_url="https://api.apiyi.com/v1"
+                        )
+                        self.embed_model = "text-embedding-3-small"
+                        # 验证 API 是否可用
+                        self.client.embeddings.create(model=self.embed_model, input=["test"])
+                        print("✅ 使用 OpenAI 嵌入模型")
+                    except Exception as e:
+                        print(f"⚠️ OpenAI 嵌入不可用: {e}，尝试本地模型")
+                        self._init_local_embed()
+                else:
+                    print("⚠️ 未配置 api_key，尝试本地模型")
+                    self._init_local_embed()
+
+                if self._dummy_embed:
+                    print("⚠️ 记忆检索已降级为伪嵌入（全零向量），语义检索结果不可信。"
+                          "请配置 api_key 或安装 sentence-transformers。")
 
             self.chroma_client = chromadb.PersistentClient(path=self.persist_dir)
             self.collection = self._open_collection(collection_name)
 
-            mode = "云端" if not (self.use_local_embed or self._dummy_embed) else ("本地" if self.use_local_embed else "伪嵌入")
+            if embedding_fn is not None:
+                mode = "注入(仅测试)"
+            elif self.use_local_embed:
+                mode = "本地"
+            elif self._dummy_embed:
+                mode = "伪嵌入"
+            else:
+                mode = "云端"
             print(f"✅ MemoryManager 初始化完成 (集合: {collection_name}, 嵌入方式: {mode}, "
                   f"维度: {self.embed_dim}, 库路径: {self.persist_dir})")
         except Exception as e:
@@ -123,6 +138,8 @@ class MemoryManager:
             self._dummy_embed_dim = 384   # 保持与常见模型一致的维度
 
     def _embed(self, text: str) -> list:
+        if self._injected_embed is not None:
+            return list(self._injected_embed(text))
         if self.use_local_embed:
             return self.local_model.encode(text).tolist()
         elif self._dummy_embed:
@@ -184,37 +201,34 @@ class MemoryManager:
 
     # 以下方法保持不变
     def search_memory(self, user_id: str, query: str, top_k: int = 5) -> list:
-        query_embed = self._embed(query)
+        """只返回该用户自己的记忆。
+
+        过滤必须下推给 chroma：旧写法先全局取 top_k*2 再在 Python 里按 user_id
+        挑，别人的记忆会把本人的挤出这个窗口；更糟的是窗口内一条都不属于本人时，
+        兜底逻辑会把别人的记忆原样返回，构成跨用户泄露。
+        """
+        total = self.collection.count()
+        if not total:
+            return []
+
         results = self.collection.query(
-            query_embeddings=[query_embed],
-            n_results=top_k * 2
+            query_embeddings=[self._embed(query)],
+            n_results=max(1, min(top_k, total)),
+            where={"user_id": user_id},
         )
 
-        filtered = []
-        if results['ids'] and results['ids'][0]:
-            for i, mem_id in enumerate(results['ids'][0]):
-                meta = results['metadatas'][0][i] if results['metadatas'] else {}
-                # 把 id 并入 meta，供反馈闭环定位"这条回答用了哪几条记忆"，
-                # 同时不改变返回元组长度，避免影响既有解包。
-                meta = {**(meta or {}), "memory_id": mem_id}
-                if meta.get("user_id") == user_id:
-                    filtered.append((
-                        results['documents'][0][i],
-                        results['distances'][0][i],
-                        meta
-                    ))
+        ids = (results.get("ids") or [[]])[0]
+        docs = (results.get("documents") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0]
+        metas = (results.get("metadatas") or [[]])[0]
 
-        if not filtered and results['ids'] and results['ids'][0]:
-            for i, mem_id in enumerate(results['ids'][0]):
-                meta = results['metadatas'][0][i] if results['metadatas'] else {}
-                meta = {**(meta or {}), "memory_id": mem_id}
-                filtered.append((
-                    results['documents'][0][i],
-                    results['distances'][0][i],
-                    meta
-                ))
-
-        return filtered[:top_k]
+        out = []
+        for i, mem_id in enumerate(ids):
+            # 把 id 并入 meta，供反馈闭环定位"这条回答用了哪几条记忆"，
+            # 同时不改变返回元组长度，避免影响既有解包。
+            meta = {**(metas[i] or {}), "memory_id": mem_id}
+            out.append((docs[i], dists[i], meta))
+        return out
 
     def adjust_weights(self, memory_ids: list, delta: float) -> dict:
         """按反馈调整记忆权重，结果夹在 [0.1, 5.0]。
