@@ -130,11 +130,25 @@ class UploadStore:
     def _backfill_owner(self):
         """身份层之前的附件都是本机管理员自己传的，认给他。
 
-        只在缺字段时执行一次，所以重复加载幂等；备份或原子写回失败一律向上抛，
-        进程就不启动——带着半迁移的索引对外服务，等于让"没有 owner"的记录被
-        归属校验静默放行。
+        只在真的缺 owner 时执行一次，字段齐了就一个字节都不写；备份或原子写回
+        失败一律向上抛，进程就不启动——带着半迁移的索引对外服务，等于让"没有
+        owner"的记录被归属校验静默放行。
+
+        ⚠️ 本方法是导入期跑的：模块级 `store = UploadStore()` 一被执行就迁移
+        $UPLOAD_DIR（未设置时是仓库真实的 data/uploads/）。见该行的注释。
         """
-        missing = [r for r in self._index.values() if "owner" not in r]
+        # 畸形记录要报错给人看，别留 `record["owner"] = ...` 那句
+        # "TypeError: 'str' object does not support item assignment"：冻结成 EXE
+        # 之后它既不写文件名也不说哪条记录，等于没法排查。
+        for upload_id, record in self._index.items():
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"附件索引 {self.index_path} 中的记录 {upload_id!r} 不是对象（实际是 "
+                    f"{type(record).__name__}），无法补 owner。请修复或还原该文件："
+                    "宁可拒绝启动，也不带着认不出归属的索引对外服务。")
+        # 判据是 not r.get("owner")，不是 "owner" not in r：手工写成
+        # {"owner": null} 的记录也算没迁完，放过去就永远认不回属主。
+        missing = [r for r in self._index.values() if not r.get("owner")]
         if not missing:
             return
         backup = f"{self.index_path}.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -142,8 +156,9 @@ class UploadStore:
         for record in missing:
             record["owner"] = self.LEGACY_OWNER
         self._flush()
-        print(f"🧭 已为 {len(missing)} 条历史附件补 owner={self.LEGACY_OWNER}，"
-              f"原件备份于 {backup}")
+        # 数据文件的绝对路径进日志：是不是动了用户真实的 data/，第一眼就能看出来。
+        print(f"🧭 已为 {len(missing)} 条历史附件补 owner={self.LEGACY_OWNER}"
+              f"（数据文件 {self.index_path}），原件备份于 {backup}")
 
     def _flush(self):
         tmp = self.index_path + ".tmp"
@@ -247,6 +262,12 @@ class UploadStore:
             return True
 
 
+# ⚠️ 导入期副作用：这一行不只是读 $UPLOAD_DIR 下的索引，它会在索引缺 owner 时
+# **改写用户真实的数据文件**，并在旁边落下一个 index.json.bak-<时间戳>。
+# $UPLOAD_DIR 未设置时解析到仓库真实的 data/uploads/，所以任何脚本、REPL、
+# 测试都必须"先定 env，再 import app.core.uploads"（本任务的一次迁移演练正是
+# 漏了这一步，把真实索引给迁了）。fail-fast 是刻意的：宁可启动失败，也不让
+# 没有归属的记录被校验放行。改成惰性构造留给 Task 8，这一轮先付注释这笔钱。
 store = UploadStore()
 
 

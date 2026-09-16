@@ -17,7 +17,10 @@ from app.tools.builtin_tools import *
 
 
 class ChatPipeline:
-    def __init__(self, user_id: str = "default_user"):
+    def __init__(self, user_id: str):
+        # user_id 必填、不给默认值：默认成 "default_user" 就是本机管理员，漏传的
+        # 调用点会静默把对话记到管理员名下、并以他的身份检索与写记忆——和本计划
+        # 对 owner 禁默认值完全同一形状的洞。宁可直接 TypeError。
         self.user_id = user_id
         # 测试/CI 下为 None（走内存假存储），此时跳过记忆注入与自动保存
         self.memory = memory_manager

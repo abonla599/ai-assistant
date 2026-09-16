@@ -56,11 +56,27 @@ class SessionStore:
     def _backfill_owner(self):
         """把身份层之前建的会话认给本机管理员：它们确实都是他一个人聊出来的。
 
-        回填只在缺字段时发生一次，因此重复加载幂等；备份或写回失败一律向上抛，
-        让进程起不来。带着半迁移的库对外服务更糟——那时 owner 校验会静默放行，
-        而这些会话里的聊天记录是要拿来当"归属"依据的。
+        回填只在真的缺 owner 时发生一次，字段齐了就一个字节都不写；备份或写回
+        失败一律向上抛，让进程起不来。带着半迁移的库对外服务更糟——那时 owner
+        校验会静默放行，而这些会话里的聊天记录是要拿来当"归属"依据的。
+
+        ⚠️ 本方法是导入期跑的：构造 SessionStore 就等于迁移 $SESSION_DB_PATH
+        （未设置时是仓库真实的 data/sessions.json）。见 main.py 里
+        `sessions_store = SessionStore()` 那段注释。
         """
-        missing = [s for s in self._sessions.values() if "owner" not in s]
+        # 畸形记录先报错再说：`record["owner"] = ...` 抛的是
+        # "TypeError: 'str' object does not support item assignment"，冻结成 EXE
+        # 之后只剩这一行、连是哪个文件都不知道，用户根本没法自助修复。
+        for session_id, record in self._sessions.items():
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"会话文件 {self.path} 中的记录 {session_id!r} 不是对象（实际是 "
+                    f"{type(record).__name__}），无法补 owner。请修复或还原该文件："
+                    "宁可拒绝启动，也不带着认不出归属的库对外服务。")
+        # 判据是 not s.get("owner")，不是 "owner" not in s：手工改成
+        # {"owner": null} 也算没迁完。放过去的话它会被归属校验当成"已有 owner"
+        # 跳过，此后与任何 user_id 都不相等，这条会话就永久隐身了。
+        missing = [s for s in self._sessions.values() if not s.get("owner")]
         if not missing:
             return
         # 备份与写回任何一步失败都直接向上抛：SessionStore 在导入 app.main 时
@@ -70,8 +86,10 @@ class SessionStore:
         for record in missing:
             record["owner"] = self.LEGACY_OWNER
         self._flush()
-        print(f"🧭 已为 {len(missing)} 条历史会话补 owner={self.LEGACY_OWNER}，"
-              f"原件备份于 {backup}")
+        # 把数据文件的绝对路径打进日志：这次迁移动的是不是用户真实的 data/，
+        # 看一眼输出的第一秒就知道，不用等事后去比对 md5。
+        print(f"🧭 已为 {len(missing)} 条历史会话补 owner={self.LEGACY_OWNER}"
+              f"（数据文件 {self.path}），原件备份于 {backup}")
 
     def _flush(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)

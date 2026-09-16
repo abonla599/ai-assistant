@@ -159,6 +159,12 @@ class OrchestrateRequest(BaseModel):
 # ---------- 会话存储 ----------
 from app.session.session_store import SessionStore
 
+# ⚠️ 导入期副作用：这一行会把 $SESSION_DB_PATH 指向的文件读进来并做 owner 回填，
+# 未设置该变量时就是仓库真实的 data/sessions.json —— 也就是说"只是 import 一下
+# app.main"就会改写用户真实数据，并在旁边落下 sessions.json.bak-<时间戳>。
+# 脚本与测试必须先定 SESSION_DB_PATH / UPLOAD_DIR / USERS_DB_PATH /
+# INVITES_DB_PATH，再导入本模块（backend/tests/conftest.py 就是为此存在）。
+# fail-fast 是刻意的；改成惰性构造留给 Task 8。
 sessions_store = SessionStore()
 
 # ---------- 后台定时任务 ----------
@@ -249,8 +255,24 @@ def _prepare_chat(request: ChatRequest, principal: Principal):
     return provider, messages, history_text
 
 
+def _require_session_owner(session_id, principal: Principal) -> None:
+    """有 session_id 就先证明它属于调用者，否则 404，且必须在调模型之前。
+
+    为什么不能只靠 add_message 返回 False：那样这条路会对"别人的会话 id"回一个
+    200，而模型已经调完、token 已经花掉，转录则被静默丢掉——调用方看到的界面
+    上一切正常，历史里一个字都没落。写没写进去是这条链路的契约，就不能靠一个
+    被丢弃的返回值来表达。
+
+    404 不会把它变成探测器："不是你的"和"根本不存在"经 store 返回同一个 None，
+    因此发出的是同一个 404、同一句话，跟 /v1/sessions/{id} 那些路由一模一样。
+    """
+    if session_id and sessions_store.get(session_id, owner=principal.user_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+
 @app.post("/v1/chat")
 async def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
+    _require_session_owner(request.session_id, principal)
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
@@ -291,6 +313,10 @@ async def stream_chat_endpoint(request: ChatRequest,
                                principal: Principal = CurrentPrincipal):
     """流式聊天端点，返回 Server-Sent Events"""
     from app.core.streaming import stream_chat
+
+    # 归属必须在这里判，不能在 generate() 里判：流一开始 HTTP 状态就锁死在 200，
+    # 那时再发现 session_id 不是你的，只能静默不落盘（原先正是这样）。
+    _require_session_owner(request.session_id, principal)
 
     # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
     try:
