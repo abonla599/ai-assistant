@@ -141,7 +141,11 @@ function renderModelSelect() {
   state.providers.forEach((p) => {
     const opt = document.createElement("option");
     opt.value = p.id;
-    opt.textContent = p.usable ? p.name : `${p.name}（${p.reason || "不可用"}）`;
+    if (p.usable) {
+      opt.textContent = p.supports_vision ? `${p.name} · 支持图片` : p.name;
+    } else {
+      opt.textContent = `${p.name}（${p.reason || "不可用"}）`;
+    }
     opt.disabled = !p.usable;
     sel.appendChild(opt);
   });
@@ -862,6 +866,15 @@ function syncPersonaChip() {
   $("personaInput").value = p;
 }
 
+function setAttachMenu(open) {
+  $("attachMenu").classList.toggle("hidden", !open);
+  $("attachBtn").classList.toggle("open", !!open);
+}
+
+function toggleAttachMenu() {
+  setAttachMenu($("attachMenu").classList.contains("hidden"));
+}
+
 /* ---------------- 侧栏开合 ---------------- */
 function openSidebar() { $("sidebar").classList.add("open"); $("backdrop").classList.add("show"); }
 function closeSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
@@ -913,8 +926,13 @@ function bind() {
   });
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
-  $("attachFileBtn").onclick = () => $("filePicker").click();
-  $("attachImageBtn").onclick = () => $("imagePicker").click();
+  $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
+  $("pickImage").onclick = () => { setAttachMenu(false); $("imagePicker").click(); };
+  $("pickFile").onclick = () => { setAttachMenu(false); $("filePicker").click(); };
+  document.addEventListener("click", (e) => {
+    const menu = $("attachMenu");
+    if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
+  });
   $("filePicker").onchange = (e) => pickFiles(e.target);
   $("imagePicker").onchange = (e) => pickFiles(e.target);
 
@@ -976,7 +994,11 @@ function bind() {
   };
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closeSettings(); closeSidebar(); }
+    if (e.key === "Escape") {
+      closeSettings();
+      closeSidebar();
+      setAttachMenu(false);
+    }
   });
 }
 
@@ -988,6 +1010,23 @@ function exportCurrent() {
     .concat(real.map((m) => `**${m.role === "user" ? "我" : "助手"}**：\n\n${m.content}\n`))
     .join("\n");
   download(`${name}.md`, md, "text/markdown");
+}
+
+/** 移动端软键盘会盖住输入框：把 body 高度收到可视视口，flex 布局即整体让位。 */
+function setupKeyboardAware() {
+  const vv = window.visualViewport;
+  if (!vv || window.innerWidth > 860) return;
+
+  const apply = () => {
+    document.body.style.height = `${Math.round(vv.height)}px`;
+    if (document.activeElement === $("input")) scrollBottom();
+  };
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  $("input").addEventListener("focus", () => setTimeout(apply, 120));
+  $("input").addEventListener("blur", () => {
+    setTimeout(() => { document.body.style.height = ""; }, 150);
+  });
 }
 
 /* ---------------- 启动 ---------------- */
@@ -1008,6 +1047,7 @@ async function restore() {
 async function boot() {
   applyTheme();
   bind();
+  setupKeyboardAware();
   updateSendEnabled();
   $("tempRange").value = pref.temperature;
   $("tempVal").textContent = pref.temperature;

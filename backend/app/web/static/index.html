@@ -63,16 +63,25 @@
         <form class="input-card" id="chatForm">
           <textarea id="input" rows="1" placeholder="发消息，Shift + Enter 换行" autocomplete="off"></textarea>
           <div class="input-foot">
-            <button type="button" class="icon-btn" id="attachFileBtn" title="上传文本/代码文件" aria-label="添加文件">📎</button>
-            <button type="button" class="icon-btn" id="attachImageBtn" title="上传图片（需支持视觉的模型）" aria-label="添加图片">🖼</button>
+            <button type="button" class="icon-btn plus-btn" id="attachBtn" aria-label="添加附件" title="添加附件">＋</button>
             <span class="hint" id="statusHint"></span>
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
             <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
         </form>
+
+        <div class="attach-menu hidden" id="attachMenu" role="menu">
+          <button type="button" class="attach-tile" id="pickImage" role="menuitem">
+            <span class="tile-ico">🖼</span><span>图片</span>
+          </button>
+          <button type="button" class="attach-tile" id="pickFile" role="menuitem">
+            <span class="tile-ico">📎</span><span>文件</span>
+          </button>
+        </div>
+
         <input type="file" id="filePicker" hidden multiple
                accept=".txt,.md,.markdown,.py,.js,.ts,.json,.yaml,.yml,.csv,.tsv,.log,.ini,.cfg,.html,.css,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml">
-        <input type="file" id="imagePicker" hidden multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp">
+        <input type="file" id="imagePicker" hidden multiple accept="image/*">
       </div>
     </main>
   </div>

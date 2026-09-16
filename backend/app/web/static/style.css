@@ -235,6 +235,38 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 .btn-send:hover { background: var(--accent-hover); }
 
+/* 「+」按钮与附件菜单
+   注意：按钮同时带 .icon-btn 与 .plus-btn，而 .icon-btn 规则在下方且特异性相同，
+   会覆盖圆角与描边，因此这里必须用组合选择器提高特异性。 */
+.icon-btn.plus-btn {
+  width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--bg-soft); color: var(--text-2); display: grid; place-items: center;
+  font-size: 17px; padding: 0; flex: none;
+  transition: transform .18s ease, background .15s, border-color .15s;
+}
+.icon-btn.plus-btn:hover { background: var(--bg-hover); color: var(--text); }
+.icon-btn.plus-btn.open { transform: rotate(45deg); border-color: var(--accent); color: var(--accent); }
+
+.attach-menu {
+  display: flex; gap: 10px;
+  max-width: 780px; margin: 0 auto 8px;
+  padding: 10px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: pop .14s ease-out;
+}
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.attach-tile {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
+  border-radius: 12px; padding: 9px 16px 9px 9px; font-size: 14px; cursor: pointer;
+}
+.attach-tile:hover { border-color: var(--accent); background: var(--accent-soft); }
+.attach-tile .tile-ico {
+  width: 32px; height: 32px; border-radius: 9px; background: var(--bg-hover);
+  display: grid; place-items: center; font-size: 16px; flex: none;
+}
+
 .icon-btn { border: 0; background: transparent; color: var(--text-2); cursor: pointer; border-radius: 9px; padding: 6px 9px; font-size: 16px; line-height: 1; flex: none; }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
 
