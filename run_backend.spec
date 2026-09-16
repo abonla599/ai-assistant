@@ -1,24 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+# chromadb 用配置项按字符串路径动态导入 chromadb.api.rust，原生实现又在独立包
+# chromadb_rust_bindings 里，静态分析两者都发现不了，必须显式整体收集。
+chroma_datas, chroma_binaries, chroma_hiddenimports = collect_all("chromadb")
+binding_datas, binding_binaries, binding_hiddenimports = collect_all("chromadb_rust_bindings")
 
 
 a = Analysis(
     ['run_backend.py'],
     # 入口以顶层包名 app 导入（见 run_backend.py），分析阶段需要能找到 backend/app
     pathex=['backend'],
-    binaries=[],
-    # PWA 静态资源不是 .py，PyInstaller 不会自动收集；目标路径须与
-    # app/web/web_router.py 中 frozen 分支拼接的 app/web/static 保持一致。
-    datas=[('backend/app/web/static', 'app/web/static')],
+    binaries=chroma_binaries + binding_binaries,
+    datas=[('backend/app/web/static', 'app/web/static')] + chroma_datas + binding_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',
         'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto',
         'uvicorn.protocols.websockets.websockets_impl',
         'uvicorn.protocols.websockets.wsproto_impl',
-        'chromadb',
         # FastAPI 在函数内条件导入，静态分析抓不到；缺失会让附件上传直接崩
         'multipart',
-    ],
+    ] + chroma_hiddenimports + binding_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
