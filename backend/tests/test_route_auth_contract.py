@@ -10,25 +10,51 @@
 判定看的是**依赖树里的可调用对象本身**，不是参数名：参数名可以随便起，身份也
 能藏在子依赖里（端点只依赖一个"取会话"的辅助函数，那个辅助函数才带 principal）。
 只看签名就会既误报又漏报，而误报多了就有人往测试里加白名单——那正是这把锁被
-拆掉的方式。所以本文件也测自己的扫描逻辑（末尾两条）。
+拆掉的方式。所以本文件也测自己的扫描逻辑（末尾几条）。
+
+范围还有两句话（3、4 条）：
+3. "每条路由"里的**路由**指的是带依赖树的可路由对象，HTTP（APIRoute）与
+   websocket（APIWebSocketRoute）两类都算。websocket 必须在范围内，而且它是
+   唯一只能靠这里守住的形状：Starlette 的 `@app.middleware("http")` 只处理
+   http scope，握手根本不经过 install_auth，实测见
+   `test_the_http_middleware_does_not_protect_a_websocket_handshake`。
+   今天全仓没有一条 websocket 路由（`grep -rn "websocket(" backend/app/` 无命中），
+   所以这是潜伏而非现行漏洞——也正因为还没人踩，现在放宽最便宜。
+   所以这一半范围**只许放宽、不许收窄**——把它写回 `isinstance(route, APIRoute)`
+   的后果不是漏掉一个无人用的边角，而是给一条正确挂好身份依赖的
+   `@app.websocket("/v1/...")` 判红，并叫作者"别用这个路由类"；那种消息只会把人
+   推向删断言或加例外名单——就是上面说的拆锁方式。
+4. 契约只管 /v1，所以"每条可路由路径至少被一把锁认领"必须由另一条测试钉住
+   （`test_nothing_routable_lives_outside_both_locks`）：中间件按
+   authz._PROTECTED_PREFIXES 放行，契约按 /v1 过滤，两条锁的差集就是无人区，
+   新加一个顶层前缀（/api/... 这种）会同时落在两把锁之外。
 """
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
 from fastapi import Depends, FastAPI
-from fastapi.routing import APIRoute, get_dependant
+from fastapi.routing import APIRoute, APIWebSocketRoute, get_dependant
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocket
 
 from app.core import authz
-from app.core.authz import (PUBLIC_PATHS, CurrentPrincipal, UNAUTHORIZED_DETAIL,
-                            current_principal, require_admin)
+from app.core.authz import (PUBLIC_PATHS, CurrentPrincipal, Principal,
+                            UNAUTHORIZED_DETAIL, current_principal, install_auth,
+                            require_admin)
 from app.main import app
 
 GUARD_CALLABLES = {current_principal, require_admin}
 # 非 /v1 的系统端点：健康检查与静态首页。契约刻意只管 /v1——它们是运维探针和
 # PWA 外壳，卷进"公开面清单"只会让人以为这里还能再加一个免鉴权端点。
 EXEMPT_PATHS = {"/", "/health"}
+# EXEMPT_PATHS + PWA 外壳 = 今天全部"在 /v1 之外还能被请求命中"的路径（除文档路由）。
+# 这个集合的**完备性**由 test_nothing_routable_lives_outside_both_locks 钉住：契约只管
+# /v1，中间件只管 authz._PROTECTED_PREFIXES，新增一个顶层前缀就会同时落在两把锁之外，
+# 那条测试就是为了让那种形状当场变红。
+SYSTEM_PATHS = EXEMPT_PATHS | {"/app"}
 
 
 def _is_v1(path: str) -> bool:
@@ -65,34 +91,74 @@ def _route_guards(route) -> set:
     return found
 
 
-def _v1_routes():
-    """全部 /v1 路由，并确认它们真的带着可检查的依赖树。
+def _v1_routes(app_obj=None):
+    """全部 /v1 路由（HTTP 与 websocket 都算），并确认它们真的带着可检查的依赖树。
+
+    成员判定只看**有没有依赖树可查**，不看类名。理由见模块 docstring 的范围第 3 条：
+    本仓 FastAPI 0.136.1 上 APIWebSocketRoute 不是 APIRoute 的子类，却同样带着
+    .dependant（实测：`issubclass(APIWebSocketRoute, APIRoute)` 为 False），而
+    websocket 握手不经过 HTTP 中间件，路由级依赖是它唯一的锁。用 isinstance 收窄
+    就是把这一类整体推到契约之外，还给"守卫挂对了"的人判红。
+    `_callables_of` 早就两种形状都走，所以这里不需要额外分支。
 
     这里刻意用 assert 而不是 continue：/v1 下一条 Mount 同样能被请求命中，对本契约
-    却是隐形的。静默跳过等于把"看不见"当成"合规"，而那正是最需要它说话的形状。
+    却是隐形的（它连 .dependant 都没有）。静默跳过等于把"看不见"当成"合规"，而那
+    正是最需要它说话的形状。
+
+    app_obj 只给本文件的探针用（造一条 /v1 websocket 看扫描器认不认），默认仍是真 app，
+    契约本体扫的始终是应用真实挂载的那张路由表。
     """
     routes = []
-    for route in app.routes:
+    for route in (app if app_obj is None else app_obj).routes:
         path = getattr(route, "path", "")
         if not _is_v1(path):
             continue
-        assert isinstance(route, APIRoute) and getattr(route, "dependant", None) is not None, (
-            f"{path} 是 {type(route).__name__}，没有依赖树可查："
-            "契约扫不到它，也就护不住它。请改成带身份依赖的端点。")
+        assert getattr(route, "dependant", None) is not None, (
+            f"{path} 是 {type(route).__name__}，没有 .dependant 可查："
+            "契约扫不到它，也就护不住它。/v1 下请改用带身份依赖的端点——"
+            "HTTP 用 @app.<method>、长连接用 @app.websocket，两者都带 .dependant；"
+            "Mount / 重定向这类没有依赖树，中间件对它们同样是瞎的。")
         routes.append(route)
     return routes
+
+
+def _describe(route) -> str:
+    """失败消息里的"哪条路由"：方法 + 路径。
+
+    只报路径会让人以为补一个依赖就完事（同一 path 可以挂多种方法）。websocket 路由
+    没有 .methods（APIWebSocketRoute 不继承 APIRoute），标成 WS——不能直接读属性，
+    否则契约范围一放宽，这条消息自己就先 AttributeError。
+    """
+    methods = getattr(route, "methods", None)
+    if methods is None:
+        return f"['WS'] {route.path}"
+    return f"{sorted(methods - {'HEAD', 'OPTIONS'})} {route.path}"
+
+
+def _identity_gaps(app_obj=None):
+    """该路由表里"没声明任何身份守卫"的 /v1 路由（公开名单除外）。"""
+    return [route for route in _v1_routes(app_obj)
+            if route.path not in PUBLIC_PATHS
+            and not (_route_guards(route) & GUARD_CALLABLES)]
+
+
+def _unclaimed_paths(app_obj) -> set:
+    """路由表里"两把锁都不认领"的路径：不在 /v1 之下、不在系统端点里、
+    也不在中间件的受保护前缀里。
+
+    前缀直接读 authz._PROTECTED_PREFIXES，不在测试里抄第二份清单：抄的那份一定会漂移，
+    而这里的语义本来就是"中间件管不管这条"。
+    """
+    return {path for path in {getattr(r, "path", "") for r in app_obj.routes}
+            if not _is_v1(path) and path not in SYSTEM_PATHS
+            and not path.startswith(authz._PROTECTED_PREFIXES)}
 
 
 # ---------- 契约本体 ----------
 
 
 def test_every_v1_route_declares_an_identity_dependency():
-    missing = []
-    for route in _v1_routes():
-        if route.path in PUBLIC_PATHS:
-            continue
-        if not (_route_guards(route) & GUARD_CALLABLES):
-            missing.append(f"{sorted(route.methods - {'HEAD', 'OPTIONS'})} {route.path}")
+    missing = [_describe(route) for route in _identity_gaps()]
     assert not missing, f"以下端点未声明身份依赖：{sorted(missing)}"
 
 
@@ -122,9 +188,130 @@ def test_exempt_paths_stay_outside_the_contract():
     （探针就没法用了），或者给非 /v1 路径也开一份例外名单（那就不再是"公开面只有
     注册一项"）。同时确认这几个端点还在——哪天它被删了，这条边界就该有人说一声。
     """
-    assert all(not _is_v1(p) for p in EXEMPT_PATHS | {"/app"}), "豁免路径不该落在 /v1 之下"
+    assert all(not _is_v1(p) for p in SYSTEM_PATHS), "豁免路径不该落在 /v1 之下"
     mounted = {getattr(r, "path", "") for r in app.routes}
     assert EXEMPT_PATHS <= mounted, f"豁免名单里的端点不见了：{sorted(EXEMPT_PATHS - mounted)}"
+
+
+# ---------- 范围：websocket 与顶层前缀 ----------
+
+
+def test_a_v1_websocket_route_is_scanned_and_not_skipped():
+    """契约范围包含 /v1 websocket：守卫挂对了就通过，没挂就点名——只放宽、不失效。
+
+    这条钉的是 `_v1_routes` 的成员判定，也就是"路由"这个词的定义。它存在的意义是
+    防止下一次收窄：这里曾经写的是 `isinstance(route, APIRoute)`，而本仓 FastAPI
+    0.136.1 上 APIWebSocketRoute 不是它的子类（`issubclass(...)` 实测 False），
+    于是 `@app.websocket("/v1/...")` 会被判红，失败消息还叫作者"别用这个路由类"——
+    那正是本文件 docstring 里警告过的形状：一条只会误报的断言，最后一定被人删掉或
+    塞进例外名单，而 websocket 恰恰是中间件管不到、只能靠这条守卫的那一类（见下一条）。
+
+    两半都要：临时 app 证明扫描器**接受**挂对了守卫的长连接（放宽），真 app 上临时
+    挂一条裸的、要求主契约点名它（放宽之后仍然有牙）。真 app 那半在 finally 里摘干净，
+    不给生产路由表留痕迹。
+    """
+    probe = FastAPI()
+
+    @probe.websocket("/v1/ws-guarded")
+    async def guarded(ws: WebSocket, _: Principal = CurrentPrincipal):
+        await ws.accept()
+
+    @probe.websocket("/v1/ws-bare")
+    async def bare(ws: WebSocket):
+        await ws.accept()
+
+    routes = {r.path: r for r in _v1_routes(probe)}   # 不抛 assert = 两类都被接受
+    assert set(routes) == {"/v1/ws-guarded", "/v1/ws-bare"}, "websocket 路由没进契约范围"
+    gaps = [_describe(r) for r in _identity_gaps(probe)]
+    assert gaps == ["['WS'] /v1/ws-bare"], f"裸 websocket 没被抓出来，或合规那条被误报：{gaps}"
+
+    async def unguarded(ws: WebSocket):
+        await ws.accept()
+
+    probe_route = APIWebSocketRoute("/v1/ws-probe-bare", unguarded)
+    app.router.routes.append(probe_route)
+    try:
+        named = [_describe(r) for r in _identity_gaps()]
+    finally:
+        app.router.routes.remove(probe_route)
+    assert named == ["['WS'] /v1/ws-probe-bare"], \
+        f"主契约没抓到一条裸的 /v1 websocket：{named}"
+    assert not _identity_gaps(), "临时路由没摘干净，会污染后面的用例"
+
+
+def test_the_http_middleware_does_not_protect_a_websocket_handshake(monkeypatch):
+    """上一条为什么必须存在：install_auth 对 websocket 握手一个字都不做。
+
+    Starlette 的 `@app.middleware("http")` 只包 http scope，websocket 连接直接落到
+    路由上。同一个探针 app、同一套 enforced 环境：匿名 GET 拿 401，匿名 websocket
+    照样连上——所以 /v1 长连接的路由级身份依赖是**唯一**那把锁，没有中间件兜底。
+    这条不是在测鉴权，是在测"这里只剩一把锁"这个前提；前提哪天变了（有人把中间件
+    改成 ASGI 级），它会失败并要求重写上面那段理由。
+    """
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")   # 有身份可服务，排除 503 那条通路
+
+    probe = FastAPI()
+    install_auth(probe)
+
+    @probe.get("/v1/ping")
+    async def ping():
+        return {"ok": True}
+
+    @probe.websocket("/v1/echo")
+    async def echo(ws: WebSocket):
+        await ws.accept()
+        await ws.send_text("connected")
+        await ws.close()
+
+    probe_client = TestClient(probe)
+    assert probe_client.get("/v1/ping").status_code == 401
+    try:
+        with probe_client.websocket_connect("/v1/echo") as ws:
+            hello = ws.receive_text()
+    except Exception as exc:                        # noqa: BLE001 - 要测的就是"没被挡住"
+        pytest.fail(f"握手竟然被中间件挡住了（{type(exc).__name__}: {exc}）——"
+                    "install_auth 已覆盖 websocket，本文件的范围理由需要重写")
+    assert hello == "connected"
+
+
+def test_nothing_routable_lives_outside_both_locks():
+    """契约扫 /v1，中间件护 authz._PROTECTED_PREFIXES —— 两者的并集必须盖住整张路由表。
+
+    这条管的是"两把锁的范围悄悄分叉"：中间件今天护 /v1/、/docs、/redoc、
+    /openapi.json，契约只认 /v1。**新加一个顶层前缀**（/api/foo 这种）时两把锁都不会
+    说话——中间件按前缀放过，契约按 /v1 过滤，于是它能带着零道鉴权上线而 CI 全绿。
+    所以这里要求每条可路由路径至少被一把锁认领：在 /v1 之下、在 SYSTEM_PATHS 里、
+    或落在 _PROTECTED_PREFIXES 里。前缀直接从 authz 取，不抄第二份清单——把 "/docs"
+    从 _PROTECTED_PREFIXES 里删掉也会当场红，那正是"文档路由哪天变匿名可读"的形状。
+
+    判别力当场自证：临时往真 app 挂一条 /api/... 路由，要求它被抓出来，然后在
+    finally 里摘干净（不留任何被跟踪文件的改动）。
+    """
+    unclaimed_now = _unclaimed_paths(app)
+    assert unclaimed_now == set(), f"这些可路由路径两把锁都不认：{sorted(unclaimed_now)}"
+
+    async def beacon():
+        return {"ok": True}
+
+    probe_route = APIRoute("/api/beacon", beacon, methods=["GET"])
+    app.router.routes.append(probe_route)
+    try:
+        unclaimed = _unclaimed_paths(app)
+    finally:
+        app.router.routes.remove(probe_route)
+    assert unclaimed == {"/api/beacon"}, f"/api 探针没被抓出来，这条是空锁：{sorted(unclaimed)}"
+    assert _unclaimed_paths(app) == set(), "临时路由没摘干净，会污染后面的用例"
+
+    # 差集里剩下的只该是 FastAPI 自己生成的文档面：中间件认领、契约看不见（它们没有
+    # .dependant）。写得具象一点，是为了让"哪天有人往 /docs 旁边挂个新前缀"变成一次
+    # 显式的、要写理由的改动。disabled 模式下这几条才会存在，所以用 ⊆ 而不是 ==。
+    paths = {getattr(r, "path", "") for r in app.routes}
+    middleware_only = {p for p in paths
+                       if not _is_v1(p) and p not in SYSTEM_PATHS
+                       and p.startswith(authz._PROTECTED_PREFIXES)}
+    assert middleware_only <= {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}, \
+        f"出现了契约之外、只有中间件认领的新路径：{sorted(middleware_only)}"
 
 
 def test_admin_surface_never_settles_for_mere_identity():
@@ -144,7 +331,7 @@ def test_agent_and_task_surface_is_admin_only():
     把这些遗留端点整个删掉是好事，不该被这条测试判红；漏挂守卫自有主契约说话。
     哪天要给普通用户开这一面，先给 task 加归属（与会话同一套规则），再来改这里。
     """
-    demoted = [f"{sorted(r.methods - {'HEAD', 'OPTIONS'})} {r.path}" for r in _v1_routes()
+    demoted = [_describe(r) for r in _v1_routes()
                if (r.path.startswith("/v1/agent") or r.path.startswith("/v1/tasks"))
                and require_admin not in _route_guards(r)]
     assert not demoted, f"任务/智能体端点被降级为普通用户可用：{sorted(demoted)}"
@@ -218,17 +405,35 @@ def test_admin_endpoints_are_not_reachable_without_credentials(client, enforced)
 
 
 def test_no_protected_route_is_reachable_without_credentials(client, enforced):
-    """静态契约只说"依赖被声明了"，这条说"没凭据的人在 HTTP 边界上就被拒"。
+    """静态契约只说"依赖被声明了"，这条说"匿名请求在 HTTP 边界上真的拿不到东西"。
 
-    两者不可互相替代：把 current_principal 改成"取不到身份就发一个默认 principal"
-    这种为了让测试变绿的偷懒写法，静态契约一条都不会红（依赖确实挂在树上），而
-    整站已经向匿名访客敞开。这里逐条要求 401 + 那句对客户端的语义承诺，
-    覆盖的是全部无路径参数的 GET 端点（含 Task 6 补挂身份的那几条）。
+    这条测什么、不测什么，都用临时改造实测过（三组，见报告 §Fix round 1 的 F2 小节），
+    别凭印象写：
+
+    - 会红：任何一条无路径参数的 GET 端点对匿名请求吐出别的东西（200/403/500/301），
+      包括**两把锁同时失守**的形状——中间件不再拒绝、这条端点又没挂依赖。逐条走一遍
+      整张面是这里独有的价值：其余测试都只看抽查点，看不到"某条端点悄悄换人应答"。
+    - 不会红（实测）：只删中间件里那句 401。每条端点自己的依赖仍然 401，
+      红的是 test_trailing_slash_is_not_a_credential_free_door、
+      test_the_http_middleware_does_not_protect_a_websocket_handshake（它的探针端点
+      刻意不挂依赖，所以真的在测中间件那一步）和 test_authz_failclosed 的文档面。
+      这正是"路由级依赖 = 纵深防御"的实测证据，不是修辞。
+    - 不会红（实测）：往 PUBLIC_PATHS 里塞一条真端点（该路径这里会被跳过）。
+      红的是 test_public_allowlist_is_exactly_registration 与
+      test_no_public_path_shadows_another_route。
+    - 不会红（实测）：把 current_principal 改成"取不到身份就发一个默认 principal"。
+      中间件先于路由 401，请求走不到依赖那一层（test_authz_failclosed 的依赖探针也
+      挂了 install_auth，同样被短路）。全仓没有测试覆盖这一格，要暴露得直接调依赖
+      函数——本文件不冒充覆盖了它，这一洞交给 Task 8（报告"已知残留"第 6 条）。
+
+    也就是说：这条是**中间件/响应形状**的锁，静态契约是**端点声明**的锁，各测各的。
+    路由级依赖之所以仍然必要（而不是"有中间件就够了"），就是上面第二条那个实测：
+    受保护前缀哪天收窄、挂载顺序哪天被人动、以及 websocket 握手压根不经过这个中间件。
     """
     enforced("垫底用户")
     paths = sorted({r.path for r in _v1_routes()
-                    if "GET" in (r.methods or set()) and r.path not in PUBLIC_PATHS
-                    and "{" not in r.path})
+                    if "GET" in (getattr(r, "methods", None) or set())
+                    and r.path not in PUBLIC_PATHS and "{" not in r.path})
     assert paths, "没有可扫的 GET 端点，这条测试是空的"
     for path in paths:
         res = client.get(path)

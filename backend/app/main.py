@@ -430,9 +430,10 @@ from fastapi.responses import FileResponse
 async def list_models(_: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
 
-    身份在这里刻意不用取名（catalog() 是全站视图），挂上它只为两件事：
-    "这台机器接了哪些上游"本身就是对外侦察材料，不该由没凭据的人读到；
-    而路由契约（tests/test_route_auth_contract.py）不接受任何 /v1 端点没有身份。
+    身份在这里刻意不用取名（catalog() 是全站视图），挂它也不是为了挡住匿名读取
+    ——那道门是 install_auth 的中间件在路由之前守着的。要的理由就两条：路由契约
+    （tests/test_route_auth_contract.py）不接受没有身份的 /v1 端点，且这是中间件
+    之外多出来的一把锁。完整理由见下面 providers 段那段注释。
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
     """
     return {
@@ -442,11 +443,17 @@ async def list_models(_: Principal = CurrentPrincipal):
     }
 
 # ---------- 模型服务（Provider）配置 ----------
-# 这一面先补上身份（Task 6 的契约要求每条 /v1 路由都声明身份：没有它，任何人
-# 不带凭据就能枚举 provider id、base_url 与密钥掩码），但角色仍留 user——
-# 写侧升级为管理员是 Task 7 的活（"providers 转管理员 + 前端注册界面"）：
-# 改默认 provider 会全站换上游，属于越权通道，但前端设置页现在就摆在
-# /app 里给普通用户用，只改后端等于把那个页面打成 403，得连着界面一起改。
+# 这一面补上了身份依赖，但角色仍留 user。理由要说准，别写成一个不存在的威胁模型：
+# 补身份**不是**为了挡住匿名枚举——install_auth 的中间件挂在路由之前，非公开的
+# /v1 路径一律先 401（见 authz._PROTECTED_PREFIXES 与
+# tests/test_route_auth_contract.py::test_no_protected_route_is_reachable_without_credentials），
+# provider id、base_url 与密钥掩码对没凭据的人本来就不可见。这条依赖买到的是另外
+# 三件事：1) 路由契约要求每条 /v1 路由声明身份，不声明就红；2) 身份从此在端点手里，
+# Task 7 做按人隔离时不必再补一轮；3) 纵深防御——受保护前缀哪天收窄、中间件挂载
+# 顺序哪天被人动过，锁就不止一把（websocket 握手已经是一个中间件管不到的例子）。
+# 角色不动是因为写侧升级是 Task 7 明写的活（"providers 转管理员 + 前端注册界面"）：
+# 改默认 provider 会全站换上游，属于越权通道，但前端设置页现在就摆在 /app 里给
+# 普通用户用，只改后端等于把那个页面打成 403，得连着界面一起改。
 class ProviderRequest(BaseModel):
     id: Optional[str] = None
     label: str
@@ -612,7 +619,7 @@ async def submit_feedback(feedback: FeedbackRequest,
 # ---------- 智能体 ----------
 # 这一面挂的是 require_admin，不是 current_principal，理由是"没有归属可谈"：
 # 编排与任务表（app/agents/task_store）是一个进程级全局 dict，条目上没有 owner，
-# 所以这里若只声明"我是某个注册用户"，契约会是绿的，而任何人都能列出、取消、
+# 所以这里若只声明"我是某个注册用户"，契约会是绿的，而任何注册用户都能列出、取消、
 # 删除别人的任务；agent 本身还拿着本机自己的上游配置跑付费调用，跑在谁的账上
 # 无人知道。要做成普通用户可用，先给 task 加 owner（与会话同一套归属规则），
 # 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
