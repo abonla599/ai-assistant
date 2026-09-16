@@ -1,5 +1,6 @@
 import sys
 import os
+import secrets
 import uuid
 import threading
 import time
@@ -8,6 +9,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 import ssl
@@ -103,6 +105,35 @@ app.include_router(memory_router)
 
 # 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
 mount_pwa(app)
+
+# ---------- 访问鉴权 ----------
+# 服务经隧道暴露到公网时，没有口令就等于给出不记名的模型调用代理。
+# 未设置 ACCESS_TOKEN 时保持开放，兼容本机开发与测试。
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "").strip()
+_PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
+
+@app.middleware("http")
+async def require_access_token(request, call_next):
+    if not ACCESS_TOKEN:
+        return await call_next(request)
+
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith(_PROTECTED_PREFIXES):
+        return await call_next(request)
+
+    supplied = request.headers.get("authorization", "").strip()
+    scheme, _, credential = supplied.partition(" ")
+    # 认证方案名大小写不敏感（RFC 7235）；未写方案名时整值即口令
+    if not credential and scheme:
+        credential = scheme
+    elif scheme.lower() not in ("bearer", "token"):
+        credential = ""
+    if not credential:
+        credential = request.headers.get("x-access-token", "").strip()
+
+    if not secrets.compare_digest(credential, ACCESS_TOKEN):
+        return JSONResponse(status_code=401, content={"detail": "缺少或错误的访问口令"})
+    return await call_next(request)
 
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):

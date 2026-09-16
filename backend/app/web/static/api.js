@@ -4,11 +4,20 @@
 "use strict";
 
 const API = (() => {
+  /** 访问口令仅存本机，不写入代码或仓库 */
+  function authHeaders() {
+    const token = localStorage.getItem("accessToken");
+    return token ? { Authorization: "Bearer " + token } : {};
+  }
+
   async function request(path, { method = "GET", body, signal } = {}) {
     const res = await fetch(path, {
       method,
       signal,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: {
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        ...authHeaders(),
+      },
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
@@ -28,7 +37,7 @@ const API = (() => {
     const res = await fetch("/v1/chat/stream", {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ model, messages, session_id: sessionId }),
     });
     if (!res.ok || !res.body) {

@@ -40,6 +40,9 @@ generate_docx.py
 
 # 本地工具产物与临时备份（不属于源码，勿提交）
 .qoder/
+tools/
+server.log
+tunnel.log
 PATH_backup_*.txt
 path_fix.ps1
 path_inspect.ps1

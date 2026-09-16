@@ -73,6 +73,7 @@
           <button class="tab active" data-tab="memory">长期记忆</button>
           <button class="tab" data-tab="model">模型参数</button>
           <button class="tab" data-tab="persona">角色设定</button>
+          <button class="tab" data-tab="conn">连接</button>
           <button class="tab" data-tab="about">关于</button>
         </div>
         <button class="icon-btn" id="closeSettings" aria-label="关闭">×</button>
@@ -113,6 +114,15 @@
             <button class="btn btn-primary" id="savePersonaBtn">保存</button>
             <button class="btn" id="clearPersonaBtn">清除</button>
           </div>
+        </section>
+
+        <section class="pane" data-pane="conn">
+          <p class="pane-note">服务端开启 ACCESS_TOKEN 后，所有接口都需要口令。口令只保存在本机浏览器，不会写进代码或仓库。</p>
+          <div class="row">
+            <input id="tokenInput" type="password" placeholder="访问口令" autocomplete="off">
+            <button class="btn btn-primary" id="saveTokenBtn">保存</button>
+          </div>
+          <p class="pane-note" id="connInfo"></p>
         </section>
 
         <section class="pane" data-pane="about">

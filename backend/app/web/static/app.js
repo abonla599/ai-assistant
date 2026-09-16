@@ -398,8 +398,12 @@ async function runStream(holder) {
       } catch (e2) {
         failed = true;
         holder.transient = true;
-        holder.content = "⚠️ 请求失败：" + e2.message;
-        setStatus(e2.message, true);
+        if (needsToken(e2)) {
+          holder.content = "⚠️ " + e2.message;
+        } else {
+          holder.content = "⚠️ 请求失败：" + e2.message;
+          setStatus(e2.message, true);
+        }
       }
     }
   } finally {
@@ -446,9 +450,26 @@ function openSettings(tab) {
 }
 function closeSettings() { $("settings").classList.add("hidden"); }
 
+function syncConnPane() {
+  const saved = localStorage.getItem("accessToken") || "";
+  $("tokenInput").value = saved;
+  $("connInfo").textContent = `当前服务：${location.origin}　·　口令${saved ? "已设置" : "未设置"}`;
+}
+
+/** 接口返回 401 时引导到设置→连接，而不是笼统报错 */
+function needsToken(err) {
+  if (err && err.status === 401) {
+    setStatus("需要访问口令：请在「设置 → 连接」中填写", true);
+    openSettings("conn");
+    return true;
+  }
+  return false;
+}
+
 function selectTab(name) {
   $("settingsTabs").querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   $("settings").querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
+  if (name === "conn") syncConnPane();
 }
 
 async function loadMemories() {
@@ -593,6 +614,14 @@ function bind() {
     pref.setPersona(pref.sessionId, ""); syncPersonaChip(); setStatus("角色设定已清除");
   };
 
+  $("saveTokenBtn").onclick = () => {
+    const value = $("tokenInput").value.trim();
+    if (value) localStorage.setItem("accessToken", value);
+    else localStorage.removeItem("accessToken");
+    // 整页重载，让所有请求带上新口令（重跑 boot 会重复绑定事件）
+    location.reload();
+  };
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closeSettings(); closeSidebar(); }
   });
@@ -658,7 +687,9 @@ async function boot() {
     await restore();
     if (!pref.sessionId) await ensureSession();
   } catch (e) {
-    setStatus("后端连接失败：" + e.message + "（请确认服务已启动，手机需与电脑同网段）", true);
+    if (!needsToken(e)) {
+      setStatus("后端连接失败：" + e.message + "（请确认服务已启动，手机需与电脑同网段）", true);
+    }
   }
   renderMessages();
   syncPersonaChip();
