@@ -69,13 +69,15 @@ def test_disabled_mode_treats_everything_as_admin(client, monkeypatch):
     assert client.get("/v1/providers").status_code == 200
 
 
-def test_register_stays_public(wired):
+def test_register_stays_public(wired, monkeypatch):
     client, store = wired
+    # 连 bootstrap 口令一起清空：此刻服务端"没有任何身份"，除注册外一律 503。
+    # 公开判定若被挪到 fail-closed 之后，第一个身份就永远申请不出来——门从里面
+    # 焊死了。端点本身要等 Task 3 才挂上，此刻当然是 404；这里钉的是另一件事，
+    # 而且更要紧的那件：鉴权层绝不能把注册挡在凭据后面。
+    monkeypatch.setenv("ACCESS_TOKEN", "")
     code = store.create_invite("admin")
     res = client.post("/v1/auth/register", json={"code": code, "username": "公开注册"})
-    # 端点本身要等 Task 3 才挂上，此刻它当然是 404。这里钉的是另一件事，而且
-    # 是更要紧的那件：鉴权层绝不能把注册页挡在凭据后面——否则没人拿得到第一
-    # 个身份，fail-closed 就成了永久锁死的门。
     assert res.status_code not in (401, 403, 503), "注册端点必须无需凭据即可访问"
 
 
