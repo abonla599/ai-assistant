@@ -183,10 +183,15 @@ class MemoryManager:
         embedding = self._embed(content)
         mem_id = str(uuid.uuid4())
 
+        # 顺序就是安全属性：spread 在前、归属在后。
+        # 写成 {"user_id": user_id, ..., **(metadata or {})} 时，客户端只要发
+        # {"content": "...", "metadata": {"user_id": "别人"}} 就把这条记忆挂到那个
+        # 人名下——文本随后被 search_memory 召回并注入他的系统提示，等于跨用户投毒。
+        # 归属一律由服务端从凭据推导，metadata 里带来的同名键覆盖不动它。
         meta = {
-            "user_id": user_id,
             "weight": 1.0,
-            **(metadata or {})
+            **(metadata or {}),
+            "user_id": user_id,
         }
 
         self.collection.add(
@@ -230,32 +235,44 @@ class MemoryManager:
             out.append((docs[i], dists[i], meta))
         return out
 
-    def adjust_weights(self, memory_ids: list, delta: float) -> dict:
+    def adjust_weights(self, memory_ids: list, owner: str, delta: float) -> dict:
         """按反馈调整记忆权重，结果夹在 [0.1, 5.0]。
 
         权重直接影响检索排序（memory_router 按 relevance*weight 排序），
         所以被赞过的记忆更容易被召回、被踩的更难。
+
+        owner 必填、无默认值，且筛选写在本方法内部：整份回写会话的端点接受客户端
+        自填的 memory_ids，"消息是你的"并不等于"那些记忆是你的"。闸门如果只放在
+        调用方手里（先 owned_ids 筛一遍再传裸 id），未来任何一个漏筛的调用点都
+        类型正确、照样替别人改权重。
         """
         updated = []
-        for mem_id in memory_ids or []:
+        for mem_id in self.owned_ids(owner, memory_ids):
             data = self.collection.get(ids=[mem_id])
             if not data.get("ids"):
                 continue
             meta = (data.get("metadatas") or [{}])[0] or {}
             current = float(meta.get("weight", 1.0))
             meta["weight"] = round(max(0.1, min(5.0, current + delta)), 4)
+            # 归属由存储自己钉住：owned_ids 已确认这个人拥有这条记忆，回写时
+            # 不能被 metadata 里残留的旧值改回去。
+            meta["user_id"] = owner
             self.collection.update(ids=[mem_id], metadatas=[meta])
             updated.append({"id": mem_id, "weight": meta["weight"]})
         return {"status": "adjusted", "updated": updated}
 
     def owned_ids(self, user_id: str, ids: list) -> list:
-        """只保留确实属于该用户的记忆 id。
+        """只保留确实属于该用户的记忆 id——本模块内部助手，不是唯一的闸门。
 
         删除/改权重原先直接拿客户端给的 id 就动手，等于任何人可改任何人的记忆。
         归属判定交给 chroma 的 where 条件，而不是取回来再在 Python 里挑：
         与 search_memory 同一套下推口径，也就不会因窗口或分页漏判。
         非属主与不存在的 id 得到同一个结果（都不在返回列表里），调用方因此
         不是一条探测他人记忆的信道。
+
+        现在 delete_memories_batch / update_memory / adjust_weights 各自在方法内部
+        调它：调用点无需"记得先筛一遍"，也不可能忘。留着公开是因为它同时是
+        "按人挑出 id" 这一读侧需求的唯一实现（测试与将来的运维端点复用）。
         """
         wanted = {str(i) for i in ids or []}
         if not wanted:
@@ -263,60 +280,78 @@ class MemoryManager:
         got = self.collection.get(ids=list(wanted), where={"user_id": user_id})
         return list(got.get("ids") or [])
 
-    def delete_memory(self, memory_id: str) -> bool:
-        try:
-            self.collection.delete(ids=[memory_id])
-            print(f"🗑️ 记忆已删除: {memory_id}")
-            return True
-        except Exception as e:
-            print(f"❌ 删除记忆失败: {e}")
-            return False
+    def delete_memories_batch(self, memory_ids: list, owner: str) -> dict:
+        """批量删除，且只删确实属于 owner 的那些。
 
-    def delete_memories_batch(self, memory_ids: list) -> dict:
-        if not memory_ids:
+        owner 必填、无默认值，筛选写在方法内部（与会话/附件存储同一口径）：
+        收裸 id 列表又靠调用方自觉预筛，下一个调用点忘了就是任何人可删任何人的
+        记忆，而类型检查一声不响。非属主与不存在的 id 同样被静默丢弃——本方法
+        不区分两者，调用方也就无法被用来探测某个 id 是否存在。
+        """
+        mine = self.owned_ids(owner, memory_ids)
+        if not mine:
             return {"status": "deleted", "count": 0}
-        
+
         try:
             # 直接删除，ChromaDB 会忽略不存在的 ID
             # 注意：ChromaDB delete 不返回实际删除的数量，所以我们假设传入的有效 ID 都被删除
             # 为了避免 ChromaDB 内部 get 的 bug，我们不预先检查 ID 是否存在
-            self.collection.delete(ids=memory_ids)
-            
+            self.collection.delete(ids=mine)
+
             # 由于无法从 delete 获取确切计数，我们返回传入的 ID 数量
             # 如果业务逻辑强依赖确切删除数，可能需要后续通过查询验证，但这会慢
-            print(f"🗑️ 已执行批量删除操作，涉及 {len(memory_ids)} 个 ID")
-            return {"status": "deleted", "count": len(memory_ids)}
-            
+            print(f"🗑️ 已执行批量删除操作，涉及 {len(mine)} 个 ID")
+            return {"status": "deleted", "count": len(mine)}
+
         except Exception as e:
             print(f"❌ 批量删除记忆失败: {e}")
             traceback.print_exc()
             return {"error": str(e), "count": 0}
 
-    def update_memory(self, memory_id: str, new_content: str = None,
+    def update_memory(self, memory_id: str, owner: str, new_content: str = None,
                       new_weight: float = None) -> dict:
+        """改写一条记忆，owner 必填——不是自己的那条就当不存在。
+
+        返回 status=not_found 而不是 error：前者是"没有你的这条记忆"这个正常
+        答案，后者是底层故障，路由对两者的处理完全不同（故障会报 503，
+        not_found 仍是 200）。把非属主混进 error 里，就是拿故障码替别人确认 id 存在。
+        """
+        if not self.owned_ids(owner, [memory_id]):
+            return {"status": "not_found"}
+
         data = self.collection.get(ids=[memory_id])
         if not data['ids']:
-            return {"error": "记忆不存在"}
+            return {"status": "not_found"}
 
         doc = new_content if new_content else data['documents'][0]
-        meta = data['metadatas'][0]
+        meta = data['metadatas'][0] or {}
         if new_weight is not None:
             meta['weight'] = new_weight
+        # 归属由存储自己钉住：owned_ids 已经确认这个人拥有这条记忆，
+        # 回写时不能被 metadata 里残留的旧值改回别人名下。
+        meta['user_id'] = owner
 
-        if new_content:
-            new_emb = self._embed(new_content)
-            self.collection.update(
-                ids=[memory_id],
-                documents=[doc],
-                embeddings=[new_emb],
-                metadatas=[meta]
-            )
-        else:
-            self.collection.update(
-                ids=[memory_id],
-                documents=[doc],
-                metadatas=[meta]
-            )
+        # 底层写失败要报出来（路由据此给 503），不能像原先那样和"没有这条记忆"
+        # 共用一个答案——那会把故障伪装成一个正常回复。
+        try:
+            if new_content:
+                new_emb = self._embed(new_content)
+                self.collection.update(
+                    ids=[memory_id],
+                    documents=[doc],
+                    embeddings=[new_emb],
+                    metadatas=[meta]
+                )
+            else:
+                self.collection.update(
+                    ids=[memory_id],
+                    documents=[doc],
+                    metadatas=[meta]
+                )
+        except Exception as e:
+            print(f"❌ 更新记忆失败: {e}")
+            traceback.print_exc()
+            return {"error": str(e)}
         return {"status": "updated"}
 
     def decay_weights(self, user_id: str, decay_factor: float = 0.95):
@@ -338,22 +373,25 @@ class MemoryManager:
             print(f"⚠️ 未找到用户 {user_id} 的记忆")
 
     def get_user_memories(self, user_id: str, limit: int = 20) -> list:
-        try:
-            all_data = self.collection.get()
-            user_memories = []
-            if all_data['ids']:
-                for i, mem_id in enumerate(all_data['ids']):
-                    meta = all_data['metadatas'][i] if all_data['metadatas'] else {}
-                    if meta.get("user_id") == user_id:
-                        user_memories.append({
-                            "id": mem_id,
-                            "content": all_data['documents'][i],
-                            "metadata": meta
-                        })
-            return user_memories[:limit]
-        except Exception as e:
-            print(f"❌ 获取用户记忆失败: {e}")
-            return []
+        """某个用户的记忆列表。
+
+        这里原先包着一层 `except Exception: return []`：底层一故障，
+        GET /v1/memory/list 就回 200 + 空列表，用户以为自己的记忆全没了，
+        运维则看到一个"一切正常"的接口。故障必须抛出来说明白，删除与更新已经
+        这么改了（路由侧统一转 503），读取不能留最后一条把故障藏进正常回复的路。
+        """
+        all_data = self.collection.get()
+        user_memories = []
+        if all_data['ids']:
+            for i, mem_id in enumerate(all_data['ids']):
+                meta = all_data['metadatas'][i] if all_data['metadatas'] else {}
+                if (meta or {}).get("user_id") == user_id:
+                    user_memories.append({
+                        "id": mem_id,
+                        "content": all_data['documents'][i],
+                        "metadata": meta or {}
+                    })
+        return user_memories[:limit]
 
     def get_collection_stats(self) -> dict:
         count = self.collection.count()

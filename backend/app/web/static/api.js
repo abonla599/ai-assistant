@@ -126,17 +126,14 @@ const API = (() => {
     chat: (payload) => request("/v1/chat", { method: "POST", body: payload }),
     streamChat,
 
-    /* 记忆：身份只来自访问令牌，请求里不再自报归属。
-     * 各函数首个形参是 app.js 仍在传的历史位置参数（本机随机标识），
-     * 这里刻意忽略、绝不发给后端；等前端调用点清完（Task 7）可一并删掉。
-     */
-    addMemory: (_legacyId, content) =>
+    /* 记忆：身份只来自访问令牌，这些函数不收任何身份参数（也不该收）。 */
+    addMemory: (content) =>
       request("/v1/memory/add", { method: "POST", body: { content, summarize: false } }),
-    listMemory: (_legacyId, limit = 50) =>
+    listMemory: (limit = 50) =>
       request(`/v1/memory/list?limit=${limit}`),
-    searchMemory: (_legacyId, query, topK = 10) =>
+    searchMemory: (query, topK = 10) =>
       request("/v1/memory/search", { method: "POST", body: { query, top_k: topK } }),
-    deleteMemory: (_legacyId, memoryIds) =>
+    deleteMemory: (memoryIds) =>
       request("/v1/memory/delete", { method: "DELETE", body: { memory_ids: memoryIds } }),
     // 全库统计是管理员端点：普通用户拿到 403，调用处需按"不可用"处理
     memoryStats: () => request("/v1/memory/stats"),

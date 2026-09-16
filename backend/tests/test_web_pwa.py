@@ -85,16 +85,68 @@ def test_memory_list_shape_matches_frontend(enforced):
         "列表里只能出现调用者自己的记忆"
 
 
-def test_frontend_never_self_reports_an_identity():
-    """api.js 不得把身份写进请求：一旦前端自报 user_id，就等于替别人挑身份。
+# 记忆 wrapper 的形参表——一份**逐字**的白名单。
+# 只 grep "user_id" 这个字面量是拦不住把身份改叫 _legacyId / who 的：
+# 上一轮就真这么绕过去了（一个被忽略的前导形参留在 api.js 里，把没接完的线
+# 藏成了"看起来已经接完"）。所以断的是形参表本身，名字对不上就红。
+MEMORY_WRAPPERS = {
+    "addMemory": ["content"],
+    "listMemory": ["limit"],
+    "searchMemory": ["query", "topK"],
+    "deleteMemory": ["memoryIds"],
+}
 
-    后端已经不读请求里的 user_id（身份只来自令牌），这条钉的是另一半：
-    前端也别再把它发出去，否则会误导后来人以为服务端认这个字段。
+IDENTITY_TOKENS = ("userid", "user_id", "uid", "owner", "principal", "legacy")
+
+
+def _wrapper_params(src: str, name: str) -> list:
+    """取 api.js 里 `name: (a, b = 1) => ...` 的形参名列表。"""
+    m = re.search(rf"\b{name}\s*:\s*\(([^)]*)\)\s*=>", src)
+    assert m, f"api.js 里找不到 {name} 的箭头函数定义（形状变了？）"
+    return [p.split("=")[0].strip() for p in m.group(1).split(",") if p.strip()]
+
+
+def _call_args(src: str, name: str) -> list:
+    """app.js 里所有 API.<name>(...) 的实参列表。"""
+    out = []
+    for args in re.findall(rf"\bAPI\.{name}\s*\(([^)]*)\)", src):
+        out.append([a.strip() for a in args.split(",") if a.strip()])
+    return out
+
+
+def test_memory_wrappers_take_no_identity_parameter():
+    """记忆接口的身份只来自令牌，前端函数也就不能收身份参数。
+
+    后端已经不读请求里的 user_id（见 memory_router 的请求模型），这条钉的是另
+    一半：前端别再把它发出去，更别留一个"被忽略的前导身份形参"——那既骗人，
+    又让调用点看起来已经接完。
     """
     src = (STATIC / "api.js").read_text(encoding="utf-8")
-    offenders = [line.strip() for line in src.splitlines()
-                 if "user_id" in line or "/v1/memory/list/" in line]
-    assert not offenders, f"api.js 仍在传递客户端自报身份: {offenders}"
+    for name, expected in MEMORY_WRAPPERS.items():
+        declared = _wrapper_params(src, name)
+        assert declared == expected, f"{name} 的形参表必须是 {expected}，实际 {declared}"
+    assert "_legacyId" not in src, "历史兼容形参必须随调用点一起清掉，不能留"
+
+
+def test_app_js_passes_no_identity_into_memory_calls():
+    """app.js 不再把本机随机标识当身份传给任何记忆调用。"""
+    api_src = (STATIC / "api.js").read_text(encoding="utf-8")
+    app_src = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    total = 0
+    for name in MEMORY_WRAPPERS:
+        declared = _wrapper_params(api_src, name)
+        calls = _call_args(app_src, name)
+        total += len(calls)
+        for args in calls:
+            assert args, f"API.{name}() 一个参数都不传，等于把 limit/query 丢了"
+            assert len(args) <= len(declared), \
+                f"API.{name} 只收 {len(declared)} 个参数（{declared}），实参却是 {args}"
+            for a in args:
+                lowered = a.lower()
+                assert not any(t in lowered for t in IDENTITY_TOKENS), \
+                    f"API.{name} 仍在传身份参数: {a}"
+    assert total >= 4, f"记忆调用点少于 4 处，接线大概被删了（实际 {total}）"
 
 
 def test_replace_session_messages_endpoint():

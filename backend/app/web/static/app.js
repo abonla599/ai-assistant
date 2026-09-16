@@ -822,8 +822,8 @@ async function loadMemories() {
   ul.innerHTML = "";
   try {
     const data = state.memoryQuery
-      ? await API.searchMemory(pref.userId, state.memoryQuery, 30)
-      : await API.listMemory(pref.userId, 50);
+      ? await API.searchMemory(state.memoryQuery, 30)
+      : await API.listMemory(50);
     const items = data.memories || data.results || [];
     if (!items.length) {
       ul.appendChild(emptyItem(state.memoryQuery ? "没有匹配的记忆" : "还没有记忆"));
@@ -843,7 +843,7 @@ async function loadMemories() {
       del.onclick = async () => {
         const id = m.id || m.memory_id;
         if (!id) { setStatus("这条记忆没有 id，无法删除", true); return; }
-        await API.deleteMemory(pref.userId, [id]).catch((e) => setStatus("删除失败：" + e.message, true));
+        await API.deleteMemory([id]).catch((e) => setStatus("删除失败：" + e.message, true));
         loadMemories();
       };
       li.append(w, txt, del);
@@ -1074,7 +1074,7 @@ function bind() {
     e.preventDefault();
     const el = $("memoryInput");
     if (!el.value.trim()) return;
-    try { await API.addMemory(pref.userId, el.value.trim()); el.value = ""; loadMemories(); }
+    try { await API.addMemory(el.value.trim()); el.value = ""; loadMemories(); }
     catch (err) { setStatus("添加记忆失败：" + err.message, true); }
   };
   $("memorySearchForm").onsubmit = (e) => {

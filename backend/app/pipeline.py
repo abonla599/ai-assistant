@@ -71,7 +71,7 @@ class ChatPipeline:
                 "used_memory_ids": used_memory_ids}
 
     def inject_context(self, messages: List[Dict], query: str):
-        """注入记忆与用户偏好摘要（非流式与流式共用）。
+        """注入记忆与该用户自己的偏好摘要（非流式与流式共用）。
 
         返回 (消息列表, 本次用到的记忆 id 列表)——后者用于反馈闭环，
         否则无法知道该给哪些记忆加权。
@@ -93,7 +93,10 @@ class ChatPipeline:
             print(f"记忆检索失败（不影响主流程）: {e}")
 
         try:
-            preference = read_preference()
+            # 读的是**这个调用者自己**那份偏好摘要。偏好原先是一份全站共享的
+            # preference.txt，任何一个人点 👎 都会改写所有人下一轮的语气；
+            # 现在按人分账（见 preference_analyzer.preference_path）。
+            preference = read_preference(self.user_id)
             if preference:
                 self._append_system(
                     messages, "根据用户历史反馈得到的偏好，请遵循：\n" + preference)

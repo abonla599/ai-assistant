@@ -53,14 +53,20 @@ except ImportError as e:
 try:
     from app.feedback_storage import save_feedback, FEEDBACK_FILE
     # 如果 preference_analyzer 模块存在，从中导入具体函数
+    # 偏好摘要按人分账之后，"重算一次"这个动作必须说清楚是替谁重算：
+    # analyze_and_update_preference(user_id) 服务单个用户，
+    # analyze_all_preferences() 服务后台定时器（它没有"当前调用者"这个身份）。
     if preference_analyzer:
-        from app.preference_analyzer import analyze_and_update_preference
+        from app.preference_analyzer import (analyze_and_update_preference,
+                                             analyze_all_preferences)
     else:
         analyze_and_update_preference = None
+        analyze_all_preferences = None
 except ImportError as e:
     save_feedback = None
     FEEDBACK_FILE = None
     analyze_and_update_preference = None
+    analyze_all_preferences = None
     print(f"⚠️ 反馈存储/偏好分析模块未找到: {e}")
 
 # ---------- 其他核心导入 ----------
@@ -174,7 +180,12 @@ def run_scheduler():
             print("--- 开始执行周期性后台任务 ---")
             if HAS_BG_TASKS:
                 if preference_analyzer:
-                    preference_analyzer.analyze_and_update_preference()
+                    # 定时器没有"当前调用者"，所以它不能替某一个人决定归属：
+                    # 反馈里出现过谁就重算谁那一份（偏好摘要按人分账，见
+                    # preference_analyzer）。原先这里调用的是不带身份的
+                    # analyze_and_update_preference()，它把所有人合并成一份
+                    # 全站摘要再注入每个人的提示词。
+                    preference_analyzer.analyze_all_preferences()
                 if memory_weight_updater:
                     memory_weight_updater.update_memory_weights_from_feedback()
             print("--- 周期性后台任务执行完毕 ---")
@@ -539,8 +550,8 @@ async def submit_feedback(feedback: FeedbackRequest,
     却是全站的行为。反查用带归属的 find_message：不属于你就当作不存在，
     两种情况同一个 404、同一句话，这个端点不是探测他人 message_id 的信道。
 
-    仍然留下的局限（本任务不开新机制）：偏好汇总是单份全局文件，按人分账要等
-    preference_analyzer 改成每人一份，这里只保证"没归属的反馈一行都不写"。
+    偏好摘要现在按人分账：重算的是**调用者自己**那一份，别人的反馈进不了他的
+    摘要（见 preference_analyzer.preference_path）。
     """
     from app.memory.memory_router import memory_manager
 
@@ -560,21 +571,21 @@ async def submit_feedback(feedback: FeedbackRequest,
     adjusted = []
     # 消息是你的，不代表消息上挂的 memory_ids 是你的：整份回写会话的端点接受
     # 客户端给的 memory_ids（前端编辑历史要用），于是别人家的记忆 id 能被种进
-    # 你自己的会话，再点一次反馈就去调它的权重。加权之前再过一道 owned_ids。
+    # 你自己的会话，再点一次反馈就去调它的权重。筛选写在 adjust_weights 内部
+    # （owner 必填），这里就不再自己预筛一遍——能被调用方忘记的守卫迟早会被忘记。
     claimed = located.get("message", {}).get("memory_ids") or []
-    mine = memory_manager.owned_ids(principal.user_id, claimed) \
-        if (claimed and memory_manager is not None) else []
-    if mine:
+    if claimed and memory_manager is not None:
         delta = FEEDBACK_WEIGHT_STEP if feedback.rating > 0 else -FEEDBACK_WEIGHT_STEP
         try:
-            adjusted = memory_manager.adjust_weights(mine, delta).get("updated", [])
+            adjusted = memory_manager.adjust_weights(
+                claimed, principal.user_id, delta).get("updated", [])
         except Exception as e:
             print(f"记忆权重调整失败: {e}")
 
-    # 立即重算偏好，使下一轮对话就能生效，而不是等后台定时器
+    # 立即重算他自己那份偏好，使下一轮对话就能生效，而不是等后台定时器
     try:
         if HAS_BG_TASKS and preference_analyzer:
-            preference_analyzer.analyze_and_update_preference()
+            preference_analyzer.analyze_and_update_preference(principal.user_id)
     except Exception as e:
         print(f"偏好刷新失败（不影响反馈记录）: {e}")
 
@@ -582,7 +593,7 @@ async def submit_feedback(feedback: FeedbackRequest,
         "status": "success",
         "message": "反馈已记录并生效",
         "memory_weight_adjusted": len(adjusted),
-        "used_memories": bool(mine),
+        "used_memories": bool(adjusted),
     }
 
 # ---------- 智能体 ----------

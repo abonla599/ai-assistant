@@ -40,13 +40,15 @@ class FakeMemoryStore:
 
     def add(self, user_id: str, content: str, metadata: dict = None) -> str:
         mem_id = str(uuid.uuid4())
-        # weight 与真实后端同形状：MemoryManager.add_memory 总会写入 weight=1.0，
-        # 假存储缺了这个键，凡是直接断言 metadata["weight"] 的用例就只在 pytest 里
-        # 成立、在线上炸——两条路的文档形状必须一致。
+        # weight 与 user_id 都要与真实后端同形状：MemoryManager.add_memory 总会写
+        # weight=1.0，并把归属落在 metadata 里（chroma 只有 metadata 一个地方可存）。
+        # 假存储把归属另存一份顶层字段，于是对"客户端用 metadata.user_id 改写归属"
+        # 这个洞天然免疫——pytest 全绿而线上被投毒，正是这个洞活到今天的原因。
+        # 现在两条路一样：spread 在前、服务端推导的归属在后，覆盖不动。
         self.memories[mem_id] = {
             "user_id": user_id,
             "content": content,
-            "metadata": {"weight": 1.0, **(metadata or {})}
+            "metadata": {"weight": 1.0, **(metadata or {}), "user_id": user_id}
         }
         print(f"📝 [FakeMemoryStore] 添加记忆: user_id={user_id}, content={content[:30]}..., 当前总数={len(self.memories)}")
         return mem_id
@@ -168,10 +170,12 @@ fake_store = FakeMemoryStore()  # 始终可用
 # 或从别人的池子里检索；delete/update 更是收下 user_id 却完全不用它。
 # 旧客户端多带的那个键由 pydantic 默认忽略——直接 422 会让已发出去的桌面版
 # 与 APK 整体不可用，而忽略并不改变任何安全属性（这个字段本来就不作数）。
+# 唯一的漏网口子是 metadata：它是自由字典，客户端在里面塞一个 user_id 就能
+# 借"元数据"之名改写归属，所以那条由 _reject_identity_in_metadata 明确拒绝。
 
 class AddMemoryRequest(BaseModel):
     content: str = Field(..., description="记忆内容", json_schema_extra={"example": "我叫张三，今年25岁"})
-    metadata: Optional[dict] = Field(None, description="额外的元数据")
+    metadata: Optional[dict] = Field(None, description="额外的元数据（不得携带身份字段，见 IDENTITY_METADATA_KEYS）")
     summarize: bool = Field(False, description="是否使用AI摘要")
 
 
@@ -214,10 +218,28 @@ def _unavailable(stage: str, error: str):
     raise HTTPException(status_code=503, detail=f"记忆{stage}失败：{error}")
 
 
+# 归属只由凭据推导。metadata 是自由字典，一旦让它带身份键，客户端就能替别人
+# "认领"这条记忆（MemoryManager 的 spread 顺序已把这条路堵死），所以路由先拒一次：
+# 让意图明确地不成立，比收下他给的名字再悄悄换成自己的更好排查。
+IDENTITY_METADATA_KEYS = frozenset({"user_id", "uid", "owner", "principal"})
+
+
+def _reject_identity_in_metadata(metadata: Optional[dict]) -> None:
+    if not metadata:
+        return
+    carried = sorted(str(k) for k in metadata if str(k).strip().lower() in IDENTITY_METADATA_KEYS)
+    if carried:
+        raise HTTPException(
+            status_code=400,
+            detail=f"metadata 不得携带身份字段 {carried}：记忆归属只由访问令牌推导")
+
+
 # ---------- API 端点 ----------
 
 @router.post("/add")
 async def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrincipal):
+    _reject_identity_in_metadata(req.metadata)
+
     def real_add():
         return memory_manager.add_memory(
             user_id=principal.user_id,
@@ -268,14 +290,12 @@ async def delete_memories(req: DeleteMemoryRequest, principal: Principal = Curre
     """删除调用者自己的记忆。
 
     原先的请求体里有个 user_id，但函数体一次都没用它：只要拿到别人的记忆 id
-    就能删。现在真实后端先把 id 列表过一遍 owned_ids，假存储由 store 自己按
-    owner 拦——两条路都必须拦，只守真路的话 pytest 里那些断言全是空的。
+    就能删。现在 owner 是 MemoryManager.delete_memories_batch 的必填参数，筛选写在
+    存储内部（假存储同样以必填 owner 自守）——路由不再自己先筛一遍，因为"能被
+    调用方忘记的守卫"迟早会被忘记，而只守真路的话 pytest 里那些断言全是空的。
     """
     def real_delete():
-        mine = memory_manager.owned_ids(principal.user_id, req.memory_ids)
-        if not mine:
-            return 0
-        result = memory_manager.delete_memories_batch(mine)
+        result = memory_manager.delete_memories_batch(req.memory_ids, principal.user_id)
         if "error" in result:
             _unavailable("删除", result["error"])
         return result.get("count", 0)
@@ -296,15 +316,16 @@ async def update_memory(req: UpdateMemoryRequest, principal: Principal = Current
     """改写调用者自己的记忆；别人的 id 在这里就是"不存在"。
 
     与删除同一个洞：原先 update 也根本不认归属。非属主与不存在的 id 得到逐字节
-    相同的回复，所以这既不是越权通道，也不是探测他人与否的信道。
+    相同的回复，所以这既不是越权通道，也不是探测他人与否的信道。归属筛选已经下沉
+    进 MemoryManager.update_memory（owner 必填），路由只负责把它的三种答案分别映射成
+    "更新成功 / 记忆不存在 / 503 说清楚"。
     """
     def real_update():
-        if not memory_manager.owned_ids(principal.user_id, [req.memory_id]):
-            return None
-        result = memory_manager.update_memory(req.memory_id, req.new_content, req.new_weight)
+        result = memory_manager.update_memory(req.memory_id, principal.user_id,
+                                              req.new_content, req.new_weight)
         if "error" in result:
             _unavailable("更新", result["error"])
-        return True
+        return result.get("status") == "updated"
 
     def fake_update():
         return fake_store.update(req.memory_id, principal.user_id,
@@ -335,14 +356,22 @@ async def decay_memories(decay_factor: float = Query(0.95),
 
 
 @router.get("/list")
-async def list_my_memories(limit: int = 20, principal: Principal = CurrentPrincipal):
+async def list_my_memories(limit: int = Query(20, ge=1, le=100),
+                           principal: Principal = CurrentPrincipal):
     """我自己的记忆。
 
     路径原先是 /list/{user_id}：把身份写在 URL 上，等于谁都可以在地址栏里换
     别人的名字枚举他的记忆（也正因为如此，前端根本没法用它查自己）。
+    limit 是调用方给的数，原先不设上限——真实后端会把整个库取回内存再逐条过滤，
+    一次 ?limit=99999999 就是一个免费的 DoS 面；现在越界直接 422。
     """
     def real_list():
-        return memory_manager.get_user_memories(principal.user_id, limit)
+        try:
+            return memory_manager.get_user_memories(principal.user_id, limit)
+        except Exception as e:
+            # MemoryManager 不再 except 掉一切返回 []：故障在这里说清楚，
+            # 而不是伪装成"你没有记忆"这个正常答案。
+            _unavailable("读取", str(e))
 
     def fake_list():
         return fake_store.list(principal.user_id, limit)
