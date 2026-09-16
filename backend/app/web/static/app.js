@@ -876,15 +876,9 @@ function syncPersonaChip() {
   $("personaInput").value = p;
 }
 
-function showImageSources(show) {
-  $("attachRoot").classList.toggle("hidden", !!show);
-  $("imageSourceRow").classList.toggle("hidden", !show);
-}
-
 function setAttachMenu(open) {
   $("attachMenu").classList.toggle("hidden", !open);
   $("attachBtn").classList.toggle("open", !!open);
-  if (!open) showImageSources(false);   // 关闭时回到一级，避免下次打开停错层
 }
 
 function toggleAttachMenu() {
@@ -909,11 +903,10 @@ async function openCamera() {
   $("cameraModal").classList.remove("hidden");
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    const reason = "该浏览器不支持网页相机，已改用相册选择";
+    const reason = "该浏览器不支持网页相机，请使用文件选择器";
     $("camHint").textContent = reason;
     setStatus(reason, true);
     closeCamera();
-    $("galleryPicker").click();
     return;
   }
   try {
@@ -926,13 +919,10 @@ async function openCamera() {
   } catch (e) {
     // 权限被拒或无摄像头：不要静默失败。提示写进状态栏——浮层马上就关了，
     // 只写在浮层里用户根本来不及看。
-    const reason = `无法打开相机（${e.name || e.message}），已改用相册选择`;
+    const reason = `无法打开相机（${e.name || e.message}），请使用文件选择器`;
     $("camHint").textContent = reason;
     setStatus(reason, true);
-    setTimeout(() => {
-      closeCamera();
-      $("galleryPicker").click();
-    }, 900);
+    setTimeout(closeCamera, 900);
   }
 }
 
@@ -1036,17 +1026,16 @@ function bind() {
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
-  $("pickImage").onclick = () => showImageSources(true);
-  $("backFromImage").onclick = () => showImageSources(false);
   $("pickCamera").onclick = () => { setAttachMenu(false); openCamera(); };
-  $("pickGallery").onclick = () => { setAttachMenu(false); $("galleryPicker").click(); };
-  $("pickFile").onclick = () => { setAttachMenu(false); $("filePicker").click(); };
+  $("pickImage").onclick = () => { setAttachMenu(false); $("imageInput").click(); };
+  $("pickFile").onclick = () => { setAttachMenu(false); $("fileInput").click(); };
   document.addEventListener("click", (e) => {
     const menu = $("attachMenu");
     if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
   });
-  $("filePicker").onchange = (e) => pickFiles(e.target);
-  $("galleryPicker").onchange = (e) => pickFiles(e.target);
+  $("cameraInput").onchange = (e) => pickFiles(e.target);
+  $("imageInput").onchange = (e) => pickFiles(e.target);
+  $("fileInput").onchange = (e) => pickFiles(e.target);
 
   $("camCancel").onclick = closeCamera;
   $("camShoot").onclick = shootPhoto;

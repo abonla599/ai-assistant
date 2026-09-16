@@ -71,33 +71,24 @@
         </form>
 
         <div class="attach-menu hidden" id="attachMenu" role="menu">
-          <!-- 一级：图片 / 文件 -->
           <div class="attach-row" id="attachRoot">
+            <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
+              <span class="tile-ico">📷</span><span>相机</span>
+            </button>
             <button type="button" class="attach-tile" id="pickImage" role="menuitem">
               <span class="tile-ico">🖼</span><span>图片</span>
             </button>
             <button type="button" class="attach-tile" id="pickFile" role="menuitem">
-              <span class="tile-ico">📎</span><span>文件</span>
-            </button>
-          </div>
-
-          <!-- 二级：图片来源（由本页自己呈现，不依赖浏览器菜单） -->
-          <div class="attach-row hidden" id="imageSourceRow">
-            <button type="button" class="attach-tile back" id="backFromImage" aria-label="返回">
-              <span class="tile-ico">←</span>
-            </button>
-            <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
-              <span class="tile-ico">📷</span><span>相机</span>
-            </button>
-            <button type="button" class="attach-tile" id="pickGallery" role="menuitem">
-              <span class="tile-ico">🖼</span><span>相册</span>
+              <span class="tile-ico">📄</span><span>文件</span>
             </button>
           </div>
         </div>
 
-        <input type="file" id="filePicker" hidden multiple
-               accept="text/plain,text/markdown,.md,.markdown,text/csv,.csv,text/tab-separated-values,.tsv,application/json,.json,text/yaml,application/x-yaml,.yaml,.yml,text/x-log,.log,text/plain,.ini,.cfg,text/html,.html,text/css,.css,text/x-python,.py,text/javascript,.js,text/typescript,.ts,text/x-c,.c,.h,text/x-c++src,.cpp,text/x-java-source,.java,text/x-go,.go,text/x-rustsrc,.rs,text/x-shellscript,.sh,application/x-sh,.bat,text/x-powershell,.ps1,application/sql,.sql,text/xml,.xml">
-        <input type="file" id="galleryPicker" hidden multiple accept="image/*">
+        <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项 -->
+        <input type="file" id="cameraInput" hidden accept="image/*" capture="environment">
+        <input type="file" id="imageInput" hidden multiple accept="image/*">
+        <input type="file" id="fileInput" hidden multiple
+               accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.ini,.cfg,.html,.htm,.css,.py,.js,.ts,.c,.h,.cpp,.hpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.tar,.gz">
 
         <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
         <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">
