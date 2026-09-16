@@ -6,6 +6,7 @@
 一个随时可能被误提交的文件里。令牌本身是 256 位随机值，故 sha256 足够，
 不需要慢哈希。
 """
+import copy
 import hashlib
 import hmac
 import json
@@ -14,7 +15,7 @@ import re
 import secrets
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.paths import data_root
 
@@ -23,13 +24,43 @@ ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 RESERVED_NAMES = {"admin", "default_user"}
 USERNAME_MAX = 24
 
+# last_used_at 只是运维参考信息，不值地为每一次鉴权重写两个文件：磁盘满、
+# 或 Windows 上文件被编辑器/杀软/同步盘锁住时，热路径上的写会把一枚有效令牌
+# 变成 500。内存里照常刷新，落盘按这个阈值降频。
+LAST_USED_FLUSH_AFTER = timedelta(hours=1)
+
+
+def _now_dt() -> datetime:
+    return datetime.now()
+
 
 def _now() -> str:
-    return datetime.now().isoformat()
+    return _now_dt().isoformat()
 
 
 def hash_token(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _as_hash_bytes(value) -> bytes:
+    # 令牌摘要本恒为 ASCII，但 users.json 和 sessions.json 同目录、是可被人手
+    # 改的文件：hmac.compare_digest 遇到非 ASCII str 会抛 TypeError，而非 str
+    # 会抛别的。鉴权读到坏数据的正确表现是"这枚令牌解不出来"，不是 500。
+    if not isinstance(value, str):
+        return b"\x00not-a-token-hash"
+    return value.encode("utf-8", "surrogatepass")
+
+
+def _token_matches(stored, digest: str) -> bool:
+    return hmac.compare_digest(_as_hash_bytes(stored), _as_hash_bytes(digest))
+
+
+def _stale_for_flush(stored, moment: datetime) -> bool:
+    """时间戳缺失或被人改坏时按"该落盘"处理：宁可多写一次，不可丢记录。"""
+    try:
+        return moment - datetime.fromisoformat(stored) >= LAST_USED_FLUSH_AFTER
+    except (TypeError, ValueError):
+        return True
 
 
 def _new_code() -> str:
@@ -122,6 +153,12 @@ class AuthStore:
             raise AuthError("该用户名为系统保留字")
         return cleaned
 
+    @staticmethod
+    def _normalize_code(code: str) -> str:
+        # 邀请码要在手机上手输、从聊天里粘贴，大小写和首尾空格不该改变它指向
+        # 哪条记录——register 与 revoke_invite 必须共用这一份规则。
+        return (code or "").strip().upper()
+
     def list_users(self) -> list:
         with self._lock:
             return [dict(u) for u in self._users.values()]
@@ -133,7 +170,7 @@ class AuthStore:
             if any(u.get("username_lc") == lc for u in self._users.values()):
                 raise AuthError("该用户名已被占用")
 
-            invite = self._invites.get((code or "").strip().upper())
+            invite = self._invites.get(self._normalize_code(code))
             if invite is None or self._invite_spent(invite):
                 raise AuthError("邀请码无效或已用完")
 
@@ -159,17 +196,21 @@ class AuthStore:
         if not token:
             return None
         digest = hash_token(token)
-        now = _now()
+        moment = _now_dt()
         with self._lock:
             for record in self._users.values():
                 if record.get("disabled"):
                     continue
-                if hmac.compare_digest(record.get("token_hash", ""), digest):
-                    record["last_used_at"] = now
+                if not _token_matches(record.get("token_hash"), digest):
+                    continue
+                # 热路径：先判断该不该落盘，再改内存——顺序反了阈值就永远不满。
+                stale = _stale_for_flush(record.get("last_used_at"), moment)
+                record["last_used_at"] = moment.isoformat()
+                if stale:
                     self._flush()
-                    return Principal(user_id=record["user_id"],
-                                     username=record["username"],
-                                     role=record.get("role", "user"))
+                return Principal(user_id=record["user_id"],
+                                 username=record["username"],
+                                 role=record.get("role", "user"))
         return None
 
     def disable_user(self, user_id: str) -> bool:
@@ -188,7 +229,8 @@ class AuthStore:
                 raise AuthError("用户不存在")
             token = secrets.token_urlsafe(32)
             record["token_hash"] = hash_token(token)
-            record["disabled"] = False
+            # 这里刻意不碰 disabled：换令牌是凭证动作，不是重新启用账号。
+            # 顺手清掉停用标记会把本任务存在的意义——撤销——抵消掉。
             self._flush()
             return token
 
@@ -209,10 +251,12 @@ class AuthStore:
         return len(invite.get("used_by") or []) >= int(invite.get("max_uses", 1))
 
     def create_invite(self, created_by: str, max_uses: int = 1) -> str:
-        code = _new_code()
-        while code in self._invites:
-            code = _new_code()
         with self._lock:
+            # 取码与占码必须在同一个临界区内：锁外查重时两个线程可以挑中同一个
+            # 码，后写者把前者的记录覆盖掉——丢的那个邀请码没有任何报错。
+            code = _new_code()
+            while code in self._invites:
+                code = _new_code()
             self._invites[code] = {
                 "code": code,
                 "max_uses": max(1, int(max_uses)),
@@ -226,13 +270,16 @@ class AuthStore:
 
     def list_invites(self) -> list:
         with self._lock:
-            return [dict(i) for i in self._invites.values()]
+            # 必须深拷贝：dict(i) 交出去的是 used_by 这个列表的活引用，调用方
+            # append 一下就直接改了库——包括"这个码已经被谁用过"这条审计记录。
+            return [copy.deepcopy(i) for i in self._invites.values()]
 
     def revoke_invite(self, code: str) -> bool:
         with self._lock:
-            if code not in self._invites:
+            normalized = self._normalize_code(code)
+            if normalized not in self._invites:
                 return False
-            del self._invites[code]
+            del self._invites[normalized]
             self._flush()
             return True
 

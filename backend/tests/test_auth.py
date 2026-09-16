@@ -2,6 +2,8 @@
 import json
 import os
 import sys
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.core import auth as auth_module
 from app.core.auth import AuthError, AuthStore, hash_token
 
 TOKEN = "test-token-abc123"
@@ -159,3 +162,208 @@ def test_flush_survives_reload(tmp_path):
     reloaded = AuthStore(path=path, invites_path=str(tmp_path / "invites.json"))
     assert [u["user_id"] for u in reloaded.list_users()] == [principal.user_id]
     assert not os.path.exists(path + ".tmp"), "临时文件必须被原子替换掉"
+
+
+# ---------- 评审修复：读令牌不该是写盘热路径 ----------
+
+
+@pytest.fixture
+def clocked(tmp_path, monkeypatch):
+    """把时间交给测试：last_used_at 的降频写盘只有可控时钟下才测得准。"""
+    moment = {"now": datetime(2026, 9, 16, 12, 0)}
+    monkeypatch.setattr(auth_module, "_now_dt", lambda: moment["now"])
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    store.create_invite("admin")
+    return store, moment
+
+
+def _count_flushes(store, monkeypatch):
+    """数写盘次数，但不改变行为——这样连磁盘内容也能一起验。"""
+    calls = []
+    real = store._flush
+
+    def spy():
+        calls.append(len(calls))
+        return real()
+
+    monkeypatch.setattr(store, "_flush", spy)
+    return calls
+
+
+def test_resolve_updates_memory_but_never_writes_on_hot_path(clocked, monkeypatch):
+    store, moment = clocked
+    principal, token = store.register(code=store.list_invites()[0]["code"], username="张三")
+    flushed = _count_flushes(store, monkeypatch)
+
+    base = datetime(2026, 9, 16, 12, 0)
+    for minutes in range(1, 50):
+        moment["now"] = base + timedelta(minutes=minutes)
+        assert store.resolve(token).user_id == principal.user_id
+    assert flushed == [], "令牌兑换是每次请求都要走的热路径，盘满或被编辑器/杀软锁住时不能变成 500"
+
+
+def test_resolve_persists_last_used_at_once_it_is_an_hour_old(clocked, monkeypatch):
+    store, moment = clocked
+    principal, token = store.register(code=store.list_invites()[0]["code"], username="李四")
+
+    moment["now"] = datetime(2026, 9, 16, 12, 30)
+    flushed = _count_flushes(store, monkeypatch)
+    store.resolve(token)
+    assert flushed == [], "半小时内重复读取不该再产生写盘"
+
+    moment["now"] = datetime(2026, 9, 16, 13, 31)
+    store.resolve(token)
+    assert len(flushed) == 1, "攒够一小时的补写必须发生，否则活跃度永远不上盘"
+    store.resolve(token)
+    assert len(flushed) == 1, "刚补写过就又不该写了"
+
+    disk = json.load(open(store.path, encoding="utf-8"))[principal.user_id]
+    assert disk["last_used_at"].startswith("2026-09-16T13:31"), "补写要真的落盘"
+
+
+def test_resolve_records_last_used_in_memory_even_when_it_skips_the_flush(clocked, monkeypatch):
+    store, moment = clocked
+    principal, token = store.register(code=store.list_invites()[0]["code"], username="王五")
+    moment["now"] = datetime(2026, 9, 16, 12, 42)
+    flushed = _count_flushes(store, monkeypatch)
+    assert store.resolve(token).user_id == principal.user_id
+    assert flushed == [], "这一次读取自己不写盘"
+    assert store.disable_user(principal.user_id) is True
+    disk = json.load(open(store.path, encoding="utf-8"))[principal.user_id]
+    assert disk["last_used_at"].startswith("2026-09-16T12:42"), "跳写不等于不记：内存刷新要带得下去"
+    assert disk["disabled"] is True
+
+
+# ---------- 评审修复：轮换令牌不得反向解除停用 ----------
+
+
+def test_rotate_token_leaves_a_disabled_user_disabled(store):
+    principal, old = store.register(code=store.list_invites()[0]["code"], username="孙七")
+    store.disable_user(principal.user_id)
+    new = store.rotate_token(principal.user_id)
+    assert new != old
+    assert store.resolve(new) is None, "换令牌不是重新启用账号，撤销能力不能被它悄悄抵消"
+    record = [u for u in store.list_users() if u["user_id"] == principal.user_id][0]
+    assert record["disabled"] is True, "停用状态必须原样留在记录里"
+
+
+# ---------- 评审修复：坏数据只该判"不匹配"，不该抛异常 ----------
+
+
+def test_resolve_returns_none_for_hand_edited_token_hash(tmp_path):
+    """hmac.compare_digest 收到非 ASCII str 会抛 TypeError——手改过 users.json
+    或塞进 null 就必须表现为"这枚令牌解不出来"，而不是把 500 甩给调用方。"""
+    path = str(tmp_path / "users.json")
+    store = AuthStore(path=path, invites_path=str(tmp_path / "invites.json"))
+    code = store.create_invite("admin")
+    principal, token = store.register(code=code, username="钱六")
+    disk = json.load(open(path, encoding="utf-8"))
+    disk[principal.user_id]["token_hash"] = "sha256：被人为改成了中文"
+    disk["u_broken"] = {"user_id": "u_broken", "username": "坏记录", "username_lc": "坏记录",
+                        "token_hash": None, "disabled": False, "role": "user"}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(disk, f, ensure_ascii=False)
+
+    reloaded = AuthStore(path=path, invites_path=str(tmp_path / "invites.json"))
+    assert reloaded.resolve(token) is None
+    assert reloaded.resolve("another-token") is None
+
+
+# ---------- 评审修复：重码检查必须在临界区内 ----------
+
+
+class _LockProbe:
+    """替下 store._lock，只为一件事：让测试能看见某次调用是否发生在临界区内。"""
+
+    def __init__(self):
+        self._inner = threading.RLock()
+        self.held = False
+
+    def __enter__(self):
+        self._inner.acquire()
+        self.held = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.held = False
+        self._inner.release()
+        return False
+
+
+def test_create_invite_generates_and_checks_the_code_inside_the_lock(tmp_path, monkeypatch):
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    probe = _LockProbe()
+    store._lock = probe
+    # 连发两次同一个码，逼出 while 重试分支；锁外检查时这些调用都发生在临界区外
+    codes = iter(["XXXX-1111", "XXXX-1111", "YYYY-2222"])
+    held: list = []
+
+    def fake_new_code():
+        held.append(probe.held)
+        return next(codes)
+
+    monkeypatch.setattr(auth_module, "_new_code", fake_new_code)
+    assert store.create_invite("admin") == "XXXX-1111"
+    assert store.create_invite("admin") == "YYYY-2222"
+    assert held and all(held), "查重与写入之间让出锁，并发时会有人静默丢掉一个邀请码"
+    assert sorted(i["code"] for i in store.list_invites()) == ["XXXX-1111", "YYYY-2222"]
+
+
+# ---------- 评审修复：撤销与兑换对码的归一化必须一致 ----------
+
+
+def test_revoke_invite_normalizes_code_the_way_register_does(store):
+    code = store.create_invite("admin")
+    assert store.revoke_invite(f"  {code.lower()} \n") is True, \
+        "管理员从手机粘来的小写带空格码，不该得到一个假 404"
+    assert code not in [i["code"] for i in store.list_invites()]
+    with pytest.raises(AuthError):
+        store.register(code=f" {code.lower()} ", username="新用户")
+    assert store.revoke_invite("no-such-code") is False
+
+
+# ---------- 评审修复：list_invites 不得把活对象交出去 ----------
+
+
+def test_list_invites_snapshot_does_not_alias_the_live_used_by_list(store):
+    code = store.create_invite("admin", max_uses=3)
+    snapshot = [i for i in store.list_invites() if i["code"] == code][0]
+    snapshot["used_by"].append("u_forged")
+    snapshot["max_uses"] = 99
+    again = [i for i in store.list_invites() if i["code"] == code][0]
+    assert again["used_by"] == [], "返回嵌套活引用的浅拷贝，调用方 append 一下就改了库"
+    assert again["max_uses"] == 3
+    principal, _ = store.register(code=code, username="正常用户")
+    assert [i for i in store.list_invites() if i["code"] == code][0]["used_by"] == [principal.user_id]
+
+
+# ---------- 补齐接口承诺但先前没有测试钉住的行为 ----------
+
+
+def test_delete_user_removes_the_record_and_its_token(tmp_path):
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    code = store.create_invite("admin")
+    principal, token = store.register(code=code, username="周九")
+    assert store.delete_user(principal.user_id) is True
+    assert store.resolve(token) is None, "删号后旧令牌必须立刻解不出来"
+    assert store.list_users() == []
+    assert store.delete_user(principal.user_id) is False, "删不存在的用户要如实返回 False"
+    reloaded = AuthStore(path=str(tmp_path / "users.json"),
+                         invites_path=str(tmp_path / "invites.json"))
+    assert reloaded.list_users() == []
+    assert reloaded.resolve(token) is None
+
+
+def test_invite_with_max_uses_two_admits_exactly_two_registrations(store):
+    code = store.create_invite("admin", max_uses=2)
+    first, _ = store.register(code=code, username="一号")
+    second, _ = store.register(code=code, username="二号")
+    assert first.user_id != second.user_id
+    used = [i for i in store.list_invites() if i["code"] == code][0]["used_by"]
+    assert used == [first.user_id, second.user_id]
+    with pytest.raises(AuthError):
+        store.register(code=code, username="三号")
+    assert [u["username"] for u in store.list_users()] == ["一号", "二号"]
