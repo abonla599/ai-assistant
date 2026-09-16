@@ -1,5 +1,14 @@
 import sys
 import os
+
+# 中文 Windows 的控制台默认 GBK，打包成 EXE 后任何 emoji 日志都会抛
+# UnicodeEncodeError 并在导入阶段终止进程（开发终端能显示 UTF-8，所以看不出来）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import secrets
 import uuid
 import threading
