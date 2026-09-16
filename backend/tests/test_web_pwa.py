@@ -49,6 +49,20 @@ def test_model_output_is_sanitized_before_html_render():
     assert "sanitize" in src
 
 
+def test_all_js_element_ids_exist_in_html():
+    """app.js 引用的每个 id 都必须存在于 index.html。
+
+    引用已删除的元素会让 bind() 抛 TypeError，并静默打断其后所有事件绑定
+    （设置页、模型服务全部失灵），而页面看上去仍正常加载，极难排查。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    defined = set(re.findall(r'id="([^"]+)"', html))
+    referenced = set(re.findall(r'\$\("([^"]+)"\)', js))
+    missing = sorted(referenced - defined)
+    assert not missing, f"app.js 引用了 HTML 中不存在的元素 id: {missing}"
+
+
 def test_service_worker_does_not_cache_api():
     src = client.get("/app/sw.js").text
     assert "/v1/" in src

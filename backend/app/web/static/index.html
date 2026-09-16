@@ -96,9 +96,23 @@
         </div>
 
         <input type="file" id="filePicker" hidden multiple
-               accept=".txt,.md,.markdown,.py,.js,.ts,.json,.yaml,.yml,.csv,.tsv,.log,.ini,.cfg,.html,.css,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml">
+               accept="text/plain,text/markdown,.md,.markdown,text/csv,.csv,text/tab-separated-values,.tsv,application/json,.json,text/yaml,application/x-yaml,.yaml,.yml,text/x-log,.log,text/plain,.ini,.cfg,text/html,.html,text/css,.css,text/x-python,.py,text/javascript,.js,text/typescript,.ts,text/x-c,.c,.h,text/x-c++src,.cpp,text/x-java-source,.java,text/x-go,.go,text/x-rustsrc,.rs,text/x-shellscript,.sh,application/x-sh,.bat,text/x-powershell,.ps1,application/sql,.sql,text/xml,.xml">
         <input type="file" id="galleryPicker" hidden multiple accept="image/*">
-        <input type="file" id="cameraPicker" hidden accept="image/*" capture="environment">
+
+        <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
+        <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">
+          <div class="cam-card">
+            <video id="camVideo" playsinline muted autoplay></video>
+            <canvas id="camCanvas" hidden></canvas>
+            <div class="cam-hint" id="camHint"></div>
+            <div class="cam-actions">
+              <button type="button" class="btn" id="camCancel">取消</button>
+              <button type="button" class="btn btn-primary" id="camShoot">拍照</button>
+              <button type="button" class="btn hidden" id="camRetake">重拍</button>
+              <button type="button" class="btn btn-primary hidden" id="camUse">使用照片</button>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   </div>

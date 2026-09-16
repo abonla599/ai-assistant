@@ -326,6 +326,19 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .preset-row button:hover { border-color: var(--accent); color: var(--accent); }
 
 #personaInput { width: 100%; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; resize: vertical; outline: none; margin-bottom: 10px; }
+
+/* 网页内拍照 */
+#cameraModal { z-index: 70; background: rgba(0, 0, 0, .86); }
+.cam-card {
+  width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+  padding: 12px; box-shadow: var(--shadow);
+}
+.cam-card video, .cam-card canvas {
+  width: 100%; max-height: 58vh; border-radius: 12px; background: #000; object-fit: contain;
+}
+.cam-hint { font-size: 13px; color: var(--danger); min-height: 18px; }
+.cam-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .about { margin: 0; display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; font-size: 13px; }
 .about dt { color: var(--text-3); } .about dd { margin: 0; overflow-wrap: anywhere; }
 

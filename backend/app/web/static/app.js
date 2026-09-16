@@ -290,6 +290,23 @@ async function testProviderDraft() {
 }
 
 /* ---------------- 附件 ---------------- */
+function markChipFailed(chip, name, message) {
+  chip.classList.add("failed");
+  chip.innerHTML = "";
+  const ico = document.createElement("span");
+  ico.className = "att-ico";
+  ico.textContent = "⚠";
+  const msg = document.createElement("span");
+  msg.className = "nm";
+  msg.textContent = `${name}：${message}`;
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.textContent = "×";
+  rm.setAttribute("aria-label", "移除失败的附件");
+  rm.onclick = () => chip.remove();
+  chip.append(ico, msg, rm);
+}
+
 async function pickFiles(input) {
   const files = [...input.files];
   input.value = "";
@@ -301,20 +318,7 @@ async function pickFiles(input) {
       chip.replaceWith(attachmentChip(rec));
       state.pending.push(rec);
     } catch (e) {
-      chip.classList.add("failed");
-      chip.innerHTML = "";
-      const ico = document.createElement("span");
-      ico.className = "att-ico";
-      ico.textContent = "⚠";
-      const msg = document.createElement("span");
-      msg.className = "nm";
-      msg.textContent = `${file.name}：${e.message}`;
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.textContent = "×";
-      rm.setAttribute("aria-label", "移除失败的附件");
-      rm.onclick = () => chip.remove();
-      chip.append(ico, msg, rm);
+      markChipFailed(chip, file.name, e.message);
       setStatus("附件上传失败：" + e.message, true);
     }
   }
@@ -887,6 +891,99 @@ function toggleAttachMenu() {
   setAttachMenu($("attachMenu").classList.contains("hidden"));
 }
 
+/* ---------------- 网页内拍照 ----------------
+ * 不用 <input capture>：部分安卓浏览器（WebView 外壳）会忽略 capture 与 accept，
+ * 弹出自己的"相机/文件"面板，导致点相机还要再选一次。这里直接用 getUserMedia
+ * 在页面内取景，完全不经过系统选择器。
+ */
+const cam = { stream: null, blob: null };
+
+async function openCamera() {
+  cam.blob = null;
+  $("camHint").textContent = "";
+  $("camCanvas").classList.add("hidden");
+  $("camVideo").classList.remove("hidden");
+  $("camShoot").classList.remove("hidden");
+  $("camRetake").classList.add("hidden");
+  $("camUse").classList.add("hidden");
+  $("cameraModal").classList.remove("hidden");
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const reason = "该浏览器不支持网页相机，已改用相册选择";
+    $("camHint").textContent = reason;
+    setStatus(reason, true);
+    closeCamera();
+    $("galleryPicker").click();
+    return;
+  }
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    });
+    $("camVideo").srcObject = cam.stream;
+    await $("camVideo").play().catch(() => {});
+  } catch (e) {
+    // 权限被拒或无摄像头：不要静默失败。提示写进状态栏——浮层马上就关了，
+    // 只写在浮层里用户根本来不及看。
+    const reason = `无法打开相机（${e.name || e.message}），已改用相册选择`;
+    $("camHint").textContent = reason;
+    setStatus(reason, true);
+    setTimeout(() => {
+      closeCamera();
+      $("galleryPicker").click();
+    }, 900);
+  }
+}
+
+function closeCamera() {
+  if (cam.stream) {
+    cam.stream.getTracks().forEach((t) => t.stop());   // 必须停轨，否则摄像头指示灯常亮
+    cam.stream = null;
+  }
+  $("cameraModal").classList.add("hidden");
+}
+
+function shootPhoto() {
+  const video = $("camVideo");
+  const canvas = $("camCanvas");
+  if (!video.videoWidth) { $("camHint").textContent = "相机还没准备好，稍等一下再拍"; return; }
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  canvas.toBlob((blob) => { cam.blob = blob; }, "image/jpeg", 0.92);
+  canvas.classList.remove("hidden");
+  video.classList.add("hidden");
+  $("camShoot").classList.add("hidden");
+  $("camRetake").classList.remove("hidden");
+  $("camUse").classList.remove("hidden");
+}
+
+function retake() {
+  cam.blob = null;
+  $("camCanvas").classList.add("hidden");
+  $("camVideo").classList.remove("hidden");
+  $("camShoot").classList.remove("hidden");
+  $("camRetake").classList.add("hidden");
+  $("camUse").classList.add("hidden");
+}
+
+async function usePhoto() {
+  if (!cam.blob) { $("camHint").textContent = "没有拍到内容"; return; }
+  const file = new File([cam.blob], `拍照-${Date.now()}.jpg`, { type: "image/jpeg" });
+  closeCamera();
+  const chip = attachmentChip({ name: file.name, size: file.size, kind: "?" }, true);
+  $("attRow").appendChild(chip);
+  try {
+    const rec = await API.upload(file);
+    chip.replaceWith(attachmentChip(rec));
+    state.pending.push(rec);
+  } catch (e) {
+    markChipFailed(chip, file.name, e.message);
+  }
+  updateSendEnabled();
+}
+
 /* ---------------- 侧栏开合 ---------------- */
 function openSidebar() { $("sidebar").classList.add("open"); $("backdrop").classList.add("show"); }
 function closeSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
@@ -941,7 +1038,7 @@ function bind() {
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
   $("pickImage").onclick = () => showImageSources(true);
   $("backFromImage").onclick = () => showImageSources(false);
-  $("pickCamera").onclick = () => { setAttachMenu(false); $("cameraPicker").click(); };
+  $("pickCamera").onclick = () => { setAttachMenu(false); openCamera(); };
   $("pickGallery").onclick = () => { setAttachMenu(false); $("galleryPicker").click(); };
   $("pickFile").onclick = () => { setAttachMenu(false); $("filePicker").click(); };
   document.addEventListener("click", (e) => {
@@ -950,7 +1047,11 @@ function bind() {
   });
   $("filePicker").onchange = (e) => pickFiles(e.target);
   $("galleryPicker").onchange = (e) => pickFiles(e.target);
-  $("cameraPicker").onchange = (e) => pickFiles(e.target);
+
+  $("camCancel").onclick = closeCamera;
+  $("camShoot").onclick = shootPhoto;
+  $("camRetake").onclick = retake;
+  $("camUse").onclick = usePhoto;
 
   $("closeSettings").onclick = closeSettings;
   $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };
@@ -1010,11 +1111,11 @@ function bind() {
   };
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      closeSettings();
-      closeSidebar();
-      setAttachMenu(false);
-    }
+    if (e.key !== "Escape") return;
+    if (!$("cameraModal").classList.contains("hidden")) { closeCamera(); return; }
+    closeSettings();
+    closeSidebar();
+    setAttachMenu(false);
   });
 }
 
