@@ -256,11 +256,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
+.attach-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .attach-tile {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
   border-radius: 12px; padding: 9px 16px 9px 9px; font-size: 14px; cursor: pointer;
 }
+.attach-tile.back { padding: 9px; }
+.attach-tile.back .tile-ico { font-size: 15px; }
 .attach-tile:hover { border-color: var(--accent); background: var(--accent-soft); }
 .attach-tile .tile-ico {
   width: 32px; height: 32px; border-radius: 9px; background: var(--bg-hover);

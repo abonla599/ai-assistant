@@ -71,20 +71,33 @@
         </form>
 
         <div class="attach-menu hidden" id="attachMenu" role="menu">
-          <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
-            <span class="tile-ico">📷</span><span>相机</span>
-          </button>
-          <button type="button" class="attach-tile" id="pickImage" role="menuitem">
-            <span class="tile-ico">🖼</span><span>相册</span>
-          </button>
-          <button type="button" class="attach-tile" id="pickFile" role="menuitem">
-            <span class="tile-ico">📎</span><span>文件</span>
-          </button>
+          <!-- 一级：图片 / 文件 -->
+          <div class="attach-row" id="attachRoot">
+            <button type="button" class="attach-tile" id="pickImage" role="menuitem">
+              <span class="tile-ico">🖼</span><span>图片</span>
+            </button>
+            <button type="button" class="attach-tile" id="pickFile" role="menuitem">
+              <span class="tile-ico">📎</span><span>文件</span>
+            </button>
+          </div>
+
+          <!-- 二级：图片来源（由本页自己呈现，不依赖浏览器菜单） -->
+          <div class="attach-row hidden" id="imageSourceRow">
+            <button type="button" class="attach-tile back" id="backFromImage" aria-label="返回">
+              <span class="tile-ico">←</span>
+            </button>
+            <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
+              <span class="tile-ico">📷</span><span>相机</span>
+            </button>
+            <button type="button" class="attach-tile" id="pickGallery" role="menuitem">
+              <span class="tile-ico">🖼</span><span>相册</span>
+            </button>
+          </div>
         </div>
 
         <input type="file" id="filePicker" hidden multiple
                accept=".txt,.md,.markdown,.py,.js,.ts,.json,.yaml,.yml,.csv,.tsv,.log,.ini,.cfg,.html,.css,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml">
-        <input type="file" id="imagePicker" hidden multiple accept="image/*">
+        <input type="file" id="galleryPicker" hidden multiple accept="image/*">
         <input type="file" id="cameraPicker" hidden accept="image/*" capture="environment">
       </div>
     </main>

@@ -24,7 +24,7 @@ class ChatPipeline:
         self.tools_schema = get_all_tools_schema()
 
     @staticmethod
-    def _text_of(content) -> str:
+    def text_of(content) -> str:
         """取消息里的纯文本。带图片附件时 content 是多模态数组。"""
         if isinstance(content, str):
             return content
@@ -48,7 +48,7 @@ class ChatPipeline:
         user_input = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                user_input = self._text_of(msg.get("content"))
+                user_input = self.text_of(msg.get("content"))
                 break
         if not user_input:
             return {"reply": "请提供输入内容", "message_id": None}
@@ -61,7 +61,7 @@ class ChatPipeline:
                                                       provider_id=provider_id)
 
         # 4. 自动保存对话摘要到记忆
-        self._save_interaction(user_input, final_reply)
+        self.save_interaction(user_input, final_reply)
 
         msg_id = str(uuid.uuid4())
         return {"reply": final_reply, "message_id": msg_id,
@@ -151,7 +151,7 @@ class ChatPipeline:
                 return msg.content or "（模型未返回内容）"
         return "已达到最大循环次数，任务可能未完成。"
 
-    def _save_interaction(self, user_input: str, ai_reply: str):
+    def save_interaction(self, user_input: str, ai_reply: str):
         """将本轮对话摘要存入记忆"""
         try:
             if self.memory is None:

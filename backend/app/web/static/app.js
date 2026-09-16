@@ -872,9 +872,15 @@ function syncPersonaChip() {
   $("personaInput").value = p;
 }
 
+function showImageSources(show) {
+  $("attachRoot").classList.toggle("hidden", !!show);
+  $("imageSourceRow").classList.toggle("hidden", !show);
+}
+
 function setAttachMenu(open) {
   $("attachMenu").classList.toggle("hidden", !open);
   $("attachBtn").classList.toggle("open", !!open);
+  if (!open) showImageSources(false);   // 关闭时回到一级，避免下次打开停错层
 }
 
 function toggleAttachMenu() {
@@ -933,15 +939,17 @@ function bind() {
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
+  $("pickImage").onclick = () => showImageSources(true);
+  $("backFromImage").onclick = () => showImageSources(false);
   $("pickCamera").onclick = () => { setAttachMenu(false); $("cameraPicker").click(); };
-  $("pickImage").onclick = () => { setAttachMenu(false); $("imagePicker").click(); };
+  $("pickGallery").onclick = () => { setAttachMenu(false); $("galleryPicker").click(); };
   $("pickFile").onclick = () => { setAttachMenu(false); $("filePicker").click(); };
   document.addEventListener("click", (e) => {
     const menu = $("attachMenu");
     if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
   });
   $("filePicker").onchange = (e) => pickFiles(e.target);
-  $("imagePicker").onchange = (e) => pickFiles(e.target);
+  $("galleryPicker").onchange = (e) => pickFiles(e.target);
   $("cameraPicker").onchange = (e) => pickFiles(e.target);
 
   $("closeSettings").onclick = closeSettings;

@@ -241,7 +241,7 @@ def _prepare_chat(request: ChatRequest):
     messages = list(request.messages)
     last = messages[-1] or {}
     raw = last.get("content")
-    text = raw if isinstance(raw, str) else ChatPipeline._text_of(raw)
+    text = raw if isinstance(raw, str) else ChatPipeline.text_of(raw)
 
     content = build_user_content(text, request.attachments, provider["supports_vision"])
     messages[-1] = {**last, "content": content}
@@ -303,14 +303,14 @@ async def stream_chat_endpoint(request: ChatRequest):
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 流式此前直接调 stream_chat、绕过 pipeline，因此从未注入记忆与偏好；
-    # 而 PWA 默认走流式，等于记忆功能在手机上是装饰。这里复用同一套注入。
+    # 流式此前直接调 stream_chat、绕过 pipeline，因此既没注入记忆与偏好，
+    # 也不会把本轮对话写回记忆。这里复用同一个 pipeline 实例补齐两者。
     used_memory_ids = []
-    if USE_PIPELINE and messages:
+    pipe = ChatPipeline(user_id="default_user") if USE_PIPELINE else None
+    if pipe is not None and messages:
         try:
-            query_text = ChatPipeline._text_of(messages[-1].get("content"))
-            messages, used_memory_ids = ChatPipeline(
-                user_id="default_user").inject_context(messages, query_text)
+            query_text = ChatPipeline.text_of(messages[-1].get("content"))
+            messages, used_memory_ids = pipe.inject_context(messages, query_text)
         except Exception as e:
             print(f"流式上下文注入失败（不影响本次对话）: {e}")
 
@@ -334,6 +334,13 @@ async def stream_chat_endpoint(request: ChatRequest):
             if request.session_id:
                 sessions_store.add_message(
                     request.session_id, "assistant", full_text, message_id, used_memory_ids)
+
+            # 把本轮问答写入长期记忆，与非流式路径保持一致
+            if pipe is not None:
+                try:
+                    pipe.save_interaction(user_text, full_text)
+                except Exception as e:
+                    print(f"流式记忆保存失败（不影响已返回的回复）: {e}")
             
             # 发送完成事件
             yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
