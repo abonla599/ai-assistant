@@ -703,6 +703,15 @@ def enforced(monkeypatch, tmp_path):
 
 注意 `USERS_DB_PATH` / `INVITES_DB_PATH` 两行必须放在 `import app.main` 之前——`auth_store` 是模块级单例，晚设就晚了。
 
+- [ ] **Step 3b: 迁移旧中间件的 HTTP 测试**
+
+`backend/tests/test_auth.py` 早已存在，内含针对旧全局 `ACCESS_TOKEN` 中间件的 HTTP 测试（源自 `fc53b7b9`），Task 1 的存储层测试是追加进去的。主中间件在本任务被 `install_auth` 替换，那批旧测试必然变红。
+
+处理办法：把其中仍然成立的凭据解析断言（大小写不敏感的 scheme、`x-access-token` 回退等）迁到 `test_authz_failclosed.py` 并按新语义改写，其余仅服务于"全局口令"模型的直接删除。禁止为了让旧测试变绿而保留旧中间件。
+
+Run: `python -m pytest backend/tests/test_auth.py backend/tests/test_authz_failclosed.py -q`
+Expected: 全部 PASS，且 `test_auth.py` 不再包含对旧全局口令模型的断言
+
 - [ ] **Step 4: 运行新测试与全量**
 
 Run: `python -m pytest backend/tests/test_authz_failclosed.py -q`
