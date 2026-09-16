@@ -59,6 +59,34 @@ def test_username_dedup_is_case_insensitive(store):
     assert "占用" in str(e.value)
 
 
+def test_the_invite_code_is_validated_before_anything_about_the_username(store):
+    """检查顺序就是注册端点的泄露面，所以它是存储层契约，不只是实现细节。
+
+    注册端点免凭据。先查重名，等于一个邀请码都没有的人也能问出"这个名字被占了
+    吗"，两个方向都得到真话。先验码之后，没码的人听到的只有同一句"邀请码无效"；
+    而握着有效未用码的人照旧听得到真话——他本来就能注册，不多这一比特。
+    """
+    store.register(code=store.list_invites()[0]["code"], username="Alice")
+
+    reasons = {}
+    for label, username in (("撞名", "alice"), ("空闲名", "bob"), ("空用户名", ""),
+                            ("保留字", "admin"), ("超长", "z" * 25)):
+        with pytest.raises(AuthError) as e:
+            store.register(code="NOPE-NOPE", username=username)
+        reasons[label] = str(e.value)
+    assert set(reasons.values()) == {reasons["空闲名"]}, \
+        f"没有码的时候，用户名的任何差别都不该反映进答案：{reasons}"
+    assert "邀请码" in reasons["空闲名"] and "占用" not in reasons["空闲名"]
+
+    # 有效未用码 + 撞名：真话照旧要说，否则用户改不了名就只能去缠管理员
+    valid = store.create_invite("admin")
+    with pytest.raises(AuthError) as honest:
+        store.register(code=valid, username="ALICE")
+    assert "占用" in str(honest.value)
+    assert [i for i in store.list_invites() if i["code"] == valid][0]["used_by"] == [], \
+        "被拒的注册不该消耗邀请码，否则改名的人手里就剩一枚废码"
+
+
 @pytest.mark.parametrize("bad", ["admin", "default_user", "", "  ", "x" * 25])
 def test_reserved_and_malformed_usernames_rejected(store, bad):
     with pytest.raises(AuthError):

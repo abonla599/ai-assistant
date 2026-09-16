@@ -19,6 +19,28 @@ client = TestClient(app)
 BOOT = {"Authorization": "Bearer boot-token"}
 
 
+@pytest.fixture(autouse=True)
+def _isolated_throttle():
+    """限流账本 `_FAILS` 是模块级全局状态，每条用例都必须从空表开始。
+
+    不清的话，本文件（以及 Task 4-7 任何多打几次坏码的用例）留下的计数会累到
+    阈值上，把一个毫不相干的 assert 200 变成 429——那时绿就只是算术运气。
+    """
+    from app.core.auth_router import _FAILS
+
+    _FAILS.clear()
+    yield
+    _FAILS.clear()
+
+
+def _budget_used() -> int:
+    """账本里已记了多少次失败。_throttled() 读的时候会往 defaultdict 塞一个空
+    列表，所以"有没有键"说明不了问题，只能数时间戳。"""
+    from app.core.auth_router import _FAILS
+
+    return sum(len(v) for v in _FAILS.values())
+
+
 def _register(username="张三"):
     code = auth_store.create_invite("default_user")
     res = client.post("/v1/auth/register", json={"code": code, "username": username})
@@ -42,6 +64,9 @@ def test_register_returns_token_once():
 
 
 def test_duplicate_username_is_409():
+    """握着有效未用码的人才听得到"这名字被占了"——改名就能继续，不必去缠管理员。
+    没码的人问同一句话只会得到"邀请码无效"，见
+    test_a_taken_username_reveals_nothing_to_a_caller_without_a_valid_code。"""
     _register("重复名")
     code = auth_store.create_invite("default_user")
     res = client.post("/v1/auth/register", json={"code": code, "username": "重复名"})
@@ -66,6 +91,35 @@ def test_a_used_up_code_and_an_unknown_code_look_identical():
     assert spent.json()["detail"] == missing.json()["detail"]
 
 
+def _outcome(res):
+    return (res.status_code, res.json()["detail"])
+
+
+def test_a_taken_username_reveals_nothing_to_a_caller_without_a_valid_code():
+    """注册端点是唯一的免凭据端点：它不能回答"这个名字被占了吗"。
+
+    存储层的检查顺序（先验码、后查占名）保证这一点——没有码的人，无论用户名
+    撞没撞、合不合格，听到的都是同一句"邀请码无效"。反过来先查占名，公网隧道上
+    任何人都能白嫖一份"谁在这里注册过"的名单，而用户名是拿去撞别的服务的通货。
+    握着有效未用码的人仍然听得到真话（test_duplicate_username_is_409）。
+    """
+    _register("独占者")
+    no_code = {"code": "ZZZZ-ZZZZ"}
+
+    taken = client.post("/v1/auth/register", json={**no_code, "username": "独占者"})
+    free = client.post("/v1/auth/register", json={**no_code, "username": "没人用的名字"})
+    malformed = client.post("/v1/auth/register", json={**no_code, "username": "x" * 25})
+    reserved = client.post("/v1/auth/register", json={**no_code, "username": "admin"})
+    for res in (taken, free, malformed, reserved):
+        assert _outcome(res) == (403, "邀请码无效"), _outcome(res)
+
+    # 码已用尽 + 撞名：同样只许说"邀请码无效"，不许漏出 409
+    spent = auth_store.create_invite("default_user")
+    client.post("/v1/auth/register", json={"code": spent, "username": "先用掉的人"})
+    assert _outcome(client.post("/v1/auth/register",
+                               json={"code": spent, "username": "独占者"})) == (403, "邀请码无效")
+
+
 def test_missing_fields_are_422():
     for body in ({"code": "AAAA-BBBB"}, {"username": "缺码"}, {}):
         res = client.post("/v1/auth/register", json=body)
@@ -73,12 +127,18 @@ def test_missing_fields_are_422():
 
 
 def test_a_bad_username_is_not_reported_as_a_bad_invite():
-    """用户名不合格要照实说：把它推给"邀请码无效"，用户会去要新码、再撞一次同样的墙。"""
+    """用户名不合格要照实说：把它推给"邀请码无效"，用户会去要新码、再撞一次同样的墙。
+
+    前提是这人手里确实有一枚有效码（没码的人听到的仍然是"邀请码无效"，见
+    test_a_taken_username_reveals_nothing_to_a_caller_without_a_valid_code）；
+    也正因为这是"已有资格的人在打错字"，它一律不烧限流预算。
+    """
     res = client.post("/v1/auth/register",
                       json={"code": auth_store.create_invite("default_user"),
                             "username": "x" * 25})
     assert res.status_code == 422
     assert "邀请码" not in res.json()["detail"]
+    assert _budget_used() == 0, "用户名不合格不是攻击，不该进限流账本"
 
 
 def test_registration_throttles_repeated_failures():
@@ -87,41 +147,78 @@ def test_registration_throttles_repeated_failures():
     邀请码是 40 位随机值，"锁某个码"对猜测攻击没有意义（被猜的码根本不存在），
     真正有效的是限制同一来源的失败次数。
     """
-    from app.core.auth_router import MAX_FAILURES_PER_WINDOW, _FAILS
+    from app.core.auth_router import FAILURE_WINDOW_SECONDS, MAX_FAILURES_PER_WINDOW
 
-    _FAILS.clear()
     for i in range(MAX_FAILURES_PER_WINDOW):
         res = client.post("/v1/auth/register",
                           json={"code": f"AAAA-{i:04d}", "username": "猜一猜"})
         assert res.status_code == 403, f"第 {i} 次应当仍是 403"
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW, "前提：坏码确实被记了下来"
     blocked = client.post("/v1/auth/register",
                           json={"code": auth_store.create_invite("default_user"),
                                 "username": "正当用户"})
     assert blocked.status_code == 429
-    _FAILS.clear()
+    assert blocked.headers.get("retry-after") == str(FAILURE_WINDOW_SECONDS)
+
+
+def test_only_bad_invite_codes_cost_the_throttle_budget():
+    """限流的代价只由猜码付：撞名（409）与用户名不合格（422）一格都不记账。
+
+    真实部署里 cloudflared 连的是本机 :8000，所有远程朋友在 uvicorn 眼里都是
+    同一个 127.0.0.1 —— 一个共享的桶。把打字错误算进预算，后果是"一个人撞两次
+    名，全网唯一的 onboarding 入口锁 10 分钟"，而收益是零：面对 40 位随机邀请码，
+    猜测者的每一次尝试本来就记一格，多记不记撞名根本不改变他的代价。
+    """
+    from app.core.auth_router import MAX_FAILURES_PER_WINDOW
+
+    _register("占用者")
+    code = auth_store.create_invite("default_user")
+
+    for i in range(MAX_FAILURES_PER_WINDOW + 2):
+        taken = client.post("/v1/auth/register",
+                            json={"code": code, "username": "占用者"})
+        assert taken.status_code == 409, f"第 {i} 次撞名应当仍是 409"
+        malformed = client.post("/v1/auth/register",
+                               json={"code": code, "username": "y" * 25})
+        assert malformed.status_code == 422, f"第 {i} 次用户名不合格应当仍是 422"
+
+    assert _budget_used() == 0, "无害的输入错误不该进限流账本"
+    used = [i for i in auth_store.list_invites() if i["code"] == code][0]["used_by"]
+    assert used == [], "失败的注册不该烧掉邀请码，否则第 2 次就变 403 了"
+    ok = client.post("/v1/auth/register",
+                     json={"code": auth_store.create_invite("default_user"),
+                           "username": "手滑之后的人"})
+    assert ok.status_code == 200, "预算完好，正当注册不该被别人的手滑挡住"
+
+    # 反向：猜码依旧有代价，一格一格填满到 429
+    for i in range(MAX_FAILURES_PER_WINDOW):
+        res = client.post("/v1/auth/register",
+                          json={"code": f"KKKK-{i:04d}", "username": "这回收钱"})
+        assert res.status_code == 403, f"第 {i} 次应当仍是 403"
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW
+    assert client.post("/v1/auth/register",
+                       json={"code": auth_store.create_invite("default_user"),
+                             "username": "被挡住的人"}).status_code == 429
 
 
 def test_a_success_resets_the_throttle():
     """一次成功注册说明这来源确实是正当用户，别让他之前的手滑继续记账。"""
-    from app.core.auth_router import MAX_FAILURES_PER_WINDOW, _FAILS
+    from app.core.auth_router import MAX_FAILURES_PER_WINDOW
 
-    _FAILS.clear()
     for i in range(MAX_FAILURES_PER_WINDOW - 1):
         client.post("/v1/auth/register", json={"code": f"CCCC-{i:04d}", "username": "手滑"})
-    assert _FAILS, "前提：失败确实被记了下来"
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW - 1, "前提：坏码确实被记了下来"
     _register("重置者")
-    assert not _FAILS, "成功后该来源的计数必须清零"
+    assert _budget_used() == 0, "成功后这来源的计数必须清零"
     res = client.post("/v1/auth/register", json={"code": "DDDD-DDDD", "username": "再猜"})
     assert res.status_code == 403, "清零之后又重新计得起数"
-    _FAILS.clear()
 
 
 def test_the_throttle_forgets_once_the_window_passes(monkeypatch):
     """限流必须自己松开：永不过期的计数器本身就是"让所有人注册不了"的 DoS 靶子。"""
     from app.core import auth_router
-    from app.core.auth_router import MAX_FAILURES_PER_WINDOW, _FAILS
+    from app.core.auth_router import MAX_FAILURES_PER_WINDOW
 
-    _FAILS.clear()   # 之前用例留的是真实时钟下的时间戳，冻结前先清空
     moment = [0.0]
     monkeypatch.setattr(auth_router, "_now", lambda: moment[0])
 
@@ -138,7 +235,6 @@ def test_the_throttle_forgets_once_the_window_passes(monkeypatch):
                       json={"code": auth_store.create_invite("default_user"),
                             "username": "窗口后的正当用户"})
     assert res.status_code == 200, res.text
-    _FAILS.clear()
 
 
 def test_trailing_slash_is_not_a_credential_free_door(client, enforced):
@@ -158,7 +254,6 @@ def test_trailing_slash_cannot_dodge_the_throttle():
     from app.core.auth_router import MAX_FAILURES_PER_WINDOW, _FAILS
 
     # 先让斜杠变体把预算用光（它会经 307 归一化到真实端点，失败照常计数）
-    _FAILS.clear()
     for i in range(MAX_FAILURES_PER_WINDOW):
         res = client.post("/v1/auth/register/",
                           json={"code": f"FFFF-{i:04d}", "username": "斜杠猜码"})
@@ -168,7 +263,8 @@ def test_trailing_slash_cannot_dodge_the_throttle():
                                   "username": "斜杠后来者"})
     assert canonical.status_code == 429, "斜杠攒下的失败必须作用到无斜杠路径上"
 
-    # 反向同理：无斜杠用光预算后，斜杠变体也别想拿到一次没被限流的注册
+    # 反向同理：无斜杠用光预算后，斜杠变体也别想拿到一次没被限流的注册。
+    # 这一句必须在测试中间清账，autouse fixture 只保证进出用例时是空的。
     _FAILS.clear()
     for i in range(MAX_FAILURES_PER_WINDOW):
         client.post("/v1/auth/register", json={"code": f"GGGG-{i:04d}", "username": "无斜杠猜码"})
@@ -176,7 +272,6 @@ def test_trailing_slash_cannot_dodge_the_throttle():
                           json={"code": auth_store.create_invite("default_user"),
                                 "username": "斜杠正当用户"})
     assert slashed.status_code == 429, "斜杠变体必须与真实端点共用同一个限流窗口"
-    _FAILS.clear()
 
 
 # ---------- /v1/auth/me ----------
@@ -261,6 +356,24 @@ def test_revoke_is_case_insensitive_like_the_http_path_promises():
     code = auth_store.create_invite("default_user")
     assert client.delete(f"/v1/admin/invites/{code.lower()}").status_code == 200
     assert code not in [i["code"] for i in auth_store.list_invites()]
+
+
+def test_revoking_an_invite_never_echoes_the_code_back():
+    """全局约束：响应与日志里不得出现令牌/邀请码明文。
+
+    撤销的响应没有任何理由复述客户端刚提交的那串码——多一处出口，就多一处被
+    访问日志、浏览器历史或前端 console 留下来的机会。成功只回 status，
+    失败只回一句与人无关的话。
+    """
+    code = auth_store.create_invite("default_user")
+    res = client.delete(f"/v1/admin/invites/{code}")
+    assert res.status_code == 200
+    assert res.json() == {"status": "revoked"}
+    assert code not in res.text
+
+    missing = client.delete("/v1/admin/invites/NOPE-NOPE")
+    assert missing.status_code == 404
+    assert "NOPE-NOPE" not in missing.text
 
 
 def test_invite_listing_exposes_only_what_an_admin_needs():

@@ -1,10 +1,15 @@
 """注册与管理端点：邀请码换身份，管理员发放与回收邀请码、管理用户。
 
-这里是身份存储（app/core/auth.py）与 HTTP 之间唯一的一层，规则两条：
+这里是身份存储（app/core/auth.py）与 HTTP 之间唯一的一层，规则三条：
 1. 对外说话保守。注册失败的原因一律收敛成"邀请码无效"——区分"码不存在"和
-   "码已用尽"，就把这个免凭据端点变成了探测邀请码是否存在的信道。
+   "码已用尽"，就把这个免凭据端点变成了探测邀请码是否存在的信道。同一条也管
+   用户名："这名字被占了"只对已经握着一枚有效未用码的人说（顺序在
+   AuthStore.register 里保证：先验码，再谈用户名）。
 2. 响应按字段白名单出。存储层的记录带着 token_hash 和内建的 username_lc，
    顺手 return record 等于把口令摘要交给前端与日志。
+3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与轮换的响应，邀请码见于
+   发放响应与管理员的码表。任何端点都不许复述调用方自己刚提交的码——多一处出口
+   就多一处被日志/控制台记下来的机会。
 """
 import time
 from collections import defaultdict
@@ -18,12 +23,15 @@ from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
 
-# 猜码的代价：同一来源在窗口内失败太多次就拒一拒。进程内计数即可——
+# 猜码的代价：同一来源在窗口内"码不对"太多次就拒一拒。进程内计数即可——
 # 重启即清零是可接受的，因为真正的凭据是 40 位随机邀请码。
+# 账本只记猜码，不记撞名/用户名不合格（见 register 里的注释）：来源键在隧道
+# 后面人人相同，把无害的打字错误算进预算，锁住的是唯一的 onboarding 入口。
 FAILURE_WINDOW_SECONDS = 600
 MAX_FAILURES_PER_WINDOW = 10
-# 来源键来自请求头，谁都能造。字典不能无上限长大，所以超阈值时顺手丢掉
-# 窗口内已无记录的来源（正常规模部署永远碰不到这个阈值）。
+# 来源键取自 uvicorn 看到的对端地址：谁都能连接，所以它也可以是攻击者影响的
+# 输入（分布式猜码者一人一个 IP）。字典不能无上限长大，超阈值时顺手丢掉窗口内
+# 已无记录的来源（正常规模部署永远碰不到这个阈值）。
 MAX_TRACKED_SOURCES = 4096
 _FAILS = defaultdict(list)
 
@@ -77,7 +85,13 @@ def _client_ip(request: Request) -> str:
 
 
 def _register_error(e: AuthError) -> HTTPException:
-    """把存储层的失败原因翻译成状态码，同时不外泄邀请码的存在性。"""
+    """把存储层的失败原因翻译成状态码，同时不外泄邀请码与用户名的存在性。
+
+    "占用"这一支要说实话（改名是用户自己能解决的事），但它的前提是存储层先验
+    了邀请码：没有效码的人根本走不到这里，只会拿到 403 那一句。顺序一旦反过来，
+    这个端点就变成用户名枚举预言机——test_a_taken_username_reveals_nothing_…
+    与 test_auth.py 里那条顺序测试一起把这两半钉住。
+    """
     if _REASON_NAME_TAKEN in e.reason:
         # 重名必须照实说：用户改名就能解决，让他以为码坏了只会去缠管理员。
         return HTTPException(status_code=409, detail=e.reason)
@@ -110,8 +124,16 @@ async def register(req: RegisterRequest, request: Request):
     try:
         principal, token = _store().register(code=req.code, username=req.username)
     except AuthError as e:
-        _note_failure(ip)
-        raise _register_error(e)
+        exc = _register_error(e)
+        if exc.status_code == 403:
+            # 只有猜码才进账本。409（撞名）与 422（用户名不合格）的前提是这来源
+            # 手里已经有一枚有效码——那是打错字的人，不是攻击者。
+            # 而预算只有 10 格，躲过 cloudflared 之后 request.client.host 恒为
+            # 127.0.0.1，全网络共用同一个桶：把撞名计进去，一个人手滑撞两次名
+            # 就能把唯一的注册入口锁掉 10 分钟，真在瞎猜 40 位随机码的人反倒没被
+            # 多挡住一下（他每一次尝试本来就计一格）。计费的口径必须对准威胁。
+            _note_failure(ip)
+        raise exc
     _FAILS.pop(ip, None)   # 成功即证明这来源是正当用户，别让它之前的手滑继续记账
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role}
@@ -144,7 +166,10 @@ async def revoke_invite(code: str, _: Principal = RequireAdmin):
     # 码不必先归一化：存储层的 revoke 与 register 共用同一份规则（大写去空格）
     if not _store().revoke_invite(code):
         raise HTTPException(status_code=404, detail="邀请码不存在")
-    return {"status": "revoked", "code": code}
+    # 不回显 code：邀请码明文与令牌同级敏感（全局约束：响应与日志都不许出现），
+    # 而客户端本来就知道自己刚删了哪一枚——多写一遍只是凭空加一处泄露出口，
+    # 比如被访问日志或前端把整条响应打进控制台。
+    return {"status": "revoked"}
 
 
 def _public_user(record: dict) -> dict:

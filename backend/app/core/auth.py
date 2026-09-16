@@ -167,15 +167,25 @@ class AuthStore:
             return [dict(u) for u in self._users.values()]
 
     def register(self, code: str, username: str):
-        cleaned = self._normalize_username(username)
-        lc = cleaned.casefold()
-        with self._lock:
-            if any(u.get("username_lc") == lc for u in self._users.values()):
-                raise AuthError("该用户名已被占用")
+        """邀请码换身份。检查顺序本身是安全属性，不是风格问题：码先、名字后。
 
+        注册端点免凭据。若先查重名，那么一个邀请码都没有的人也能问出
+        "这个名字被占了吗"，而且两个方向都得到真话——端点就成了用户名枚举
+        预言机（用户名可被人拿去撞别的服务）。先验码之后，没码的人无论填什么
+        用户名都只听到同一句"邀请码无效"；只有握着有效未用码的人才配知道
+        "这名字撞了"，而他本来就有注册权限，这句实话不再增加攻击面。
+        """
+        with self._lock:
             invite = self._invites.get(self._normalize_code(code))
             if invite is None or self._invite_spent(invite):
                 raise AuthError("邀请码无效或已用完")
+
+            # 用户名的形状与占用都排在码之后、也排在消耗码之前：打错字或撞名
+            # 都不该烧掉一枚邀请码（否则用户只能回去找管理员重新要码）。
+            cleaned = self._normalize_username(username)
+            lc = cleaned.casefold()
+            if any(u.get("username_lc") == lc for u in self._users.values()):
+                raise AuthError("该用户名已被占用")
 
             user_id = "u_" + secrets.token_hex(4)
             token = secrets.token_urlsafe(32)
