@@ -107,12 +107,24 @@ def test_register_stays_public(wired, monkeypatch):
     client, store = wired
     # 连 bootstrap 口令一起清空：此刻服务端"没有任何身份"，除注册外一律 503。
     # 公开判定若被挪到 fail-closed 之后，第一个身份就永远申请不出来——门从里面
-    # 焊死了。端点本身要等 Task 3 才挂上，此刻当然是 404；这里钉的是另一件事，
-    # 而且更要紧的那件：鉴权层绝不能把注册挡在凭据后面。
+    # 焊死了。Task 3 之后端点已存在，所以这里断真 200：只看"没被鉴权挡下"的话，
+    # 404（路由没了）和 500（注册逻辑炸了）都算通过。
     monkeypatch.setenv("ACCESS_TOKEN", "")
     code = store.create_invite("admin")
     res = client.post("/v1/auth/register", json={"code": code, "username": "公开注册"})
-    assert res.status_code not in (401, 403, 503), "注册端点必须无需凭据即可访问"
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["role"] == "user" and body["user_id"].startswith("u_")
+
+    # fail-closed 的另一半：库里还没有任何管理员、也没配口令，除注册外一律拒绝
+    assert client.get("/v1/sessions").status_code == 503
+
+    # 配上口令之后这把令牌要立刻能用——公开注册发出去的身份不能被鉴权层拒认
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
+    me = client.get("/v1/auth/me",
+                    headers={"Authorization": "Bearer " + body["token"]})
+    assert me.status_code == 200, me.text
+    assert me.json()["user_id"] == body["user_id"]
 
 
 def test_identity_store_is_redirected_away_from_real_data():

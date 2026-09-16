@@ -99,7 +99,9 @@ def test_stream_error():
     }
 
     response = client.post("/v1/chat/stream", json=payload)
-    
-    # 对于不存在的会话，应该返回 404 或其他错误状态
-    # 但根据实现，可能不会严格检查 session_id，所以接受 200 或 404
-    assert response.status_code in [200, 404]
+
+    # 归属校验发生在返回 StreamingResponse 之前：状态码必须真的表达失败。
+    # 原先断的是 in [200, 404]——200 也算过，等于把"流起来了但没人知道失败"
+    # 这个形状写成契约，什么都没钉住。
+    assert response.status_code == 404
+    assert "会话不存在" in response.text

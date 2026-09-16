@@ -75,11 +75,26 @@ def test_root_still_reports_api_status():
     assert res.json()["status"] == "running"
 
 
-def test_memory_list_shape_matches_frontend():
-    uid = "shape_checker"
-    client.post("/v1/memory/add", json={"user_id": uid, "content": "契约检查记忆", "summarize": False})
-    data = client.get(f"/v1/memory/list/{uid}?limit=5").json()
+def test_memory_list_shape_matches_frontend(enforced):
+    """前端契约：列表只认令牌，响应里必须带 memories 数组。"""
+    me = enforced("契约检查")
+    client.post("/v1/memory/add", json={"content": "契约检查记忆", "summarize": False}, headers=me)
+    data = client.get("/v1/memory/list?limit=5", headers=me).json()
     assert "memories" in data or "results" in data, f"实际字段: {list(data)}"
+    assert [m["content"] for m in data["memories"]] == ["契约检查记忆"], \
+        "列表里只能出现调用者自己的记忆"
+
+
+def test_frontend_never_self_reports_an_identity():
+    """api.js 不得把身份写进请求：一旦前端自报 user_id，就等于替别人挑身份。
+
+    后端已经不读请求里的 user_id（身份只来自令牌），这条钉的是另一半：
+    前端也别再把它发出去，否则会误导后来人以为服务端认这个字段。
+    """
+    src = (STATIC / "api.js").read_text(encoding="utf-8")
+    offenders = [line.strip() for line in src.splitlines()
+                 if "user_id" in line or "/v1/memory/list/" in line]
+    assert not offenders, f"api.js 仍在传递客户端自报身份: {offenders}"
 
 
 def test_replace_session_messages_endpoint():

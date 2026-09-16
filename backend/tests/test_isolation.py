@@ -1,11 +1,16 @@
-"""跨用户隔离矩阵：A 拿不到 B 的会话与附件。
+"""跨用户隔离矩阵：A 拿不到 B 的会话、附件与记忆。
 
 一律用真实令牌 + AUTH_MODE=enforced 才能验到归属逻辑，因此本文件不复用
 conftest 的 disabled 客户端：store 层直接调用，拿两个真实注册出来的 user_id
 断言归属；HTTP 层复用 conftest 的 client + enforced fixture，因为"非本人按 404
 处理"是对路由的承诺（不是对 store 的承诺），另搭一个最小 app 反而测不到
 main.py 里真实的那几条路由。
+
+记忆端点是唯一的例外（见文件末尾的 mem_api）：它自带一个只挂记忆路由 +
+真鉴权中间件的探针 app，好处是每次用例拿到的是全新内存库，能直接断言
+"A 的列表里只有 A 那一条"这种整体形状。
 """
+import hashlib
 import json
 import shutil
 import sys
@@ -14,9 +19,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from app.core.auth import AuthStore
 from app.core.uploads import UploadStore
 from app.session.session_store import SessionStore
+import app.core.authz as authz
+import app.memory.memory_router as mr
 
 
 @pytest.fixture
@@ -517,15 +527,22 @@ def test_http_feedback_is_resolved_against_the_caller(client, enforced, monkeypa
         "model": "fake-model", "session_id": sid,
         "messages": [{"role": "user", "content": "什么是向量数据库"}]}).json()["message_id"]
 
-    for hdrs, rating in ((mine, 1), (stranger, -1)):
-        res = client.post("/v1/feedback", headers=hdrs,
-                          json={"message_id": mid, "rating": rating})
-        assert res.status_code == 200, res.text
-        assert res.json()["used_memories"] is False, "假存储下没有可加权的记忆，必须说实话"
+    ok = client.post("/v1/feedback", headers=mine,
+                     json={"message_id": mid, "rating": 1})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["used_memories"] is False, "假存储下没有可加权的记忆，必须说实话"
+
+    foreign = client.post("/v1/feedback", headers=stranger,
+                          json={"message_id": mid, "rating": -1})
+    made_up = client.post("/v1/feedback", headers=stranger,
+                          json={"message_id": "0" * 32, "rating": -1})
+    assert foreign.status_code == made_up.status_code == 404, foreign.text
+    assert foreign.text == made_up.text, \
+        "「不是你的」与「根本不存在」必须同形，否则这个端点就成了探测别人 message_id 的信道"
 
     # 断的是收集到的值，不是 spy 的参数形状（见上面 spy 的注释）
-    assert [c[0] for c in calls] == [mid, mid], "两次反馈都按同一条 message_id 反查"
-    assert [c[1] for c in calls] == [mine_uid, stranger_uid], "反查按调用者收窄"
+    assert [c[0] for c in calls] == [mid, mid, "0" * 32], "每次反馈都按它自己的 message_id 反查"
+    assert [c[1] for c in calls] == [mine_uid, stranger_uid, stranger_uid], "反查按调用者收窄"
 
 
 def test_a_stranger_cannot_touch_the_bootstrap_admins_data(client, enforced,
@@ -567,3 +584,307 @@ def test_http_uploads_never_trust_an_owner_from_the_request(client, enforced):
     assert client.get(f"/v1/uploads/{upload_id}/file",
                       headers=enforced("另一个人")).status_code == 404
     assert client.get(f"/v1/uploads/{upload_id}/file", headers=mine).status_code == 200
+
+
+# ---------- 反馈落盘：先证明归属，再动笔 ----------
+
+def test_feedback_is_attributed_to_the_caller_and_writes_nothing_for_a_stranger(
+        client, enforced, monkeypatch, tmp_path):
+    """反馈原先在证明归属之前就写盘，于是任何人都能往 feedback.json 里加行。
+
+    那份文件会被定时重算成偏好摘要，而摘要注入的是所有人的提示词——别人的点踩
+    因此能改写全站的回答风格。现在先按调用者反查 message_id，不是他就一行都不写。
+    """
+    import app.feedback_storage as feedback_storage
+
+    fb_file = tmp_path / "feedback.json"
+    monkeypatch.setattr(feedback_storage, "FEEDBACK_FILE", str(fb_file))
+
+    mine = enforced("给出反馈的人")
+    stranger = enforced("想替别人表态的人")
+    mine_uid = client.get("/v1/auth/me", headers=mine).json()["user_id"]
+
+    sid = client.post("/v1/sessions", headers=mine).json()["session_id"]
+    mid = client.post("/v1/chat", headers=mine, json={
+        "model": "fake-model", "session_id": sid,
+        "messages": [{"role": "user", "content": "再讲讲"}]}).json()["message_id"]
+
+    assert client.post("/v1/feedback", headers=mine,
+                       json={"message_id": mid, "rating": 1}).status_code == 200
+    rows = json.loads(fb_file.read_text(encoding="utf-8"))
+    assert [(r["message_id"], r["user_id"]) for r in rows] == [(mid, mine_uid)], \
+        "每行反馈都要记下是谁给的，否则无法按人聚合"
+
+    untouched = fb_file.read_bytes()
+    assert client.post("/v1/feedback", headers=stranger,
+                       json={"message_id": mid, "rating": -1}).status_code == 404
+    assert fb_file.read_bytes() == untouched, "非属主的反馈一个字节都不许落盘"
+
+
+# ---------- 记忆端点：身份一律来自凭据 ----------
+
+BOOT = {"Authorization": "Bearer boot-token"}
+
+
+def _fixed_vector(text: str) -> list:
+    """3 维确定性向量：不打付费嵌入接口，也不依赖本机装没装 sentence-transformers。"""
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return [digest[i] / 255.0 for i in range(3)]
+
+
+def _memory_app(tmp_path, monkeypatch, manager):
+    """只挂记忆路由 + 真鉴权中间件，用干净的存储后端验身份推导。
+
+    裸 app 若不装 install_auth，require_admin 里的 current_principal 只会因
+    request.state 无主体而抛 401，"普通用户拿到 403"这条就永远测不到。
+    """
+    from app.memory.memory_router import FakeMemoryStore, router
+
+    monkeypatch.setattr(mr, "memory_manager", manager)
+    monkeypatch.setattr(mr, "memory_init_error", None)
+    if manager is None:
+        monkeypatch.setattr(mr, "fake_store", FakeMemoryStore())
+
+    store = AuthStore(path=str(tmp_path / "u.json"), invites_path=str(tmp_path / "i.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
+
+    probe = FastAPI()
+    authz.install_auth(probe)
+    probe.include_router(router)
+
+    def hdr(username):
+        code = store.create_invite("admin")
+        _, token = store.register(code=code, username=username)
+        return {"Authorization": "Bearer " + token}
+
+    return TestClient(probe), hdr("A"), hdr("B")
+
+
+@pytest.fixture
+def mem_api(tmp_path, monkeypatch):
+    """内存假存储：pytest 与前端实际跑的这条路径。"""
+    return _memory_app(tmp_path, monkeypatch, manager=None)
+
+
+@pytest.fixture
+def mem_api_real(tmp_path, monkeypatch):
+    """真 ChromaDB 后端（临时目录 + 注入向量）。
+
+    守卫只写在假存储上，pytest 全绿也说明不了线上安全——当初跨用户泄露正是在
+    CI 里没人执行的那条分支上活下来的，所以整套矩阵要在真库上再跑一遍。
+    """
+    from app.memory.memory_manager import MemoryManager
+
+    manager = MemoryManager(persist_dir=str(tmp_path / "chroma"),
+                            embedding_fn=_fixed_vector)
+    return _memory_app(tmp_path, monkeypatch, manager=manager)
+
+
+def test_memory_add_is_scoped_to_caller(mem_api):
+    client, ha, hb = mem_api
+    assert client.post("/v1/memory/add",
+                       json={"content": "我叫张三", "summarize": False}, headers=ha).status_code == 200
+    assert client.post("/v1/memory/add",
+                       json={"content": "B的秘密", "summarize": False}, headers=hb).status_code == 200
+    mine = client.get("/v1/memory/list?limit=50", headers=ha).json()["memories"]
+    assert [m["content"] for m in mine] == ["我叫张三"]
+
+
+def test_client_supplied_user_id_is_ignored(mem_api):
+    client, ha, _ = mem_api
+    res = client.post("/v1/memory/add",
+                      json={"content": "越权写入", "user_id": "u_victim"}, headers=ha)
+    assert res.status_code == 200
+    victim = client.get("/v1/memory/list?limit=50", headers={"Authorization": "Bearer nothing"})
+    assert victim.status_code == 401
+
+    # 请求体里那个 user_id 既没被采纳，也没被丢掉归属：这条记忆只能挂在调用者名下
+    assert mr.fake_store.memories[res.json()["memory_id"]]["user_id"] != "u_victim"
+    assert client.get("/v1/memory/list?limit=50", headers=ha).json()["total"] == 1
+
+
+def test_cannot_delete_another_users_memory(mem_api):
+    client, ha, hb = mem_api
+    client.post("/v1/memory/add", json={"content": "B的记忆", "summarize": False}, headers=hb)
+    target = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"][0]["id"]
+    # DELETE 带 JSON 体只能用 client.request：TestClient.delete() 不收 json 参数
+    res = client.request("DELETE", "/v1/memory/delete",
+                         json={"memory_ids": [target]}, headers=ha)
+    assert res.status_code == 200
+    assert res.json()["deleted_count"] == 0
+    assert client.get("/v1/memory/list?limit=50", headers=hb).json()["total"] == 1
+
+
+def test_cannot_update_another_users_memory(mem_api):
+    client, ha, hb = mem_api
+    client.post("/v1/memory/add", json={"content": "原文", "summarize": False}, headers=hb)
+    target = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"][0]["id"]
+    client.put("/v1/memory/update", json={"memory_id": target, "new_content": "被篡改"}, headers=ha)
+    after = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"][0]["content"]
+    assert after == "原文"
+
+
+def test_stats_requires_admin(mem_api):
+    client, ha, _ = mem_api
+    assert client.get("/v1/memory/stats", headers=ha).status_code == 403
+    assert client.get("/v1/memory/stats", headers=BOOT).status_code == 200
+
+
+def test_old_list_path_can_no_longer_address_a_user(mem_api):
+    """GET /v1/memory/list/{user_id} 换成 /v1/memory/list?limit=。
+
+    路径里那个 user_id 就是一份"随便填别人的名字来枚举他记忆"的入口，
+    留着它哪怕再兼容一层，身份仍然是客户端自报的。
+    """
+    client, ha, _ = mem_api
+    assert client.get("/v1/memory/list?limit=5", headers=ha).status_code == 200
+    assert client.get("/v1/memory/list/u_victim?limit=5", headers=ha).status_code == 404
+
+
+def test_delete_and_update_answer_the_same_for_foreign_and_missing_ids(mem_api):
+    """越权删除不能变成 403 或"这条不是你的"：那等于替别人确认 id 存在。"""
+    client, ha, hb = mem_api
+    client.post("/v1/memory/add", json={"content": "B的记忆", "summarize": False}, headers=hb)
+    foreign = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"][0]["id"]
+
+    del_mine = client.request("DELETE", "/v1/memory/delete",
+                              json={"memory_ids": [foreign]}, headers=ha)
+    del_none = client.request("DELETE", "/v1/memory/delete",
+                              json={"memory_ids": ["no-such-id"]}, headers=ha)
+    assert del_mine.status_code == del_none.status_code == 200
+    assert del_mine.json()["deleted_count"] == 0
+    assert del_mine.text == del_none.text, "两种失败必须同形，否则就是枚举信道"
+
+    up_foreign = client.put("/v1/memory/update",
+                            json={"memory_id": foreign, "new_content": "篡改"}, headers=ha)
+    up_none = client.put("/v1/memory/update",
+                         json={"memory_id": "no-such-id", "new_content": "篡改"}, headers=ha)
+    assert up_foreign.text == up_none.text
+    assert up_foreign.json()["message"] == "记忆不存在"
+
+
+def test_decay_is_admin_only_and_ignores_a_user_id_query_param(mem_api):
+    """衰减是维护动作：普通用户碰不到，而遗留的 user_id 参数不再指向任何人。"""
+    client, ha, _ = mem_api
+    assert client.post("/v1/memory/decay?decay_factor=0.5", headers=ha).status_code == 403
+
+    added = client.post("/v1/memory/add", json={"content": "A的记忆", "summarize": False},
+                        headers=ha)
+    a_uid = mr.fake_store.memories[added.json()["memory_id"]]["user_id"]
+
+    assert client.post(f"/v1/memory/decay?decay_factor=0.5&user_id={a_uid}",
+                       headers=BOOT).status_code == 200
+    mine = client.get("/v1/memory/list?limit=50", headers=ha).json()["memories"]
+    assert [m["metadata"]["weight"] for m in mine] == [1.0], \
+        "管理员的衰减只作用于他自己那一份记忆"
+
+
+def test_owned_ids_only_returns_the_callers_ids(tmp_path):
+    """真库这一侧：owned_ids 是删除/改权重前的唯一闸门。"""
+    from app.memory.memory_manager import MemoryManager
+
+    mm = MemoryManager(persist_dir=str(tmp_path / "chroma"), embedding_fn=_fixed_vector)
+    mine = mm.add_memory(user_id="u_a", content="A的记忆")
+    theirs = mm.add_memory(user_id="u_b", content="B的记忆")
+
+    assert set(mm.owned_ids("u_a", [mine, theirs, "no-such-id"])) == {mine}
+    assert mm.owned_ids("u_a", []) == []
+    assert mm.owned_ids("u_nobody", [mine, theirs]) == []
+
+
+def test_real_store_backend_enforces_the_same_isolation(mem_api_real):
+    """整套读写矩阵在真实 ChromaDB 后端上再来一遍，证明守卫不是只写在假存储里。
+
+    线上跑的是这一条路：pytest 默认走假存储，只给假存储加守卫，CI 会全绿而
+    真实记忆库照旧任何人可删可改。
+    """
+    client, ha, hb = mem_api_real
+    assert client.post("/v1/memory/add", json={"content": "A的秘密"}, headers=ha).status_code == 200
+    assert client.post("/v1/memory/add", json={"content": "B的秘密"}, headers=hb).status_code == 200
+
+    a_id = client.get("/v1/memory/list?limit=50", headers=ha).json()["memories"][0]["id"]
+    b_id = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"][0]["id"]
+
+    # 读：列表与搜索都只看得到自己的
+    assert client.get("/v1/memory/list?limit=50", headers=ha).json()["total"] == 1
+    b_hits = client.post("/v1/memory/search", json={"query": "A的秘密", "top_k": 5},
+                         headers=hb).json()["results"]
+    assert [h["content"] for h in b_hits] == ["B的秘密"], \
+        "带着别人的原文来搜，也只能拿到自己那一条（空结果不算通过：那说明压根没在搜）"
+    a_hits = client.post("/v1/memory/search", json={"query": "A的秘密", "top_k": 5},
+                         headers=ha).json()["results"]
+    assert [h["content"] for h in a_hits] == ["A的秘密"]
+
+    # 写：改与删别人的都不落地
+    assert client.request("DELETE", "/v1/memory/delete", json={"memory_ids": [b_id]},
+                          headers=ha).json()["deleted_count"] == 0
+    upd = client.put("/v1/memory/update", json={"memory_id": b_id, "new_content": "篡改"},
+                     headers=ha)
+    assert upd.json()["message"] == "记忆不存在"
+    b_after = client.get("/v1/memory/list?limit=50", headers=hb).json()["memories"]
+    assert [m["content"] for m in b_after] == ["B的秘密"], "真库里别人的记忆必须原样还在"
+
+    # 本人照旧可改可删
+    assert client.put("/v1/memory/update", json={"memory_id": a_id, "new_content": "改好了"},
+                      headers=ha).json()["message"] == "记忆更新成功"
+    assert [m["content"] for m in client.get(
+        "/v1/memory/list?limit=50", headers=ha).json()["memories"]] == ["改好了"]
+    assert client.request("DELETE", "/v1/memory/delete", json={"memory_ids": [a_id]},
+                          headers=ha).json()["deleted_count"] == 1
+    assert client.get("/v1/memory/list?limit=50", headers=ha).json()["total"] == 0
+
+
+def test_chat_writes_memory_under_caller_not_default_user(client, enforced, pipeline_spy):
+    """对话产生的记忆必须挂在调用者名下。
+
+    /v1/chat 原先把 user_id 写死成 default_user，所有人共用一个记忆池；这条断言
+    专门防止该写死回归。它必须跑在 enforced 下：整套测试的默认模式是 disabled，
+    那里人人都是 default_user，写死与否都得到同一个值，断言就成了自证。
+    """
+    hdrs = enforced("对话归属测试")
+    uid = client.get("/v1/auth/me", headers=hdrs).json()["user_id"]
+    res = client.post("/v1/chat", headers=hdrs,
+                      json={"model": "fake-model",
+                            "messages": [{"role": "user", "content": "你好"}]})
+    assert res.status_code == 200, res.text
+    assert pipeline_spy == [uid], f"期望调用者身份，实际 {pipeline_spy!r}"
+
+
+def test_feedback_cannot_be_steered_at_another_users_memories(client, enforced, tmp_path,
+                                                              monkeypatch):
+    """消息属于你 ≠ 消息上挂的 memory_ids 属于你。
+
+    整份回写会话的端点接受客户端给的 memory_ids（前端编辑历史要用），于是别人家
+    的记忆 id 能被种进自己的会话，再点一次反馈就替别人压低了权重。这一条必须用
+    真实后端测：pytest 默认那条路上 memory_manager 是 None，加权分支压根
+    不执行，断言就成了空的。
+    """
+    from app.memory.memory_manager import MemoryManager
+
+    mm = MemoryManager(persist_dir=str(tmp_path / "chroma"), embedding_fn=_fixed_vector)
+    monkeypatch.setattr(mr, "memory_manager", mm)     # 反馈路由在调用期现取这个属性
+
+    intruder = enforced("想替别人调权重的人")
+    intruder_uid = client.get("/v1/auth/me", headers=intruder).json()["user_id"]
+    victim_id = mm.add_memory(user_id="u_victim", content="受害者的记忆")
+    own_id = mm.add_memory(user_id=intruder_uid, content="他自己的记忆")
+
+    sid = client.post("/v1/sessions", headers=intruder).json()["session_id"]
+    planted = client.put(f"/v1/sessions/{sid}/messages", headers=intruder, json={
+        "messages": [{"role": "assistant", "content": "伪造的一轮",
+                      "message_id": "planted-1", "memory_ids": [victim_id, own_id]}]})
+    assert planted.status_code == 200, planted.text
+
+    res = client.post("/v1/feedback", headers=intruder,
+                      json={"message_id": "planted-1", "rating": 1})
+    assert res.status_code == 200, res.text
+    assert res.json()["memory_weight_adjusted"] == 1, "只有确实属于他的那一条被加权"
+    assert res.json()["used_memories"] is True
+
+    def weight(mem_id):
+        return (mm.collection.get(ids=[mem_id])["metadatas"][0] or {}).get("weight")
+
+    assert weight(victim_id) == 1.0, "别人的记忆权重一个字节都不该被改动"
+    assert weight(own_id) == pytest.approx(1.1), "自己那条要照常生效，否则上面只是恒假"

@@ -248,6 +248,21 @@ class MemoryManager:
             updated.append({"id": mem_id, "weight": meta["weight"]})
         return {"status": "adjusted", "updated": updated}
 
+    def owned_ids(self, user_id: str, ids: list) -> list:
+        """只保留确实属于该用户的记忆 id。
+
+        删除/改权重原先直接拿客户端给的 id 就动手，等于任何人可改任何人的记忆。
+        归属判定交给 chroma 的 where 条件，而不是取回来再在 Python 里挑：
+        与 search_memory 同一套下推口径，也就不会因窗口或分页漏判。
+        非属主与不存在的 id 得到同一个结果（都不在返回列表里），调用方因此
+        不是一条探测他人记忆的信道。
+        """
+        wanted = {str(i) for i in ids or []}
+        if not wanted:
+            return []
+        got = self.collection.get(ids=list(wanted), where={"user_id": user_id})
+        return list(got.get("ids") or [])
+
     def delete_memory(self, memory_id: str) -> bool:
         try:
             self.collection.delete(ids=[memory_id])

@@ -533,26 +533,41 @@ async def submit_feedback(feedback: FeedbackRequest,
     此前反馈只落盘到 feedback.json 和一份无人读取的 preference.txt，对模型行为
     零影响；这里改为真正闭环：调整本次回答所用记忆的权重 + 即时刷新偏好摘要。
 
-    反查 message_id 必须带上归属：反馈调的是"这条回答所用记忆"的权重，而那些
-    记忆属于答题的那个人，谁都能拿别人的 message_id 来踩一脚，就等于替别人
-    改写他的记忆。
+    归属必须先于任何写入。原先的顺序是反的：先无条件往 feedback.json 加一行、
+    再重算偏好，然后才按 message_id 反查记忆——而 preference.txt 会被注入
+    **所有人**的提示词，于是任何持凭据者都能靠别人的 message_id 表态，改写的
+    却是全站的行为。反查用带归属的 find_message：不属于你就当作不存在，
+    两种情况同一个 404、同一句话，这个端点不是探测他人 message_id 的信道。
+
+    仍然留下的局限（本任务不开新机制）：偏好汇总是单份全局文件，按人分账要等
+    preference_analyzer 改成每人一份，这里只保证"没归属的反馈一行都不写"。
     """
     from app.memory.memory_router import memory_manager
 
     if save_feedback is None:
         raise HTTPException(status_code=503, detail="反馈存储不可用")
+
+    located = sessions_store.find_message(feedback.message_id, principal.user_id)
+    if located is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
     try:
-        save_feedback(feedback.message_id, feedback.rating, feedback.comment or "")
+        save_feedback(feedback.message_id, feedback.rating, feedback.comment or "",
+                      principal.user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"反馈保存失败：{e}")
 
     adjusted = []
-    located = sessions_store.find_message(feedback.message_id, principal.user_id)
-    memory_ids = (located or {}).get("message", {}).get("memory_ids") or []
-    if memory_ids and memory_manager is not None:
+    # 消息是你的，不代表消息上挂的 memory_ids 是你的：整份回写会话的端点接受
+    # 客户端给的 memory_ids（前端编辑历史要用），于是别人家的记忆 id 能被种进
+    # 你自己的会话，再点一次反馈就去调它的权重。加权之前再过一道 owned_ids。
+    claimed = located.get("message", {}).get("memory_ids") or []
+    mine = memory_manager.owned_ids(principal.user_id, claimed) \
+        if (claimed and memory_manager is not None) else []
+    if mine:
         delta = FEEDBACK_WEIGHT_STEP if feedback.rating > 0 else -FEEDBACK_WEIGHT_STEP
         try:
-            adjusted = memory_manager.adjust_weights(memory_ids, delta).get("updated", [])
+            adjusted = memory_manager.adjust_weights(mine, delta).get("updated", [])
         except Exception as e:
             print(f"记忆权重调整失败: {e}")
 
@@ -567,7 +582,7 @@ async def submit_feedback(feedback: FeedbackRequest,
         "status": "success",
         "message": "反馈已记录并生效",
         "memory_weight_adjusted": len(adjusted),
-        "used_memories": bool(memory_ids),
+        "used_memories": bool(mine),
     }
 
 # ---------- 智能体 ----------
