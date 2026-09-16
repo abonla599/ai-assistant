@@ -88,7 +88,7 @@ class SessionStore:
             return json.loads(json.dumps(data)) if data else None
 
     def add_message(self, session_id: str, role: str, content: str,
-                    message_id: str = None) -> bool:
+                    message_id: str = None, memory_ids: list = None) -> bool:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
@@ -96,11 +96,24 @@ class SessionStore:
             entry = {"role": role, "content": content}
             if message_id:
                 entry["message_id"] = message_id
+            if memory_ids:
+                entry["memory_ids"] = list(memory_ids)
             session["messages"].append(entry)
             if len(session["messages"]) == 1 and content:
                 session["title"] = content[:20]
             self._flush()
             return True
+
+    def find_message(self, message_id: str):
+        """按 message_id 反查，返回 {"session_id", "message"}；找不到返回 None。"""
+        if not message_id:
+            return None
+        with self._lock:
+            for sid, session in self._sessions.items():
+                for msg in session.get("messages", []):
+                    if msg.get("message_id") == message_id:
+                        return {"session_id": sid, "message": dict(msg)}
+        return None
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
@@ -122,6 +135,9 @@ class SessionStore:
             entry = {"role": role, "content": content}
             if item.get("message_id"):
                 entry["message_id"] = str(item["message_id"])
+            # 必须保留，否则客户端一次整体回写就会让该条回答失去反馈效力
+            if item.get("memory_ids"):
+                entry["memory_ids"] = [str(m) for m in item["memory_ids"]]
             cleaned.append(entry)
 
         with self._lock:

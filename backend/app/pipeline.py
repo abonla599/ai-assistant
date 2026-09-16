@@ -6,17 +6,20 @@ from typing import List, Dict, Any
 # 启动 backend/app/main.py 时恰好可用，打包后会 ImportError，并被上层的
 # try/except 静默吞掉，导致记忆与工具能力在 EXE 里悄悄失效。
 from app.core.providers import store, build_client
-from app.memory.memory_manager import MemoryManager
+# 复用 memory_router 已选定的后端单例：本模块此前自行 new 了第二个 MemoryManager，
+# 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
+from app.memory.memory_router import memory_manager
+from app.preference_analyzer import read_preference
 from app.tools.registry import get_all_tools_schema
 from app.tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 from app.tools.builtin_tools import *
-# 共享实例（简单单例，后续优化）
-memory_manager = MemoryManager()
+
 
 class ChatPipeline:
     def __init__(self, user_id: str = "default_user"):
         self.user_id = user_id
+        # 测试/CI 下为 None（走内存假存储），此时跳过记忆注入与自动保存
         self.memory = memory_manager
         self.tools_schema = get_all_tools_schema()
 
@@ -50,8 +53,8 @@ class ChatPipeline:
         if not user_input:
             return {"reply": "请提供输入内容", "message_id": None}
 
-        # 2. 注入记忆上下文
-        enriched_messages = self._inject_memory(messages, user_input)
+        # 2. 注入记忆与用户偏好上下文
+        enriched_messages, used_memory_ids = self.inject_context(messages, user_input)
 
         # 3. 调用模型（带工具循环）
         final_reply = self._call_model_with_tool_loop(model, enriched_messages,
@@ -61,23 +64,48 @@ class ChatPipeline:
         self._save_interaction(user_input, final_reply)
 
         msg_id = str(uuid.uuid4())
-        return {"reply": final_reply, "message_id": msg_id}
+        return {"reply": final_reply, "message_id": msg_id,
+                "used_memory_ids": used_memory_ids}
 
-    def _inject_memory(self, messages: List[Dict], query: str) -> List[Dict]:
-        """检索相关记忆并插入到消息最前面"""
+    def inject_context(self, messages: List[Dict], query: str):
+        """注入记忆与用户偏好摘要（非流式与流式共用）。
+
+        返回 (消息列表, 本次用到的记忆 id 列表)——后者用于反馈闭环，
+        否则无法知道该给哪些记忆加权。
+        """
+        used_ids = []
         try:
-            memories = self.memory.search_memory(self.user_id, query, top_k=3)
-            if memories:
-                mem_text = "以下是用户相关的历史信息（可能有用）：\n" + \
-                           "\n".join([f"- {doc}" for doc, _, _ in memories])
-                # 插入为 system 消息（如果已有 system 消息，则追加内容）
-                if messages and messages[0]["role"] == "system":
-                    messages[0]["content"] += "\n\n" + mem_text
-                else:
-                    messages.insert(0, {"role": "system", "content": mem_text})
+            if self.memory is not None:
+                memories = self.memory.search_memory(self.user_id, query, top_k=3)
+                if memories:
+                    lines = []
+                    for doc, _, meta in memories:
+                        mid = (meta or {}).get("memory_id")
+                        if mid:
+                            used_ids.append(mid)
+                        lines.append(f"- {doc}")
+                    self._append_system(
+                        messages, "以下是用户相关的历史信息（可能有用）：\n" + "\n".join(lines))
         except Exception as e:
             print(f"记忆检索失败（不影响主流程）: {e}")
-        return messages
+
+        try:
+            preference = read_preference()
+            if preference:
+                self._append_system(
+                    messages, "根据用户历史反馈得到的偏好，请遵循：\n" + preference)
+        except Exception as e:
+            print(f"偏好读取失败（不影响主流程）: {e}")
+
+        return messages, used_ids
+
+    @staticmethod
+    def _append_system(messages: List[Dict], text: str) -> None:
+        """追加到已有 system 消息（前端可能已带角色设定），没有则新建。"""
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] += "\n\n" + text
+        else:
+            messages.insert(0, {"role": "system", "content": text})
 
     def _call_model_with_tool_loop(self, model: str, messages: List[Dict], max_turns=5,
                                    provider_id: str = None) -> str:
@@ -126,6 +154,8 @@ class ChatPipeline:
     def _save_interaction(self, user_input: str, ai_reply: str):
         """将本轮对话摘要存入记忆"""
         try:
+            if self.memory is None:
+                return
             # 简单摘要：直接使用用户输入的前100字符作为记忆内容（后期可用模型摘要）
             summary = f"用户问: {user_input[:100]}；AI答: {ai_reply[:100]}"
             self.memory.add_memory(self.user_id, summary)

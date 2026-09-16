@@ -71,8 +71,11 @@
         </form>
 
         <div class="attach-menu hidden" id="attachMenu" role="menu">
+          <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
+            <span class="tile-ico">📷</span><span>相机</span>
+          </button>
           <button type="button" class="attach-tile" id="pickImage" role="menuitem">
-            <span class="tile-ico">🖼</span><span>图片</span>
+            <span class="tile-ico">🖼</span><span>相册</span>
           </button>
           <button type="button" class="attach-tile" id="pickFile" role="menuitem">
             <span class="tile-ico">📎</span><span>文件</span>
@@ -82,6 +85,7 @@
         <input type="file" id="filePicker" hidden multiple
                accept=".txt,.md,.markdown,.py,.js,.ts,.json,.yaml,.yml,.csv,.tsv,.log,.ini,.cfg,.html,.css,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml">
         <input type="file" id="imagePicker" hidden multiple accept="image/*">
+        <input type="file" id="cameraPicker" hidden accept="image/*" capture="environment">
       </div>
     </main>
   </div>

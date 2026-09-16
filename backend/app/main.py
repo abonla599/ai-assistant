@@ -263,10 +263,12 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
+        used_memory_ids = []
         if USE_PIPELINE:
             result = ChatPipeline(user_id="default_user").process(
                 provider["model"], messages, provider_id=provider["id"])
             reply = result.get("reply", "")
+            used_memory_ids = result.get("used_memory_ids") or []
         else:
             reply = get_llm_response(
                 model=provider["model"], messages=messages,
@@ -281,7 +283,8 @@ async def chat(request: ChatRequest):
     message_id = str(uuid.uuid4())
     if request.session_id:
         sessions_store.add_message(request.session_id, "user", user_text)
-        sessions_store.add_message(request.session_id, "assistant", reply, message_id)
+        sessions_store.add_message(request.session_id, "assistant", reply,
+                                   message_id, used_memory_ids)
     return {"reply": reply, "message_id": message_id,
             "provider": provider["id"], "model": provider["model"]}
 
@@ -299,6 +302,17 @@ async def stream_chat_endpoint(request: ChatRequest):
         provider, messages, user_text = _prepare_chat(request)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # 流式此前直接调 stream_chat、绕过 pipeline，因此从未注入记忆与偏好；
+    # 而 PWA 默认走流式，等于记忆功能在手机上是装饰。这里复用同一套注入。
+    used_memory_ids = []
+    if USE_PIPELINE and messages:
+        try:
+            query_text = ChatPipeline._text_of(messages[-1].get("content"))
+            messages, used_memory_ids = ChatPipeline(
+                user_id="default_user").inject_context(messages, query_text)
+        except Exception as e:
+            print(f"流式上下文注入失败（不影响本次对话）: {e}")
 
     async def generate():
         message_id = str(uuid.uuid4())
@@ -319,7 +333,7 @@ async def stream_chat_endpoint(request: ChatRequest):
             # 保存助手回复到会话（如果提供了 session_id）
             if request.session_id:
                 sessions_store.add_message(
-                    request.session_id, "assistant", full_text, message_id)
+                    request.session_id, "assistant", full_text, message_id, used_memory_ids)
             
             # 发送完成事件
             yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
@@ -467,15 +481,48 @@ async def delete_attachment(upload_id: str):
     raise HTTPException(status_code=404, detail="附件不存在")
 
 # ---------- 反馈 ----------
+FEEDBACK_WEIGHT_STEP = 0.1
+
+
 @app.post("/v1/feedback")
 async def submit_feedback(feedback: FeedbackRequest):
+    """记录反馈，并立刻把它作用回系统。
+
+    此前反馈只落盘到 feedback.json 和一份无人读取的 preference.txt，对模型行为
+    零影响；这里改为真正闭环：调整本次回答所用记忆的权重 + 即时刷新偏好摘要。
+    """
+    from app.memory.memory_router import memory_manager
+
+    if save_feedback is None:
+        raise HTTPException(status_code=503, detail="反馈存储不可用")
     try:
-        if save_feedback:
-            save_feedback(feedback.message_id, feedback.rating, feedback.comment or "")
-        return {"status": "success", "message": "反馈提交成功"}
+        save_feedback(feedback.message_id, feedback.rating, feedback.comment or "")
     except Exception as e:
-        print(f"反馈保存异常: {e}")
-        return {"status": "error", "message": f"提交失败: {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"反馈保存失败：{e}")
+
+    adjusted = []
+    located = sessions_store.find_message(feedback.message_id)
+    memory_ids = (located or {}).get("message", {}).get("memory_ids") or []
+    if memory_ids and memory_manager is not None:
+        delta = FEEDBACK_WEIGHT_STEP if feedback.rating > 0 else -FEEDBACK_WEIGHT_STEP
+        try:
+            adjusted = memory_manager.adjust_weights(memory_ids, delta).get("updated", [])
+        except Exception as e:
+            print(f"记忆权重调整失败: {e}")
+
+    # 立即重算偏好，使下一轮对话就能生效，而不是等后台定时器
+    try:
+        if HAS_BG_TASKS and preference_analyzer:
+            preference_analyzer.analyze_and_update_preference()
+    except Exception as e:
+        print(f"偏好刷新失败（不影响反馈记录）: {e}")
+
+    return {
+        "status": "success",
+        "message": "反馈已记录并生效",
+        "memory_weight_adjusted": len(adjusted),
+        "used_memories": bool(memory_ids),
+    }
 
 # ---------- 智能体 ----------
 @app.post("/v1/agent/run")

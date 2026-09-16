@@ -32,9 +32,14 @@ def analyze_and_update_preference():
     like_count = 0
     dislike_count = 0
     for item in feedbacks:
-        if item.get("rating") == 1:
+        try:
+            rating = int(item.get("rating", 0))
+        except (TypeError, ValueError):
+            continue
+        # 约定 👍=1、👎=-1；旧数据里点踩曾记为 0，一并算作不满意。
+        if rating > 0:
             like_count += 1
-        elif item.get("rating") == 0:
+        elif rating <= 0:
             dislike_count += 1
     
     # 步骤 4: 生成用户偏好摘要（这里的逻辑可以随项目发展不断优化）
@@ -58,6 +63,21 @@ def analyze_and_update_preference():
     
     print(f"✅ 分析完成！已生成用户偏好摘要，并保存至 {PREFERENCE_FILE}")
     print(preference_summary)
+
+
+def read_preference() -> str:
+    """读取当前用户偏好摘要，供对话链路注入 system 提示。
+
+    此前 preference.txt 只被写出、没有任何代码读取，导致"根据反馈自我成长"
+    实际不生效。读不到时返回空串，不影响正常对话。
+    """
+    if not os.path.exists(PREFERENCE_FILE):
+        return ""
+    try:
+        with open(PREFERENCE_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 # --- 用于独立测试的部分 ---

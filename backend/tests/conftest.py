@@ -70,6 +70,16 @@ def _stub_llm_calls(monkeypatch):
     import app.core.streaming as streaming
     import app.core.llm_client as llm_client
     import app.pipeline as pipeline
+    import app.feedback_storage as feedback_storage
+    import app.preference_analyzer as preference_analyzer
+
+    # 反馈/偏好是相对路径常量，不重定向会写进仓库真实数据文件
+    monkeypatch.setattr(feedback_storage, "FEEDBACK_FILE",
+                        os.path.join(_TEST_DATA_DIR, "feedback.json"))
+    monkeypatch.setattr(preference_analyzer, "FEEDBACK_FILE",
+                        os.path.join(_TEST_DATA_DIR, "feedback.json"))
+    monkeypatch.setattr(preference_analyzer, "PREFERENCE_FILE",
+                        os.path.join(_TEST_DATA_DIR, "preference.txt"))
 
     monkeypatch.setattr(pipeline, "build_client", lambda provider: _FakeClient())
     monkeypatch.setattr(llm_client, "build_client", lambda provider: _FakeClient())

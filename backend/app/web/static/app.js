@@ -660,7 +660,13 @@ async function replaceMessages(list) {
   if (!pref.sessionId) return;
   const payload = list
     .filter((m) => !m.transient)
-    .map(({ role, content, message_id }) => (message_id ? { role, content, message_id } : { role, content }));
+    .map(({ role, content, message_id, memory_ids, model }) => {
+      const out = { role, content };
+      if (message_id) out.message_id = message_id;
+      if (memory_ids) out.memory_ids = memory_ids;
+      if (model) out.model = model;
+      return out;
+    });
   try {
     await API.replaceMessages(pref.sessionId, payload);
   } catch (e) {
@@ -927,6 +933,7 @@ function bind() {
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
+  $("pickCamera").onclick = () => { setAttachMenu(false); $("cameraPicker").click(); };
   $("pickImage").onclick = () => { setAttachMenu(false); $("imagePicker").click(); };
   $("pickFile").onclick = () => { setAttachMenu(false); $("filePicker").click(); };
   document.addEventListener("click", (e) => {
@@ -935,6 +942,7 @@ function bind() {
   });
   $("filePicker").onchange = (e) => pickFiles(e.target);
   $("imagePicker").onchange = (e) => pickFiles(e.target);
+  $("cameraPicker").onchange = (e) => pickFiles(e.target);
 
   $("closeSettings").onclick = closeSettings;
   $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };

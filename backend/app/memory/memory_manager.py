@@ -196,6 +196,9 @@ class MemoryManager:
         if results['ids'] and results['ids'][0]:
             for i, mem_id in enumerate(results['ids'][0]):
                 meta = results['metadatas'][0][i] if results['metadatas'] else {}
+                # 把 id 并入 meta，供反馈闭环定位"这条回答用了哪几条记忆"，
+                # 同时不改变返回元组长度，避免影响既有解包。
+                meta = {**(meta or {}), "memory_id": mem_id}
                 if meta.get("user_id") == user_id:
                     filtered.append((
                         results['documents'][0][i],
@@ -206,6 +209,7 @@ class MemoryManager:
         if not filtered and results['ids'] and results['ids'][0]:
             for i, mem_id in enumerate(results['ids'][0]):
                 meta = results['metadatas'][0][i] if results['metadatas'] else {}
+                meta = {**(meta or {}), "memory_id": mem_id}
                 filtered.append((
                     results['documents'][0][i],
                     results['distances'][0][i],
@@ -213,6 +217,24 @@ class MemoryManager:
                 ))
 
         return filtered[:top_k]
+
+    def adjust_weights(self, memory_ids: list, delta: float) -> dict:
+        """按反馈调整记忆权重，结果夹在 [0.1, 5.0]。
+
+        权重直接影响检索排序（memory_router 按 relevance*weight 排序），
+        所以被赞过的记忆更容易被召回、被踩的更难。
+        """
+        updated = []
+        for mem_id in memory_ids or []:
+            data = self.collection.get(ids=[mem_id])
+            if not data.get("ids"):
+                continue
+            meta = (data.get("metadatas") or [{}])[0] or {}
+            current = float(meta.get("weight", 1.0))
+            meta["weight"] = round(max(0.1, min(5.0, current + delta)), 4)
+            self.collection.update(ids=[mem_id], metadatas=[meta])
+            updated.append({"id": mem_id, "weight": meta["weight"]})
+        return {"status": "adjusted", "updated": updated}
 
     def delete_memory(self, memory_id: str) -> bool:
         try:
