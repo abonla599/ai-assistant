@@ -959,7 +959,8 @@ async def list_invites(_: Principal = RequireAdmin):
 async def revoke_invite(code: str, _: Principal = RequireAdmin):
     if not auth_store.revoke_invite(code):
         raise HTTPException(status_code=404, detail="邀请码不存在")
-    return {"status": "revoked", "code": code}
+    # 不回显 code：全局约束要求响应体不出现邀请码明文
+    return {"status": "revoked"}
 
 
 @router.get("/v1/admin/users")
