@@ -144,13 +144,15 @@ def test_invite_code_avoids_ambiguous_characters(store):
     assert all(len(c) == 9 and c[4] == "-" for c in codes)
 
 
-def test_failed_write_does_not_corrupt_store(tmp_path):
+def test_flush_survives_reload(tmp_path):
+    """写盘必须真的可回读：原子替换没生效时这条会红。"""
     path = str(tmp_path / "users.json")
     store = AuthStore(path=path, invites_path=str(tmp_path / "invites.json"))
-    store.create_invite("admin")
-    store.register(code=store.list_invites()[0]["code"], username="周八")
-    assert os.path.exists(path + ".tmp") is False, "临时文件必须被原子替换掉"
-    assert len(store.list_users()) == 1
+    code = store.create_invite("admin")
+    principal, _ = store.register(code=code, username="周八")
+    reloaded = AuthStore(path=path, invites_path=str(tmp_path / "invites.json"))
+    assert [u["user_id"] for u in reloaded.list_users()] == [principal.user_id]
+    assert not os.path.exists(path + ".tmp"), "临时文件必须被原子替换掉"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -219,10 +221,18 @@ class AuthError(Exception):
 
 
 def _default_users_path() -> str:
+    # env 覆盖是硬需求：conftest 必须把它指向临时目录，否则测试会写进用户
+    # 真实的 data/users.json——那是越出本次改动范围的副作用。
+    env_path = os.getenv("USERS_DB_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
     return os.path.join(data_root(), "data", "users.json")
 
 
 def _default_invites_path() -> str:
+    env_path = os.getenv("INVITES_DB_PATH")
+    if env_path:
+        return os.path.abspath(env_path)
     return os.path.join(data_root(), "data", "invites.json")
 
 
@@ -233,11 +243,11 @@ class AuthStore:
         self._lock = threading.Lock()
         self._users = {}
         self._invites = {}
-        self._load(self._users, self.path, dict)
-        self._load(self._invites, self.invites_path, dict)
+        self._load(self._users, self.path)
+        self._load(self._invites, self.invites_path)
 
     @staticmethod
-    def _load(target: dict, path: str, _kind):
+    def _load(target: dict, path: str):
         if not os.path.isfile(path):
             return
         try:
@@ -431,7 +441,7 @@ git commit -m "新增身份存储层：可撤销令牌与一次性邀请码
   - FastAPI 依赖 `current_principal(request) -> Principal`（无主体 → 401）
   - FastAPI 依赖 `require_admin(request) -> Principal`（非 admin → 403）
   - `install_auth(app, settings)`：注册中间件
-  - `AUTH_MODE: str`（`"enforced"` | `"disabled"`）
+  - `_auth_mode() -> str`（读 env，`"enforced"` | `"disabled"`）——**刻意不在 import 期取值**：那样测试就得 `importlib.reload` 才能切模式，脆弱
   - `BOOTSTRAP_PRINCIPAL: Principal` = `Principal("default_user", "本机管理员", "admin")`
 
 - [ ] **Step 1: 写失败的测试**
@@ -441,63 +451,74 @@ git commit -m "新增身份存储层：可撤销令牌与一次性邀请码
 ```python
 """鉴权模式行为：401 / 503 / disabled 放行。
 
-这组测试必须各自控制 env 与 app 实例，不能复用 conftest 的 disabled 客户端。
+模式在请求期读 env，所以这里只需 monkeypatch 环境变量并换掉 auth_store 单例，
+不必 reload 模块或重造 app。
 """
-import importlib
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from fastapi.testclient import TestClient
+from app.core.auth import AuthStore
+import app.core.authz as authz
 
 
-def _fresh_app(monkeypatch, tmp_path, **env):
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    import app.core.auth as auth_mod
-    monkeypatch.setattr(auth_mod, "auth_store",
-                        auth_mod.AuthStore(path=str(tmp_path / "users.json"),
-                                           invites_path=str(tmp_path / "invites.json")))
-    import app.core.authz as authz
-    importlib.reload(authz)
-    import app.main as main_mod
-    return TestClient(importlib.reload(main_mod).app)
+@pytest.fixture
+def wired(client, tmp_path, monkeypatch):
+    """换成临时身份库，并允许逐条测试自行设置 AUTH_MODE / ACCESS_TOKEN。"""
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
+    return client, store
 
 
-def test_no_credentials_at_all_is_closed_not_open(monkeypatch, tmp_path):
+def test_no_credentials_at_all_is_closed_not_open(wired, monkeypatch):
     """忘配 env 不该等于公网裸奔。"""
-    client = _fresh_app(monkeypatch, tmp_path, ACCESS_TOKEN="", AUTH_MODE="enforced")
+    client, _ = wired
+    monkeypatch.setenv("ACCESS_TOKEN", "")
     res = client.get("/v1/sessions")
     assert res.status_code == 503
     assert "未配置" in res.json()["detail"]
 
 
-def test_valid_token_is_accepted(monkeypatch, tmp_path):
-    client = _fresh_app(monkeypatch, tmp_path, ACCESS_TOKEN="boot-token", AUTH_MODE="enforced")
-    import app.core.auth as auth_mod
-    code = auth_mod.auth_store.create_invite("admin")
-    _, token = auth_mod.auth_store.register(code=code, username="张三")
-    assert client.get("/v1/sessions", headers={"Authorization": "Bearer " + token}).status_code == 200
+def test_valid_token_is_accepted(wired):
+    client, store = wired
+    code = store.create_invite("admin")
+    _, token = store.register(code=code, username="张三")
+    res = client.get("/v1/sessions", headers={"Authorization": "Bearer " + token})
+    assert res.status_code == 200
 
 
-def test_bad_token_is_401(monkeypatch, tmp_path):
-    client = _fresh_app(monkeypatch, tmp_path, ACCESS_TOKEN="boot-token", AUTH_MODE="enforced")
+def test_bad_token_is_401(wired):
+    client, _ = wired
     assert client.get("/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
 
 
-def test_bootstrap_access_token_maps_to_admin(monkeypatch, tmp_path):
+def test_missing_token_is_401(wired):
+    client, _ = wired
+    assert client.get("/v1/sessions").status_code == 401
+
+
+def test_bootstrap_access_token_maps_to_admin(wired):
     """本机 EXE 与已发出的 APK 靠这条继续可用。"""
-    client = _fresh_app(monkeypatch, tmp_path, ACCESS_TOKEN="boot-token", AUTH_MODE="enforced")
-    headers = {"Authorization": "Bearer boot-token"}
-    assert client.get("/v1/providers", headers=headers).status_code == 200
+    client, _ = wired
+    res = client.get("/v1/providers", headers={"Authorization": "Bearer boot-token"})
+    assert res.status_code == 200
 
 
-def test_disabled_mode_treats_everything_as_admin(monkeypatch, tmp_path):
-    client = _fresh_app(monkeypatch, tmp_path, ACCESS_TOKEN="", AUTH_MODE="disabled")
+def test_disabled_mode_treats_everything_as_admin(client, monkeypatch):
+    monkeypatch.setenv("AUTH_MODE", "disabled")
     assert client.get("/v1/providers").status_code == 200
+
+
+def test_register_stays_public(wired):
+    client, store = wired
+    code = store.create_invite("admin")
+    res = client.post("/v1/auth/register", json={"code": code, "username": "公开注册"})
+    assert res.status_code == 200, "注册端点必须无需凭据即可访问"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -512,22 +533,30 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'app.core.authz'`
 ```python
 """鉴权接线：把凭据解析成 Principal，并提供两个端点依赖。
 
-与 core/auth.py 分家的原因：身份规则要能离线测，且不该被 web 框架绑住。
+与 core/auth.py 分家的原因：身份规则要能离线测，也不该被 web 框架绑住。
 """
 import os
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.core.auth import BOOTSTRAP_TOKEN_ENV, Principal, auth_store
 
-AUTH_MODE = os.getenv("AUTH_MODE", "enforced").strip().lower()
 BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
 # 唯一无需凭据的端点。新增公开端点必须同时改这里，否则路由契约测试会红。
 PUBLIC_PATHS = frozenset({"/v1/auth/register"})
 _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
+
+
+def _auth_mode() -> str:
+    """每次请求现读。做成 import 期常量的话，测试就得 reload 模块才能切模式。"""
+    return os.getenv("AUTH_MODE", "enforced").strip().lower()
+
+
+def _bootstrap_token() -> str:
+    return os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip()
 
 
 def _credential(request: Request) -> str:
@@ -545,19 +574,19 @@ def resolve_principal(request: Request) -> Optional[Principal]:
     credential = _credential(request)
     if not credential:
         return None
-    if os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip() and \
-            credential == os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip():
+    bootstrap = _bootstrap_token()
+    if bootstrap and credential == bootstrap:
         return BOOTSTRAP_PRINCIPAL
     return auth_store.resolve(credential)
 
 
 def _has_any_identity() -> bool:
-    return bool(os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip()) or \
-        any(u.get("role") == "admin" for u in auth_store.list_users())
+    return bool(_bootstrap_token()) or any(
+        u.get("role") == "admin" for u in auth_store.list_users())
 
 
 def install_auth(app) -> None:
-    if AUTH_MODE == "disabled":
+    if _auth_mode() == "disabled":
         print("⚠️ AUTH_MODE=disabled：所有请求均以本机管理员身份运行，切勿用于公网")
 
     @app.middleware("http")
@@ -568,7 +597,7 @@ def install_auth(app) -> None:
         if path in PUBLIC_PATHS:
             return await call_next(request)
 
-        if AUTH_MODE == "disabled":
+        if _auth_mode() == "disabled":
             request.state.principal = BOOTSTRAP_PRINCIPAL
             return await call_next(request)
 
@@ -601,6 +630,8 @@ CurrentPrincipal = Depends(current_principal)
 RequireAdmin = Depends(require_admin)
 ```
 
+顶部 `from fastapi import ...` 需含 `Depends`。
+
 在 `backend/app/core/auth.py` 顶部常量区补一行（供 authz 与 main 共用同一个 env 名）：
 
 ```python
@@ -631,10 +662,46 @@ app = FastAPI(**_app_kwargs)
 
 ```python
 # 测试统一以"本机管理员"运行：既无需真凭据，也保持既有断言不变。
-# 鉴权本身的分支（401/503/enabled）由 test_authz_failclosed.py 单独覆盖。
+# 鉴权本身的分支（401/403/503/enabled）由 test_authz_failclosed.py 与
+# enforced_client 覆盖。
 os.environ["AUTH_MODE"] = "disabled"
 os.environ["ACCESS_TOKEN"] = ""
+
+# 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
+# data/users.json —— 那是越出本次改动范围的外部副作用。
+os.environ["USERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "users.json")
+os.environ["INVITES_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "invites.json")
 ```
+
+并在 `conftest.py` 末尾追加 fixture（后续任务的越权测试都要用它）：
+
+```python
+@pytest.fixture
+def enforced(monkeypatch, tmp_path):
+    """真实鉴权路径。
+
+    全局 client 是 disabled 模式，人人都是本机管理员，在那里断言"普通用户
+    拿到 403"等于什么都没测。模式已改为请求期读 env，所以只需换 env 与身份库。
+    """
+    from app.core.auth import AuthStore
+    import app.core.authz as authz
+
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
+
+    def as_user(username):
+        """注册一个普通用户，返回携带其令牌的请求头。"""
+        code = store.create_invite("admin")
+        _, token = store.register(code=code, username=username)
+        return {"Authorization": "Bearer " + token}
+
+    return as_user
+```
+
+注意 `USERS_DB_PATH` / `INVITES_DB_PATH` 两行必须放在 `import app.main` 之前——`auth_store` 是模块级单例，晚设就晚了。
 
 - [ ] **Step 4: 运行新测试与全量**
 
@@ -744,9 +811,9 @@ def test_registration_throttles_repeated_failures():
     _FAILS.clear()
 
 
-def test_admin_endpoints_reject_non_admin():
-    body, _ = _register("王五")
-    hdrs = {"Authorization": "Bearer " + body["token"]}
+def test_admin_endpoints_reject_non_admin(client, enforced):
+    # 必须走 enforced 模式：全局 conftest 是 disabled，人人都是管理员，403 无从发生
+    hdrs = enforced("王五")
     assert client.get("/v1/admin/users", headers=hdrs).status_code == 403
     assert client.post("/v1/admin/invites", json={}, headers=hdrs).status_code == 403
 
@@ -1140,16 +1207,20 @@ Expected: FAIL，`TypeError: create() got an unexpected keyword argument 'owner'
 
 在文件顶部 `import` 处补 `import shutil`。
 
-`create` 与其余方法改为（完整替换函数体，保持既有锁与 flush 语义）：
+`create` 与其余方法改为（完整替换函数体，保持既有锁与 flush 语义）。**`owner` 一律是必填参数，不给默认值**——带默认值会让调用点忘记传 owner 时静默退化成 `default_user`（也就是管理员），而这正是本计划要堵的洞；必填则直接 TypeError，遗漏在开发期就暴露。`LEGACY_OWNER` 只用于迁移回填与 bootstrap 身份：
 
 ```python
-    def create(self, model: str = "deepseek-chat", owner: str = LEGACY_OWNER) -> dict:
+    def create(self, model: str, owner: str) -> dict:
         session_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
         with self._lock:
             self._sessions[session_id] = {
-                "session_id": session_id, "title": "新对话", "created_at": now,
-                "model": model, "messages": [], "owner": owner,
+                "session_id": session_id,
+                "title": "新对话",
+                "created_at": now,
+                "model": model,
+                "messages": [],
+                "owner": owner,
             }
             self._flush()
         return {"session_id": session_id, "created_at": now}
@@ -1164,7 +1235,7 @@ Expected: FAIL，`TypeError: create() got an unexpected keyword argument 'owner'
         summaries.sort(key=lambda x: x["created_at"], reverse=True)
         return summaries
 
-    def get(self, session_id: str, owner: str = LEGACY_OWNER):
+    def get(self, session_id: str, owner: str):
         with self._lock:
             data = self._sessions.get(session_id)
             if not data or data.get("owner") != owner:
@@ -1317,25 +1388,38 @@ import app.memory.memory_router as mr
 
 @pytest.fixture
 def mem_api(tmp_path, monkeypatch):
-    """只挂记忆路由，用真实内存 fake_store 验身份推导。"""
+    """只挂记忆路由 + 真鉴权中间件，用真实内存 fake_store 验身份推导。
+
+    裸 app 若不装 install_auth，require_admin 里的 current_principal 只会因
+    request.state 无主体而抛 401，"普通用户拿到 403"这条就永远测不到。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.core.auth import AuthStore
     from app.memory.memory_router import FakeMemoryStore, router
+    import app.core.authz as authz
+    import app.memory.memory_router as mr
+
     fake = FakeMemoryStore()
     monkeypatch.setattr(mr, "memory_manager", None)
     monkeypatch.setattr(mr, "memory_init_error", None)
     monkeypatch.setattr(mr, "fake_store", fake)
-    app = FastAPI()
-    app.include_router(router)
 
-    auth = AuthStore(path=str(tmp_path / "u.json"), invites_path=str(tmp_path / "i.json"))
-    tokens = {}
-    for name in ("A", "B"):
-        code = auth.create_invite("admin")
-        _, token = auth.register(code=code, username=name)
-        tokens[name] = token
+    store = AuthStore(path=str(tmp_path / "u.json"), invites_path=str(tmp_path / "i.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
 
-    def hdr(tok):
-        return {"Authorization": "Bearer " + tok}
-    return TestClient(app), hdr(tokens["A"]), hdr(tokens["B"])
+    probe = FastAPI()
+    authz.install_auth(probe)
+    probe.include_router(router)
+
+    def hdr(username):
+        code = store.create_invite("admin")
+        _, token = store.register(code=code, username=username)
+        return {"Authorization": "Bearer " + token}
+
+    return TestClient(probe), hdr("A"), hdr("B")
 
 
 def test_memory_add_is_scoped_to_caller(mem_api):
@@ -1616,13 +1700,12 @@ PROVIDER_ROUTES = [
 
 
 @pytest.mark.parametrize("method,path", PROVIDER_ROUTES)
-def test_non_admin_cannot_touch_providers(client, method, path):
-    """模型服务配置能改掉整个后端行为，必须管理员专属。"""
-    from app.core.auth import auth_store
-    code = auth_store.create_invite("default_user")
-    _, token = auth_store.register(code=code, username="普通用户")
-    res = client.request(method, path, headers={"Authorization": "Bearer " + token},
-                         json={})
+def test_non_admin_cannot_touch_providers(client, enforced, method, path):
+    """模型服务配置能改掉整个后端行为，必须管理员专属。
+
+    用 enforced fixture 而非全局 client：后者是 disabled 模式，人人都是管理员。
+    """
+    res = client.request(method, path, headers=enforced("普通用户"), json={})
     assert res.status_code == 403, f"{method} {path} 竟然放行了"
 ```
 
