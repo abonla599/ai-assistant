@@ -1,4 +1,5 @@
 # backend/tests/conftest.py
+import json
 import os
 import shutil
 import sys
@@ -19,9 +20,66 @@ os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 # 鉴权行为由 test_auth.py 用 monkeypatch 单独覆盖，这里统一置空。
 os.environ["ACCESS_TOKEN"] = ""
 
+# 测试不得真调付费模型：预置一个假 provider，并把附件目录指向临时路径。
+os.environ["PROVIDERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "providers.json")
+os.environ["UPLOAD_DIR"] = os.path.join(_TEST_DATA_DIR, "uploads")
+with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
+    json.dump([{
+        "id": "fake-model", "label": "测试模型", "base_url": "https://example.invalid/v1",
+        "api_key": "sk-test-000111222333", "model": "fake-chat",
+        "supports_vision": False, "is_default": True,
+    }], _f)
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+        self.tool_calls = None
+
+    def model_dump(self):
+        return {"role": "assistant", "content": self.content}
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+        self.delta = type("D", (), {"content": content})()
+
+
+class _FakeCompletions:
+    def create(self, **kwargs):
+        content = "（测试回复）"
+        return type("R", (), {"choices": [_FakeChoice(content)]})()
+
+
+class _FakeChat:
+    completions = _FakeCompletions()
+
+
+class _FakeClient:
+    chat = _FakeChat()
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm_calls(monkeypatch):
+    """把所有真实模型调用打桩：测试不应消耗额度，也不应因上游故障变红。"""
+    import app.core.streaming as streaming
+    import app.core.llm_client as llm_client
+    import app.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "build_client", lambda provider: _FakeClient())
+    monkeypatch.setattr(llm_client, "build_client", lambda provider: _FakeClient())
+
+    async def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096):
+        for piece in ("（", "测试", "回复）"):
+            yield piece
+
+    monkeypatch.setattr(streaming, "stream_chat", fake_stream)
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)

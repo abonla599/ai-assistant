@@ -99,3 +99,5 @@ websocket-client==1.9.0
 websockets==16.0
 zipp==3.23.1
 watchdog>=3.0.0
+# 附件上传（FastAPI 解析 multipart 必需）
+python-multipart>=0.0.9

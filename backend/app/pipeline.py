@@ -2,11 +2,13 @@ import json
 import uuid
 from typing import List, Dict, Any
 
-# 导入你自己的模块（路径根据实际情况调整，这里假设都是 app.xxx）
-from core.llm_client import get_llm_response, MODEL_CONFIGS
-from memory.memory_manager import MemoryManager
-from tools.registry import get_all_tools_schema
-from tools.executor import execute_tool
+# 导入路径统一用 app. 前缀：裸模块名（memory.*、tools.*）只在以脚本方式
+# 启动 backend/app/main.py 时恰好可用，打包后会 ImportError，并被上层的
+# try/except 静默吞掉，导致记忆与工具能力在 EXE 里悄悄失效。
+from app.core.providers import store, build_client
+from app.memory.memory_manager import MemoryManager
+from app.tools.registry import get_all_tools_schema
+from app.tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 from app.tools.builtin_tools import *
 # 共享实例（简单单例，后续优化）
@@ -18,7 +20,19 @@ class ChatPipeline:
         self.memory = memory_manager
         self.tools_schema = get_all_tools_schema()
 
-    def process(self, model: str, messages: List[Dict]) -> Dict[str, Any]:
+    @staticmethod
+    def _text_of(content) -> str:
+        """取消息里的纯文本。带图片附件时 content 是多模态数组。"""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        return "" if content is None else str(content)
+
+    def process(self, model: str, messages: List[Dict], provider_id: str = None) -> Dict[str, Any]:
         """
         主处理流程：
         1. 从 messages 提取用户最新输入
@@ -30,8 +44,8 @@ class ChatPipeline:
         # 1. 提取最新用户输入
         user_input = ""
         for msg in reversed(messages):
-            if msg["role"] == "user":
-                user_input = msg["content"]
+            if msg.get("role") == "user":
+                user_input = self._text_of(msg.get("content"))
                 break
         if not user_input:
             return {"reply": "请提供输入内容", "message_id": None}
@@ -40,7 +54,8 @@ class ChatPipeline:
         enriched_messages = self._inject_memory(messages, user_input)
 
         # 3. 调用模型（带工具循环）
-        final_reply = self._call_model_with_tool_loop(model, enriched_messages)
+        final_reply = self._call_model_with_tool_loop(model, enriched_messages,
+                                                      provider_id=provider_id)
 
         # 4. 自动保存对话摘要到记忆
         self._save_interaction(user_input, final_reply)
@@ -64,28 +79,22 @@ class ChatPipeline:
             print(f"记忆检索失败（不影响主流程）: {e}")
         return messages
 
-    def _call_model_with_tool_loop(self, model: str, messages: List[Dict], max_turns=5) -> str:
-        """支持工具调用的对话循环，类似ReAct但简化版，直接用OpenAI SDK"""
-        from openai import OpenAI
-        import os
-        from dotenv import load_dotenv
-        load_dotenv()
+    def _call_model_with_tool_loop(self, model: str, messages: List[Dict], max_turns=5,
+                                   provider_id: str = None) -> str:
+        """支持工具调用的对话循环，类似 ReAct 的简化版。
 
-        # 根据 model 选择客户端
-        config = MODEL_CONFIGS.get(model)
-        if not config:
-            return f"不支持的模型: {model}"
-        api_key = os.getenv(config["api_key_env"])
-        if not api_key:
-            return f"缺少API密钥: {config['api_key_env']}"
-        client = OpenAI(api_key=api_key, base_url=config["base_url"])
+        配置缺失或调用失败一律抛异常：把故障当回复文本返回，会让错误写进会话
+        历史，并被上层当作模型输出继续加工。
+        """
+        provider = store.resolve(provider_id, legacy_model=model)
+        client = build_client(provider)
 
         # 复制消息列表，避免修改原始数据
         msgs = list(messages)
 
         for turn in range(max_turns):
             response = client.chat.completions.create(
-                model=config["model_name"],
+                model=provider["model"],
                 messages=msgs,
                 tools=self.tools_schema,  # 传递工具定义
                 tool_choice="auto"

@@ -60,14 +60,16 @@ try:
     from app.core.llm_client import get_llm_response
     from app.pipeline import ChatPipeline
     USE_PIPELINE = True
-except ImportError:
+except ImportError as e:
     USE_PIPELINE = False
+    print(f"❌ ChatPipeline 不可用，记忆注入与工具调用已失效（非流式对话将直接调用模型）: {e}")
 
 try:
     from app.agents.orchestrator import Orchestrator
     orchestrator = Orchestrator(model="deepseek-chat")
-except ImportError:
+except ImportError as e:
     orchestrator = None
+    print(f"⚠️ 编排器不可用，/v1/agent/orchestrate 等端点将返回 503: {e}")
 
 try:
     from app.agents.task_store import task_store, get_task, TaskStatus
@@ -137,7 +139,9 @@ async def require_access_token(request, call_next):
 
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):
-    model: str = "deepseek-chat"
+    model: str = "deepseek-chat"          # 兼容字段：作为 provider 的别名解析
+    provider: Optional[str] = None        # 模型服务 id（首选）
+    attachments: List[str] = []           # /v1/uploads 返回的附件 id
     messages: list[dict]
     session_id: Optional[str] = None
 
@@ -209,32 +213,68 @@ async def health_check():
     return {"status": "healthy"}
 
 # ---------- 聊天接口 ----------
+from app.core.providers import (store as provider_store, ProviderError, PRESETS,
+                                looks_placeholder, build_client)
+from app.core.uploads import store as upload_store, build_user_content, UploadError
+
+
+def _prepare_chat(request: ChatRequest):
+    """解析模型服务、拼装附件。
+
+    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本)。
+    历史里只记原始文本加附件名，避免把整份文件塞进会话记录。
+    """
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+
+    provider = provider_store.resolve(request.provider, legacy_model=request.model)
+
+    messages = list(request.messages)
+    last = messages[-1] or {}
+    raw = last.get("content")
+    text = raw if isinstance(raw, str) else ChatPipeline._text_of(raw)
+
+    content = build_user_content(text, request.attachments, provider["supports_vision"])
+    messages[-1] = {**last, "content": content}
+
+    history_text = text
+    if request.attachments:
+        names = "、".join(
+            (upload_store.get(a) or {}).get("name", a) for a in request.attachments)
+        history_text = (text + "\n" if text else "") + f"[附件] {names}"
+
+    return provider, messages, history_text
+
+
 @app.post("/v1/chat")
 async def chat(request: ChatRequest):
-    user_msg = request.messages[-1]["content"]
-    if USE_PIPELINE:
-        try:
-            user_id = "default_user"
-            pipeline = ChatPipeline(user_id=user_id)
-            result = pipeline.process(request.model, request.messages)
-            reply = result.get("reply", "抱歉，处理出错")
-        except Exception as e:
-            reply = f"处理出错: {str(e)}"
-    else:
-        try:
+    try:
+        provider, messages, user_text = _prepare_chat(request)
+    except (ProviderError, UploadError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        if USE_PIPELINE:
+            result = ChatPipeline(user_id="default_user").process(
+                provider["model"], messages, provider_id=provider["id"])
+            reply = result.get("reply", "")
+        else:
             reply = get_llm_response(
-                model=request.model,
-                messages=request.messages,
-                temperature=0.7
-            )
-        except Exception:
-            reply = f"你刚才说：{user_msg}，我是AI，你好！"
-    
+                model=provider["model"], messages=messages,
+                temperature=0.7, provider_id=provider["id"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 失败就明确失败：把错误当回复返回会让它被写进会话历史、伪装成成功
+        raise HTTPException(status_code=502,
+                            detail=f"模型调用失败：{type(e).__name__}: {str(e)[:200]}")
+
     message_id = str(uuid.uuid4())
     if request.session_id:
-        sessions_store.add_message(request.session_id, "user", user_msg)
+        sessions_store.add_message(request.session_id, "user", user_text)
         sessions_store.add_message(request.session_id, "assistant", reply, message_id)
-    return {"reply": reply, "message_id": message_id}
+    return {"reply": reply, "message_id": message_id,
+            "provider": provider["id"], "model": provider["model"]}
 
 # ---------- 流式聊天接口 ----------
 from fastapi.responses import StreamingResponse
@@ -244,20 +284,26 @@ import json as json_module
 async def stream_chat_endpoint(request: ChatRequest):
     """流式聊天端点，返回 Server-Sent Events"""
     from app.core.streaming import stream_chat
-    
+
+    # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
+    try:
+        provider, messages, user_text = _prepare_chat(request)
+    except (ProviderError, UploadError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     async def generate():
         message_id = str(uuid.uuid4())
         # 发送开始事件
-        yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id})}\n\n"
+        yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id, 'model': provider['model']})}\n\n"
 
         # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
         if request.session_id:
-            sessions_store.add_message(
-                request.session_id, "user", request.messages[-1]["content"])
+            sessions_store.add_message(request.session_id, "user", user_text)
 
         full_text = ""
         try:
-            async for chunk in stream_chat(request.model, request.messages):
+            async for chunk in stream_chat(provider["model"], messages,
+                                           provider_id=provider["id"]):
                 full_text += chunk
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             
@@ -267,7 +313,7 @@ async def stream_chat_endpoint(request: ChatRequest):
                     request.session_id, "assistant", full_text, message_id)
             
             # 发送完成事件
-            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id})}\n\n"
+            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
         except Exception as e:
             yield f"data: {json_module.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
@@ -305,17 +351,111 @@ async def replace_session_messages(session_id: str, req: SessionMessagesRequest)
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
 
-# ---------- 模型列表 ----------
+# ---------- 模型列表（由 Provider 配置派生） ----------
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+
 @app.get("/v1/models")
 async def list_models():
     return {
-        "models": [
-            {"id": "deepseek-chat", "name": "DeepSeek Chat", "description": "快速、高性价比"},
-            {"id": "gpt-4o", "name": "GPT-4o", "description": "多模态、高质量"},
-            {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "description": "基础经济型"}
-        ],
-        "default": "deepseek-chat"
+        "models": provider_store.catalog(),
+        "default": (provider_store.default() or {}).get("id"),
+        "presets": PRESETS,
     }
+
+# ---------- 模型服务（Provider）配置 ----------
+class ProviderRequest(BaseModel):
+    id: Optional[str] = None
+    label: str
+    base_url: str
+    api_key: str = ""
+    model: str
+    supports_vision: bool = False
+    is_default: bool = False
+
+@app.get("/v1/providers")
+async def list_providers():
+    # 绝不返回明文密钥，只给掩码与"是否已配置"
+    return {"providers": provider_store.public_list(), "presets": PRESETS}
+
+@app.post("/v1/providers")
+async def add_provider(req: ProviderRequest):
+    try:
+        saved = provider_store.upsert(req.model_dump())
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.put("/v1/providers/{provider_id}")
+async def update_provider(provider_id: str, req: ProviderRequest):
+    record = req.model_dump()
+    record["id"] = provider_id
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.delete("/v1/providers/{provider_id}")
+async def remove_provider(provider_id: str):
+    if provider_store.delete(provider_id):
+        return {"status": "deleted", "id": provider_id}
+    raise HTTPException(status_code=404, detail="模型服务不存在")
+
+@app.post("/v1/providers/{provider_id}/default")
+async def set_default_provider(provider_id: str):
+    if provider_store.set_default(provider_id):
+        return {"status": "ok", "default": provider_id}
+    raise HTTPException(status_code=404, detail="模型服务不存在")
+
+@app.post("/v1/providers/{provider_id}/test")
+async def test_provider(provider_id: str):
+    """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。"""
+    try:
+        return provider_store.ping(provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/v1/providers/test")
+async def test_provider_draft(req: ProviderRequest):
+    """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
+    try:
+        candidate = provider_store._validate(req.model_dump())
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if looks_placeholder(candidate["api_key"]):
+        return {"ok": False, "detail": "请先填写有效的 API Key"}
+    try:
+        client = build_client(candidate)
+        client.chat.completions.create(model=candidate["model"],
+                                       messages=[{"role": "user", "content": "ping"}],
+                                       max_tokens=4)
+        return {"ok": True, "detail": f"{candidate['model']} 响应正常"}
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:180]}"}
+
+# ---------- 附件上传 ----------
+@app.post("/v1/uploads")
+async def upload_attachment(file: UploadFile = File(...)):
+    blob = await file.read()
+    try:
+        record = upload_store.save(file.filename or "unnamed", blob, file.content_type or "")
+    except UploadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return record
+
+@app.get("/v1/uploads/{upload_id}/file")
+async def download_attachment(upload_id: str):
+    record = upload_store.get(upload_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="附件不存在或已清理")
+    return FileResponse(record["path"], media_type=record["mime"], filename=record["name"])
+
+@app.delete("/v1/uploads/{upload_id}")
+async def delete_attachment(upload_id: str):
+    if upload_store.delete(upload_id):
+        return {"status": "deleted", "id": upload_id}
+    raise HTTPException(status_code=404, detail="附件不存在")
 
 # ---------- 反馈 ----------
 @app.post("/v1/feedback")
