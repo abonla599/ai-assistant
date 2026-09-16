@@ -103,16 +103,17 @@ from app.memory.memory_router import router as memory_router
 from app.web.web_router import mount_pwa
 
 # ---------- 创建 FastAPI 应用 ----------
-_app_kwargs = {}
-if os.getenv("AUTH_MODE", "enforced").strip().lower() != "disabled":
-    # 路由表本身就是侦察材料，对外一律不给 openapi
-    _app_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
+# 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
+# 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
+from app.core.authz import _auth_mode, docs_kwargs_for_mode, install_auth
+
+# 非 disabled 模式连文档路由都不生成（路由表本身就是侦察材料）
 app = FastAPI(
     title="AI 智能助手",
     description="多模型、工具调用、记忆管理的智能助手系统",
     version="1.0.0",
     lifespan=lifespan,  # 注册 lifespan
-    **_app_kwargs
+    **docs_kwargs_for_mode(_auth_mode())
 )
 
 # 注册记忆路由（优先使用 Router 中的端点）
@@ -122,9 +123,7 @@ app.include_router(memory_router)
 mount_pwa(app)
 
 # ---------- 访问鉴权 ----------
-# 身份规则见 app/core/authz.py。这里只负责装上。
-from app.core.authz import install_auth
-
+# 身份规则见 app/core/authz.py（import 在创建应用那一节）。这里只负责装上。
 install_auth(app)
 
 # ---------- 数据模型 ----------

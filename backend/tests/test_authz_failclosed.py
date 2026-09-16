@@ -1,13 +1,13 @@
 """鉴权模式行为：401 / 503 / disabled 放行。
 
 模式在请求期读 env，所以这里只需 monkeypatch 环境变量并换掉 auth_store 单例，
-不必 reload 模块或重造 app。
+不必 reload 模块或重造 app。文档开关在构造期定死，改不了，所以它已抽成
+authz.docs_kwargs_for_mode 纯函数——本文件因此一条 reload 都不需要。
 
 本文件同时接住 test_auth.py 里那批旧全局口令中间件的 HTTP 测试：凭据解析规则
 （方案名大小写不敏感、无方案名、x-access-token 回退）在新中间件里原样保留，
 所以那些断言按新语义迁到这里；只服务于"一个口令放行所有人"模型的那批已删除。
 """
-import importlib
 import sys
 from pathlib import Path
 
@@ -37,6 +37,40 @@ def test_no_credentials_at_all_is_closed_not_open(wired, monkeypatch):
     res = client.get("/v1/sessions")
     assert res.status_code == 503
     assert "未配置" in res.json()["detail"]
+
+
+@pytest.fixture
+def nothing_configured(client, tmp_path, monkeypatch):
+    """AUTH_MODE 根本不存在（不是空串、也不是 disabled）+ 空 bootstrap + 空身份库。
+
+    上面那些 enforced 用例都显式 setenv("AUTH_MODE", ...)，于是"env 压根没配"
+    这个真实部署最常踩到的形态反倒无人钉：默认值一旦被改成 open-by-default，
+    线上就是一台公网全开的 API，而测试全绿。这条 fixture 就是那个缺口。
+    """
+    monkeypatch.delenv("AUTH_MODE", raising=False)
+    monkeypatch.setenv("ACCESS_TOKEN", "")
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    return client, store
+
+
+def test_absent_auth_mode_defaults_to_enforced(nothing_configured):
+    """默认值本身：漏配 env 必须落在 enforced，而不是 disabled / 空串之类。"""
+    assert authz._auth_mode() == "enforced"
+
+
+def test_absent_auth_mode_still_refuses_service(nothing_configured):
+    """端到端一层：没有 env、没有口令、库里没有身份 → 拒绝服务，不是放行。"""
+    client, _ = nothing_configured
+    res = client.get("/v1/sessions")
+    assert res.status_code == 503, "AUTH_MODE 缺失时必须 fail-closed"
+    assert "未配置" in res.json()["detail"]
+
+
+def test_absent_auth_mode_also_closes_docs(nothing_configured):
+    """文档开关与中间件共用同一处默认值：默认下连路由表都不给。"""
+    assert authz.docs_kwargs_for_mode(authz._auth_mode())["docs_url"] is None
 
 
 def test_valid_token_is_accepted(wired):
@@ -155,22 +189,53 @@ def test_docs_are_behind_credentials_when_enforced(wired):
         assert client.get(path).status_code == 401, path
 
 
-def test_openapi_endpoints_only_exist_in_disabled_mode(monkeypatch):
-    """非 disabled 模式下路由表本身都不生成。
+@pytest.mark.parametrize("mode", ["enforced", "Enforced", "", "dissabled"])
+def test_docs_are_closed_for_anything_but_disabled(mode):
+    """判定是纯函数，所以两种模式各自断言即可，不必 reload 整个 app.main。
 
-    FastAPI 在构造 app 时就决定了文档路由，改不了，所以这条只能整模块重载；
-    测完立刻按 disabled 再重载一次复位，免得把关掉文档的状态留给后面的测试。
+    只认 "disabled" 这一个值，其余一律关掉文档——未知取值落到安全侧。
     """
-    import app.main as main_module
+    assert authz.docs_kwargs_for_mode(mode) == {
+        "docs_url": None, "redoc_url": None, "openapi_url": None}
 
-    monkeypatch.setenv("AUTH_MODE", "enforced")
-    reloaded = importlib.reload(main_module)
-    assert reloaded.app.docs_url is None
-    assert reloaded.app.redoc_url is None
-    assert reloaded.app.openapi_url is None
 
-    monkeypatch.setenv("AUTH_MODE", "disabled")
-    importlib.reload(main_module)
+def test_docs_kwargs_are_fastapi_defaults_for_disabled():
+    """disabled 才把三个参数交回 FastAPI 默认值（本机开发要看文档）。"""
+    assert authz.docs_kwargs_for_mode("disabled") == {}
+
+
+def test_docs_routes_exist_only_under_the_disabled_kwargs():
+    """上一条只证字典，这条证它落到 app 上的结果：关掉的三条路由真的 404。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    def probe_client(mode):
+        probe_app = FastAPI(**authz.docs_kwargs_for_mode(mode))
+
+        @probe_app.get("/v1/ping")
+        def ping():
+            return {"ok": True}
+
+        return TestClient(probe_app)
+
+    closed = probe_client("enforced")
+    opened = probe_client("disabled")
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert closed.get(path).status_code == 404, path
+        assert opened.get(path).status_code == 200, path
+
+
+def test_current_app_keeps_docs_because_tests_build_it_in_disabled_mode():
+    """main.py 确实把 docs_kwargs_for_mode(_auth_mode()) 传给了 FastAPI(...)。
+
+    全局 app 在 conftest 的 AUTH_MODE=disabled 下装配，文档路由必须在。
+    反向（enforced 下关掉）由上面三条钉；以前用 reload 覆盖这两半，现在不需要。
+    """
+    from app.main import app
+
+    assert app.docs_url == "/docs"
+    assert app.redoc_url == "/redoc"
+    assert app.openapi_url == "/openapi.json"
 
 
 # ---------- 端点依赖 ----------

@@ -9,13 +9,18 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.core.auth import BOOTSTRAP_TOKEN_ENV, Principal, auth_store
+from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
+                           auth_store)
 
 BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
 # 唯一无需凭据的端点。新增公开端点必须同时改这里，否则路由契约测试会红。
 PUBLIC_PATHS = frozenset({"/v1/auth/register"})
 _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
+
+# 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺
+# （"没有身份"，区别于 403 的"有身份但不够"）。
+UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
 
 
 def _auth_mode() -> str:
@@ -25,6 +30,20 @@ def _auth_mode() -> str:
 
 def _bootstrap_token() -> str:
     return os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip()
+
+
+def docs_kwargs_for_mode(mode: str) -> dict:
+    """按模式给出 FastAPI 构造参数——纯函数，不读 env，因此两种模式都断言得到。
+
+    文档路由在 app 构造期就定死，请求期改不了。这个判定原先写在 main.py 里，
+    测试要覆盖另一半就只能 importlib.reload(app.main)：reload 会把 sessions_store
+    等模块级对象重新绑定到别处，而全局 client 早已抓住旧 app，后续任务给
+    app.main 打补丁时就会静默错位。抽成函数后 main.py 只留一行传参。
+    """
+    if mode == "disabled":
+        return {}
+    # 路由表本身就是侦察材料，对外一律不给 openapi
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
 def _credential(request: Request) -> str:
@@ -42,11 +61,12 @@ def _secrets_match(supplied: str, secret: str) -> bool:
     """常量时间比较，且不让畸形请求头变成 500。
 
     bootstrap 口令是外部可比对的秘密，所以不能图省事用 ==；但请求头是任意
-    UTF-8，hmac.compare_digest 收到非 ASCII str 会抛 TypeError——那等于任何
-    人用一个乱码令牌就能把鉴权打成 500。先按字节编码再比。
+    UTF-8，hmac.compare_digest 收到非 ASCII str 会抛 TypeError——那等于任何人
+    用一个乱码令牌就能把鉴权打成 500。编码规则不在这里重写，直接沿用
+    auth._as_hash_bytes：同一条"先按字节、非 ASCII 不崩"的规则只有一份权威，
+    否则两处各自的边角情况迟早对不上。
     """
-    return hmac.compare_digest(supplied.encode("utf-8", "surrogatepass"),
-                               secret.encode("utf-8", "surrogatepass"))
+    return hmac.compare_digest(_as_hash_bytes(supplied), _as_hash_bytes(secret))
 
 
 def resolve_principal(request: Request) -> Optional[Principal]:
@@ -92,7 +112,7 @@ def install_auth(app) -> None:
 
         principal = resolve_principal(request)
         if principal is None:
-            return JSONResponse(status_code=401, content={"detail": "缺少或错误的访问凭据"})
+            return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
         request.state.principal = principal
         return await call_next(request)
 
@@ -100,7 +120,7 @@ def install_auth(app) -> None:
 def current_principal(request: Request) -> Principal:
     principal = getattr(request.state, "principal", None)
     if principal is None:
-        raise HTTPException(status_code=401, detail="缺少或错误的访问凭据")
+        raise HTTPException(status_code=401, detail=UNAUTHORIZED_DETAIL)
     return principal
 
 

@@ -18,7 +18,7 @@ os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 
 # 测试统一以"本机管理员"运行：既无需真凭据，也保持既有断言不变。
 # 鉴权本身的分支（401/403/503/enabled）由 test_authz_failclosed.py 与
-# enforced_client 覆盖。
+# enforced 覆盖。
 os.environ["AUTH_MODE"] = "disabled"
 os.environ["ACCESS_TOKEN"] = ""
 
