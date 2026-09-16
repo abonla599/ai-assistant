@@ -225,6 +225,17 @@ class AuthStore:
             self._flush()
             return True
 
+    def enable_user(self, user_id: str) -> bool:
+        # disable 的对称动作。rotate_token 刻意不再顺手清掉 disabled（那等于把
+        # 撤销抵消掉），所以"恢复访问"这条路径必须显式存在，否则运维只能删号重建。
+        with self._lock:
+            record = self._users.get(user_id)
+            if record is None:
+                return False
+            record["disabled"] = False
+            self._flush()
+            return True
+
     def rotate_token(self, user_id: str) -> str:
         with self._lock:
             record = self._users.get(user_id)

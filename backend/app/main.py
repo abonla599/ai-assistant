@@ -99,6 +99,10 @@ async def lifespan(app: FastAPI):
 # 记忆模块路由（包含完整的 /v1/memory/* 端点）
 from app.memory.memory_router import router as memory_router
 
+# 身份端点：邀请码注册 + 管理面。哪个端点免凭据由 authz.PUBLIC_PATHS 说了算，
+# 这里只负责挂载，不在此处再判一遍凭据。
+from app.core.auth_router import router as auth_router
+
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_pwa
 
@@ -118,6 +122,9 @@ app = FastAPI(
 
 # 注册记忆路由（优先使用 Router 中的端点）
 app.include_router(memory_router)
+
+# 注册身份端点（/v1/auth/*、/v1/admin/*）
+app.include_router(auth_router)
 
 # 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
 mount_pwa(app)

@@ -300,3 +300,18 @@ def test_invite_with_max_uses_two_admits_exactly_two_registrations(store):
     with pytest.raises(AuthError):
         store.register(code=code, username="三号")
     assert [u["username"] for u in store.list_users()] == ["一号", "二号"]
+
+
+# ---------- 评审修复：轮换不再顺手启用，所以启用必须是它的对称动作 ----------
+
+
+def test_enable_user_undoes_a_disable_and_reports_unknown_ids(store):
+    """disable 是一扇单向门的话，运维就只能删号重建——那不是撤销，是赌气。"""
+    principal, token = store.register(code=store.list_invites()[0]["code"], username="恢复用")
+    store.disable_user(principal.user_id)
+    assert store.resolve(token) is None
+    assert store.enable_user(principal.user_id) is True
+    assert store.resolve(token).user_id == principal.user_id, "启用必须让原令牌立刻可用"
+    disk = json.load(open(store.path, encoding="utf-8"))[principal.user_id]
+    assert disk["disabled"] is False, "启用要落盘，否则重启后账号又躺回停用堆里"
+    assert store.enable_user("u_nobody") is False, "不存在的用户要如实返回 False"
