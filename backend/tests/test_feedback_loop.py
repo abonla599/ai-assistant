@@ -49,26 +49,27 @@ def test_read_preference_roundtrip(data_files):
 
 def test_memory_ids_survive_replace(tmp_path):
     """客户端整体回写会话时不能把记忆关联信息洗掉，否则反馈找不到加权对象。"""
+    owner = "u_owner"
     store = SessionStore(str(tmp_path / "sessions.json"))
-    sid = store.create()["session_id"]
-    store.add_message(sid, "user", "问题")
-    store.add_message(sid, "assistant", "回答", "m-1", ["mem-a", "mem-b"])
+    sid = store.create("deepseek-chat", owner=owner)["session_id"]
+    store.add_message(sid, owner, "user", "问题")
+    store.add_message(sid, owner, "assistant", "回答", "m-1", ["mem-a", "mem-b"])
 
-    assert store.replace(sid, [
+    assert store.replace(sid, owner, [
         {"role": "user", "content": "问题"},
         {"role": "assistant", "content": "回答",
          "message_id": "m-1", "memory_ids": ["mem-a", "mem-b"]},
     ]) is True
 
-    found = store.find_message("m-1")
+    found = store.find_message("m-1", owner)
     assert found["session_id"] == sid
     assert found["message"]["memory_ids"] == ["mem-a", "mem-b"]
 
 
 def test_find_message_missing_returns_none(tmp_path):
     store = SessionStore(str(tmp_path / "s.json"))
-    assert store.find_message("nope") is None
-    assert store.find_message(None) is None
+    assert store.find_message("nope", "u_owner") is None
+    assert store.find_message(None, "u_owner") is None
 
 
 def test_feedback_endpoint_reports_no_memories_under_fake_store():

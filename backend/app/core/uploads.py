@@ -5,15 +5,23 @@
 
 图片类型按文件头字节判定，不信任浏览器上报的 MIME。PDF 在上传时即抽取为纯文本
 再落盘，因此下游的预览与上下文注入不必区分来源格式。
+
+每条索引记录带 owner：这里存的是别人上传的合同、账单、论文，索引一旦共用，
+"知道 id"就等于"拿到文件"，所以读、下载、删除都必须先过归属。
 """
 import base64
 import json
 import os
+import shutil
 import threading
 import uuid
 from datetime import datetime
 
 from app.core.paths import data_root
+# 历史数据认给谁，这个决定只能有一份：会话与附件同属"身份层之前建的东西"，
+# 两处各写一个字符串迟早会对不上（对上不了的话，老用户的附件就永远找不回了）。
+# 这里只借常量，不依赖 SessionStore 的任何行为。
+from app.session.session_store import SessionStore
 
 MAX_TEXT_BYTES = 1 * 1024 * 1024          # 文本/代码 1MB
 MAX_IMAGE_BYTES = 10 * 1024 * 1024        # 图片 10MB
@@ -94,6 +102,10 @@ def detect_kind(filename: str, blob: bytes):
 
 
 class UploadStore:
+    # 与 SessionStore 同一个常量：迁移只负责把历史数据认给 bootstrap 身份，
+    # 它不是任何方法的默认参数（见 save/get/delete 的 owner）。
+    LEGACY_OWNER = SessionStore.LEGACY_OWNER
+
     def __init__(self, directory: str = None):
         self.dir = os.path.abspath(directory or _default_dir())
         self.index_path = os.path.join(self.dir, "index.json")
@@ -112,6 +124,26 @@ class UploadStore:
                 self._index = data
         except (ValueError, OSError) as e:
             print(f"⚠️ 附件索引损坏，忽略历史附件记录: {e}")
+            return
+        self._backfill_owner()
+
+    def _backfill_owner(self):
+        """身份层之前的附件都是本机管理员自己传的，认给他。
+
+        只在缺字段时执行一次，所以重复加载幂等；备份或原子写回失败一律向上抛，
+        进程就不启动——带着半迁移的索引对外服务，等于让"没有 owner"的记录被
+        归属校验静默放行。
+        """
+        missing = [r for r in self._index.values() if "owner" not in r]
+        if not missing:
+            return
+        backup = f"{self.index_path}.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        shutil.copy2(self.index_path, backup)
+        for record in missing:
+            record["owner"] = self.LEGACY_OWNER
+        self._flush()
+        print(f"🧭 已为 {len(missing)} 条历史附件补 owner={self.LEGACY_OWNER}，"
+              f"原件备份于 {backup}")
 
     def _flush(self):
         tmp = self.index_path + ".tmp"
@@ -119,7 +151,8 @@ class UploadStore:
             json.dump(self._index, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.index_path)
 
-    def save(self, filename: str, blob: bytes, claimed_mime: str = "") -> dict:
+    def save(self, filename: str, blob: bytes, claimed_mime: str = "",
+             *, owner: str) -> dict:
         if not blob:
             raise UploadError("文件内容为空")
 
@@ -154,6 +187,7 @@ class UploadStore:
             "mime": mime or claimed_mime,
             "size": display_size,
             "path": stored,
+            "owner": owner,
             "created_at": datetime.now().isoformat(),
         }
         with self._lock:
@@ -161,21 +195,27 @@ class UploadStore:
             self._flush()
         return self.public(record)
 
-    def get(self, upload_id: str):
+    def get(self, upload_id: str, owner: str):
+        """非属主拿到 None，与"附件不存在"同一句话：id 是 16 位十六进制，
+        403 就等于把"这个 id 是真的"送出去。"""
         with self._lock:
             record = self._index.get(upload_id)
-        if not record or not os.path.isfile(record["path"]):
+        if not record or record.get("owner") != owner:
+            return None
+        if not os.path.isfile(record["path"]):
             return None
         return record
 
     def public(self, record: dict) -> dict:
         out = {k: record[k] for k in ("id", "name", "kind", "mime", "size", "created_at")}
         if record["kind"] == "text":
-            out["preview"] = self.read_text(record["id"], max_chars=400)
+            out["preview"] = self.read_text(record["id"], owner=record["owner"],
+                                            max_chars=400)
         return out
 
-    def read_text(self, upload_id: str, max_chars: int = MAX_INJECT_CHARS) -> str:
-        record = self.get(upload_id)
+    def read_text(self, upload_id: str, *, owner: str,
+                  max_chars: int = MAX_INJECT_CHARS) -> str:
+        record = self.get(upload_id, owner)
         if not record or record["kind"] != "text":
             return ""
         with open(record["path"], "r", encoding="utf-8", errors="replace") as f:
@@ -184,15 +224,17 @@ class UploadStore:
             return text[:max_chars] + f"\n…（已截断，原文件 {record['size']} 字节）"
         return text
 
-    def data_uri(self, upload_id: str):
-        record = self.get(upload_id)
+    def data_uri(self, upload_id: str, *, owner: str):
+        record = self.get(upload_id, owner)
         if not record or record["kind"] != "image":
             return None
         with open(record["path"], "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         return f"data:{record['mime']};base64,{b64}"
 
-    def delete(self, upload_id: str) -> bool:
+    def delete(self, upload_id: str, owner: str) -> bool:
+        if self.get(upload_id, owner) is None:
+            return False
         with self._lock:
             record = self._index.pop(upload_id, None)
             if record is None:
@@ -208,22 +250,26 @@ class UploadStore:
 store = UploadStore()
 
 
-def build_user_content(text: str, attachment_ids: list, supports_vision: bool):
+def build_user_content(text: str, attachment_ids: list, supports_vision: bool,
+                       owner: str):
     """把附件拼进用户消息。
 
     文本/代码并入正文文本，这样写进会话历史后追问时上下文不丢；图片只在模型
     声明支持视觉时走多模态数组，否则明确报错——静默丢弃图片会让用户以为模型"看
     不懂"。
+
+    owner 由调用方（路由）从凭据里取，绝不从附件 id 反查是谁传的：附件 id 是
+    可以被人塞进请求的，谁能引用它不等于谁拥有它。
     """
     body = (text or "").strip()
     images = []
 
     for upload_id in attachment_ids or []:
-        record = store.get(upload_id)
+        record = store.get(upload_id, owner)
         if record is None:
             raise UploadError(f"附件不存在或已清理：{upload_id}")
         if record["kind"] == "text":
-            block = store.read_text(upload_id)
+            block = store.read_text(upload_id, owner=owner)
             body = (body + "\n\n" if body else "") + f"[附件 {record['name']}]\n```\n{block}\n```"
         else:
             images.append(record)
@@ -239,5 +285,5 @@ def build_user_content(text: str, attachment_ids: list, supports_vision: bool):
     parts = [{"type": "text", "text": body or "请查看图片"}]
     for record in images:
         parts.append({"type": "image_url",
-                      "image_url": {"url": store.data_uri(record["id"])}})
+                      "image_url": {"url": store.data_uri(record["id"], owner=owner)}})
     return parts

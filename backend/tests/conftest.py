@@ -99,6 +99,22 @@ def _stub_llm_calls(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_throttle():
+    """限流账本 `_FAILS` 是模块级全局状态，每条用例都必须从空表开始。
+
+    不清的话，任何多打几次坏码的用例（注册端点、以及会话/附件归属这类要猜
+    令牌的用例）留下的计数会一路累到阈值上，把一个毫不相干的 assert 200 变成
+    429——那时绿就只是算术运气。放在 conftest 而不是某个测试文件里，是因为它
+    保护的是整个套件。
+    """
+    from app.core.auth_router import _FAILS
+
+    _FAILS.clear()
+    yield
+    _FAILS.clear()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_test_data():
     yield

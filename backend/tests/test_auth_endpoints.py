@@ -18,19 +18,7 @@ client = TestClient(app)
 # enforced fixture 把 bootstrap 口令设成这个值，管理端点在它之下才有意义
 BOOT = {"Authorization": "Bearer boot-token"}
 
-
-@pytest.fixture(autouse=True)
-def _isolated_throttle():
-    """限流账本 `_FAILS` 是模块级全局状态，每条用例都必须从空表开始。
-
-    不清的话，本文件（以及 Task 4-7 任何多打几次坏码的用例）留下的计数会累到
-    阈值上，把一个毫不相干的 assert 200 变成 429——那时绿就只是算术运气。
-    """
-    from app.core.auth_router import _FAILS
-
-    _FAILS.clear()
-    yield
-    _FAILS.clear()
+# 限流账本的清账 autouse fixture 在 conftest.py（整个套件共用，别再复制一份）。
 
 
 def _budget_used() -> int:

@@ -109,7 +109,8 @@ from app.web.web_router import mount_pwa
 # ---------- 创建 FastAPI 应用 ----------
 # 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
 # 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
-from app.core.authz import _auth_mode, docs_kwargs_for_mode, install_auth
+from app.core.authz import (_auth_mode, CurrentPrincipal, docs_kwargs_for_mode,
+                            install_auth, Principal)
 
 # 非 disabled 模式连文档路由都不生成（路由表本身就是侦察材料）
 app = FastAPI(
@@ -215,11 +216,14 @@ from app.core.providers import (store as provider_store, ProviderError, PRESETS,
 from app.core.uploads import store as upload_store, build_user_content, UploadError
 
 
-def _prepare_chat(request: ChatRequest):
+def _prepare_chat(request: ChatRequest, principal: Principal):
     """解析模型服务、拼装附件。
 
     返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本)。
     历史里只记原始文本加附件名，避免把整份文件塞进会话记录。
+
+    principal 一路传进来而不是在这里再取一次：附件归属必须由"谁在请求"决定，
+    请求里那个 attachments 列表只是别人塞进来的 id 集合。
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
@@ -231,29 +235,31 @@ def _prepare_chat(request: ChatRequest):
     raw = last.get("content")
     text = raw if isinstance(raw, str) else ChatPipeline.text_of(raw)
 
-    content = build_user_content(text, request.attachments, provider["supports_vision"])
+    content = build_user_content(text, request.attachments, provider["supports_vision"],
+                                 principal.user_id)
     messages[-1] = {**last, "content": content}
 
     history_text = text
     if request.attachments:
         names = "、".join(
-            (upload_store.get(a) or {}).get("name", a) for a in request.attachments)
+            (upload_store.get(a, owner=principal.user_id) or {}).get("name", a)
+            for a in request.attachments)
         history_text = (text + "\n" if text else "") + f"[附件] {names}"
 
     return provider, messages, history_text
 
 
 @app.post("/v1/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
     try:
-        provider, messages, user_text = _prepare_chat(request)
+        provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
         used_memory_ids = []
         if USE_PIPELINE:
-            result = ChatPipeline(user_id="default_user").process(
+            result = ChatPipeline(user_id=principal.user_id).process(
                 provider["model"], messages, provider_id=provider["id"])
             reply = result.get("reply", "")
             used_memory_ids = result.get("used_memory_ids") or []
@@ -270,8 +276,8 @@ async def chat(request: ChatRequest):
 
     message_id = str(uuid.uuid4())
     if request.session_id:
-        sessions_store.add_message(request.session_id, "user", user_text)
-        sessions_store.add_message(request.session_id, "assistant", reply,
+        sessions_store.add_message(request.session_id, principal.user_id, "user", user_text)
+        sessions_store.add_message(request.session_id, principal.user_id, "assistant", reply,
                                    message_id, used_memory_ids)
     return {"reply": reply, "message_id": message_id,
             "provider": provider["id"], "model": provider["model"]}
@@ -281,20 +287,21 @@ from fastapi.responses import StreamingResponse
 import json as json_module
 
 @app.post("/v1/chat/stream")
-async def stream_chat_endpoint(request: ChatRequest):
+async def stream_chat_endpoint(request: ChatRequest,
+                               principal: Principal = CurrentPrincipal):
     """流式聊天端点，返回 Server-Sent Events"""
     from app.core.streaming import stream_chat
 
     # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
     try:
-        provider, messages, user_text = _prepare_chat(request)
+        provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # 流式此前直接调 stream_chat、绕过 pipeline，因此既没注入记忆与偏好，
     # 也不会把本轮对话写回记忆。这里复用同一个 pipeline 实例补齐两者。
     used_memory_ids = []
-    pipe = ChatPipeline(user_id="default_user") if USE_PIPELINE else None
+    pipe = ChatPipeline(user_id=principal.user_id) if USE_PIPELINE else None
     if pipe is not None and messages:
         try:
             query_text = ChatPipeline.text_of(messages[-1].get("content"))
@@ -309,7 +316,8 @@ async def stream_chat_endpoint(request: ChatRequest):
 
         # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
         if request.session_id:
-            sessions_store.add_message(request.session_id, "user", user_text)
+            sessions_store.add_message(request.session_id, principal.user_id,
+                                       "user", user_text)
 
         full_text = ""
         try:
@@ -321,7 +329,8 @@ async def stream_chat_endpoint(request: ChatRequest):
             # 保存助手回复到会话（如果提供了 session_id）
             if request.session_id:
                 sessions_store.add_message(
-                    request.session_id, "assistant", full_text, message_id, used_memory_ids)
+                    request.session_id, principal.user_id, "assistant",
+                    full_text, message_id, used_memory_ids)
 
             # 把本轮问答写入长期记忆，与非流式路径保持一致
             if pipe is not None:
@@ -338,24 +347,30 @@ async def stream_chat_endpoint(request: ChatRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 # ---------- 会话管理 ----------
+# 归属只由 principal 推导：路由不接受任何来自 body/query/path 的 user_id 或
+# owner，否则"我是谁"就成了客户端说了算。
+# 非本人一律 404 而不是 403：403 等于承认这个 id 存在，session_id 是 uuid4，
+# 但只要有一次 403 漏出来，这个接口就成了"哪些会话真实存在"的探测器。
 @app.post("/v1/sessions")
-async def create_session(model: str = "deepseek-chat"):
-    return sessions_store.create(model)
+async def create_session(model: str = "deepseek-chat",
+                         principal: Principal = CurrentPrincipal):
+    return sessions_store.create(model, owner=principal.user_id)
 
 @app.get("/v1/sessions")
-async def list_sessions():
-    return {"sessions": sessions_store.list_summaries()}
+async def list_sessions(principal: Principal = CurrentPrincipal):
+    return {"sessions": sessions_store.list_summaries(principal.user_id)}
 
 @app.get("/v1/sessions/{session_id}")
-async def get_session(session_id: str):
-    session = sessions_store.get(session_id)
+async def get_session(session_id: str, principal: Principal = CurrentPrincipal):
+    session = sessions_store.get(session_id, owner=principal.user_id)
     if session is None:
+        # 404 而非 403：403 等于承认这个 id 存在，可以被拿来枚举
         raise HTTPException(status_code=404, detail="会话不存在")
     return session
 
 @app.delete("/v1/sessions/{session_id}")
-async def delete_session(session_id: str):
-    if sessions_store.delete(session_id):
+async def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
+    if sessions_store.delete(session_id, owner=principal.user_id):
         return {"status": "deleted", "session_id": session_id}
     raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -363,9 +378,10 @@ class SessionMessagesRequest(BaseModel):
     messages: List[Dict[str, Any]] = []
 
 @app.put("/v1/sessions/{session_id}/messages")
-async def replace_session_messages(session_id: str, req: SessionMessagesRequest):
+async def replace_session_messages(session_id: str, req: SessionMessagesRequest,
+                                   principal: Principal = CurrentPrincipal):
     """整体替换会话消息，使前端编辑/删除/重新生成后的视图与后端一致。"""
-    if not sessions_store.replace(session_id, req.messages):
+    if not sessions_store.replace(session_id, principal.user_id, req.messages):
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
 
@@ -454,24 +470,28 @@ async def test_provider_draft(req: ProviderRequest):
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")
-async def upload_attachment(file: UploadFile = File(...)):
+async def upload_attachment(file: UploadFile = File(...),
+                            principal: Principal = CurrentPrincipal):
     blob = await file.read()
     try:
-        record = upload_store.save(file.filename or "unnamed", blob, file.content_type or "")
+        record = upload_store.save(file.filename or "unnamed", blob,
+                                   file.content_type or "", owner=principal.user_id)
     except UploadError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return record
 
 @app.get("/v1/uploads/{upload_id}/file")
-async def download_attachment(upload_id: str):
-    record = upload_store.get(upload_id)
+async def download_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+    # 附件是别人传的账单和论文。非属主给 404，不给 403：后者会把"id 存在"这件事
+    # 白送出去，而 id 只有 16 位十六进制。
+    record = upload_store.get(upload_id, owner=principal.user_id)
     if record is None:
         raise HTTPException(status_code=404, detail="附件不存在或已清理")
     return FileResponse(record["path"], media_type=record["mime"], filename=record["name"])
 
 @app.delete("/v1/uploads/{upload_id}")
-async def delete_attachment(upload_id: str):
-    if upload_store.delete(upload_id):
+async def delete_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+    if upload_store.delete(upload_id, owner=principal.user_id):
         return {"status": "deleted", "id": upload_id}
     raise HTTPException(status_code=404, detail="附件不存在")
 
@@ -480,11 +500,16 @@ FEEDBACK_WEIGHT_STEP = 0.1
 
 
 @app.post("/v1/feedback")
-async def submit_feedback(feedback: FeedbackRequest):
+async def submit_feedback(feedback: FeedbackRequest,
+                          principal: Principal = CurrentPrincipal):
     """记录反馈，并立刻把它作用回系统。
 
     此前反馈只落盘到 feedback.json 和一份无人读取的 preference.txt，对模型行为
     零影响；这里改为真正闭环：调整本次回答所用记忆的权重 + 即时刷新偏好摘要。
+
+    反查 message_id 必须带上归属：反馈调的是"这条回答所用记忆"的权重，而那些
+    记忆属于答题的那个人，谁都能拿别人的 message_id 来踩一脚，就等于替别人
+    改写他的记忆。
     """
     from app.memory.memory_router import memory_manager
 
@@ -496,7 +521,7 @@ async def submit_feedback(feedback: FeedbackRequest):
         raise HTTPException(status_code=500, detail=f"反馈保存失败：{e}")
 
     adjusted = []
-    located = sessions_store.find_message(feedback.message_id)
+    located = sessions_store.find_message(feedback.message_id, principal.user_id)
     memory_ids = (located or {}).get("message", {}).get("memory_ids") or []
     if memory_ids and memory_manager is not None:
         delta = FEEDBACK_WEIGHT_STEP if feedback.rating > 0 else -FEEDBACK_WEIGHT_STEP
