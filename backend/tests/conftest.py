@@ -16,9 +16,16 @@ if str(backend_path) not in sys.path:
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="ai-assistant-tests-")
 os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 
-# .env 里若配了 ACCESS_TOKEN，load_dotenv 会让鉴权中间件把所有接口测试挡成 401。
-# 鉴权行为由 test_auth.py 用 monkeypatch 单独覆盖，这里统一置空。
+# 测试统一以"本机管理员"运行：既无需真凭据，也保持既有断言不变。
+# 鉴权本身的分支（401/403/503/enabled）由 test_authz_failclosed.py 与
+# enforced_client 覆盖。
+os.environ["AUTH_MODE"] = "disabled"
 os.environ["ACCESS_TOKEN"] = ""
+
+# 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
+# data/users.json —— 那是越出本次改动范围的外部副作用。
+os.environ["USERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "users.json")
+os.environ["INVITES_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "invites.json")
 
 # 测试不得真调付费模型：预置一个假 provider，并把附件目录指向临时路径。
 os.environ["PROVIDERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "providers.json")
@@ -105,3 +112,28 @@ def client():
 @pytest.fixture
 def sample_messages():
     return [{"role": "user", "content": "你好"}]
+
+
+@pytest.fixture
+def enforced(monkeypatch, tmp_path):
+    """真实鉴权路径。
+
+    全局 client 是 disabled 模式，人人都是本机管理员，在那里断言"普通用户
+    拿到 403"等于什么都没测。模式已改为请求期读 env，所以只需换 env 与身份库。
+    """
+    from app.core.auth import AuthStore
+    import app.core.authz as authz
+
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+    monkeypatch.setattr(authz, "auth_store", store)
+    monkeypatch.setenv("AUTH_MODE", "enforced")
+    monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
+
+    def as_user(username):
+        """注册一个普通用户，返回携带其令牌的请求头。"""
+        code = store.create_invite("admin")
+        _, token = store.register(code=code, username=username)
+        return {"Authorization": "Bearer " + token}
+
+    return as_user

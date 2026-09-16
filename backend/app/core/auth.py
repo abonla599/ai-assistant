@@ -24,6 +24,9 @@ ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 RESERVED_NAMES = {"admin", "default_user"}
 USERNAME_MAX = 24
 
+# bootstrap 管理员口令的 env 名：authz 与 main 共用这一个，别再各写一份字面量
+BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
+
 # last_used_at 只是运维参考信息，不值地为每一次鉴权重写两个文件：磁盘满、
 # 或 Windows 上文件被编辑器/杀软/同步盘锁住时，热路径上的写会把一枚有效令牌
 # 变成 500。内存里照常刷新，落盘按这个阈值降频。

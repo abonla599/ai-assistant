@@ -9,7 +9,6 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-import secrets
 import uuid
 import threading
 import time
@@ -18,7 +17,6 @@ from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 import ssl
@@ -105,11 +103,16 @@ from app.memory.memory_router import router as memory_router
 from app.web.web_router import mount_pwa
 
 # ---------- 创建 FastAPI 应用 ----------
+_app_kwargs = {}
+if os.getenv("AUTH_MODE", "enforced").strip().lower() != "disabled":
+    # 路由表本身就是侦察材料，对外一律不给 openapi
+    _app_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
 app = FastAPI(
     title="AI 智能助手",
     description="多模型、工具调用、记忆管理的智能助手系统",
     version="1.0.0",
-    lifespan=lifespan  # 注册 lifespan
+    lifespan=lifespan,  # 注册 lifespan
+    **_app_kwargs
 )
 
 # 注册记忆路由（优先使用 Router 中的端点）
@@ -119,33 +122,10 @@ app.include_router(memory_router)
 mount_pwa(app)
 
 # ---------- 访问鉴权 ----------
-# 服务经隧道暴露到公网时，没有口令就等于给出不记名的模型调用代理。
-# 未设置 ACCESS_TOKEN 时保持开放，兼容本机开发与测试。
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "").strip()
-_PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
+# 身份规则见 app/core/authz.py。这里只负责装上。
+from app.core.authz import install_auth
 
-@app.middleware("http")
-async def require_access_token(request, call_next):
-    if not ACCESS_TOKEN:
-        return await call_next(request)
-
-    path = request.url.path
-    if request.method == "OPTIONS" or not path.startswith(_PROTECTED_PREFIXES):
-        return await call_next(request)
-
-    supplied = request.headers.get("authorization", "").strip()
-    scheme, _, credential = supplied.partition(" ")
-    # 认证方案名大小写不敏感（RFC 7235）；未写方案名时整值即口令
-    if not credential and scheme:
-        credential = scheme
-    elif scheme.lower() not in ("bearer", "token"):
-        credential = ""
-    if not credential:
-        credential = request.headers.get("x-access-token", "").strip()
-
-    if not secrets.compare_digest(credential, ACCESS_TOKEN):
-        return JSONResponse(status_code=401, content={"detail": "缺少或错误的访问口令"})
-    return await call_next(request)
+install_auth(app)
 
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):
