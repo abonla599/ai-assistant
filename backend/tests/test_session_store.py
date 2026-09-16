@@ -86,3 +86,26 @@ def test_delete_removes_persisted_session(tmp_path):
     reopened = SessionStore(path)
     assert reopened.get(sid, owner=OWNER) is None
     assert sid not in json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def test_public_projection_matches_the_list_and_hides_owner(tmp_path):
+    """对外字段只有一份白名单，详情 = 列表字段 + messages。
+
+    三条读路径原先各说各话：list_summaries 有白名单、uploads 有 public()、会话
+    详情直接返回整条记录（含 owner）。白名单分成两份就一定会漂移，所以这里断的
+    是"两份的差集恰好只有 messages"——往任一侧加字段而不加另一侧，当场变红。
+    """
+    path = str(tmp_path / "sessions.json")
+    store = SessionStore(path)
+    sid = store.create("deepseek-chat", owner=OWNER)["session_id"]
+    store.add_message(sid, OWNER, "user", "你好")
+    store.add_message(sid, OWNER, "assistant", "在的", "m-1", ["mem-1"])
+
+    detail = store.public(store.get(sid, owner=OWNER))
+    assert "owner" not in detail, "归属是存储内部字段，不是对客户端的承诺"
+    summary = store.list_summaries(OWNER)[0]
+    assert set(detail) - set(summary) == {"messages"}, f"两份白名单漂移了：{sorted(detail)}"
+    assert detail["messages"] == [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "在的", "message_id": "m-1",
+         "memory_ids": ["mem-1"]}], "投影只筛字段，不许改内容"

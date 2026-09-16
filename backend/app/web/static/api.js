@@ -4,10 +4,24 @@
 "use strict";
 
 const API = (() => {
-  /** 访问口令仅存本机，不写入代码或仓库 */
+  /** 令牌只存本机，不写入代码或仓库。
+   * 它的语义在邀请码注册之后变了：不再是"共用一把访问口令"，而是服务端签发给
+   * 这个人的个人令牌（管理员可单独撤销）。手工填口令那条路仍然通——那是
+   * 本机直跑服务的管理员入口。
+   */
   function authHeaders() {
     const token = localStorage.getItem("accessToken");
     return token ? { Authorization: "Bearer " + token } : {};
+  }
+
+  /* 记忆检索的条数上限，与后端 SearchMemoryRequest.top_k 的 le=20 同源
+   * （test_web_pwa 会把这两个数字对一次）。越过上限不是"少给几条"，而是整个
+   * 请求 422：搜索框看上去就是坏的。所以在这里夹回来，宁可少给也要有结果。
+   */
+  const MEMORY_TOP_K_MAX = 20;
+  function clampTopK(want) {
+    const n = Number(want) || 10;
+    return Math.min(MEMORY_TOP_K_MAX, Math.max(1, n));
   }
 
   async function parseError(res) {
@@ -105,10 +119,20 @@ const API = (() => {
   }
 
   return {
+    /* 身份：注册拿到的是只此一次回显的个人令牌，之后一切请求都靠它。
+     * me() 是前端唯一的"我到底是谁"来源——角色不能靠猜，猜错就把 403 按钮留在页面上。
+     */
+    register: (code, username) =>
+      request("/v1/auth/register", { method: "POST", body: { code, username } }),
+    me: () => request("/v1/auth/me"),
+
     models: () => request("/v1/models"),
     upload,
     fileBlobUrl,
 
+    /* 模型服务配置：整个这一面都是管理员端点（能改所有人的上游）。
+     * 普通用户拿 403，所以 app.js 按角色把入口收起来，不发这一枪。
+     */
     providers: () => request("/v1/providers"),
     addProvider: (rec) => request("/v1/providers", { method: "POST", body: rec }),
     updateProvider: (id, rec) => request("/v1/providers/" + encodeURIComponent(id), { method: "PUT", body: rec }),
@@ -132,10 +156,11 @@ const API = (() => {
     listMemory: (limit = 50) =>
       request(`/v1/memory/list?limit=${limit}`),
     searchMemory: (query, topK = 10) =>
-      request("/v1/memory/search", { method: "POST", body: { query, top_k: topK } }),
+      request("/v1/memory/search", { method: "POST", body: { query, top_k: clampTopK(topK) } }),
     deleteMemory: (memoryIds) =>
       request("/v1/memory/delete", { method: "DELETE", body: { memory_ids: memoryIds } }),
-    // 全库统计是管理员端点：普通用户拿到 403，调用处需按"不可用"处理
+    // 全库统计是管理员端点：调用前先看角色（app.js 的 isAdmin），
+    // 别把一个"你没权限"报成"服务挂了"。
     memoryStats: () => request("/v1/memory/stats"),
     feedback: (messageId, rating, comment) =>
       request("/v1/feedback", { method: "POST", body: { message_id: messageId, rating, comment } }),

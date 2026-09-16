@@ -89,3 +89,35 @@ def test_provider_draft_test_rejects_placeholder_key():
     assert res.status_code == 200
     assert res.json()["ok"] is False
     assert "API Key" in res.json()["detail"]
+
+
+def _guard_callables(route) -> set:
+    """路由依赖树里的可调用对象（含子依赖）。"""
+    found, stack = set(), [route.dependant]
+    while stack:
+        cur = stack.pop()
+        for sub in cur.dependencies:
+            found.add(sub.call)
+            stack.append(sub)
+    for dep in getattr(route, "dependencies", ()) or ():
+        if getattr(dep, "dependency", None) is not None:
+            found.add(dep.dependency)
+    return found
+
+
+def test_every_provider_route_is_admin_gated():
+    """路由表一侧：/v1/providers 之下每一条都必须挂 require_admin。
+
+    test_isolation 那 7 条断的是"普通用户拿到 403"，但它只看得到自己列出的那
+    几条路由：新加一条 `@app.post("/v1/providers/import")` 而只挂 CurrentPrincipal，
+    那里一条都不会红。这一条按真实路由表扫描，覆盖面由路径前缀决定而不是由清单决定。
+    """
+    from app.core.authz import require_admin
+
+    routes = [r for r in app.routes
+              if getattr(r, "path", "").startswith("/v1/providers")
+              and getattr(r, "dependant", None) is not None]
+    assert len(routes) >= 5, f"扫描本身大概坏了，只看到 {len(routes)} 条 providers 路由"
+    bare = [f"{sorted(r.methods - {'HEAD', 'OPTIONS'})} {r.path}" for r in routes
+            if require_admin not in _guard_callables(r)]
+    assert not bare, f"以下模型服务路由允许普通用户进入：{bare}"

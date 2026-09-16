@@ -26,7 +26,7 @@
 
       <nav class="sb-nav">
         <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
-        <button class="nav-item" id="navProviders"><span class="ni-ico">⌗</span>模型服务</button>
+        <button class="nav-item" id="navProviders" data-admin-only><span class="ni-ico">⌗</span>模型服务</button>
         <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
       </nav>
 
@@ -114,7 +114,7 @@
     <div class="modal-card">
       <div class="modal-head">
         <div class="tabs" id="settingsTabs">
-          <button class="tab" data-tab="providers">模型服务</button>
+          <button class="tab" id="tabProviders" data-tab="providers" data-admin-only>模型服务</button>
           <button class="tab" data-tab="memory">长期记忆</button>
           <button class="tab" data-tab="persona">角色设定</button>
           <button class="tab" data-tab="conn">连接</button>
@@ -124,8 +124,9 @@
       </div>
 
       <div class="modal-body">
-        <!-- 模型服务 -->
-        <section class="pane" data-pane="providers">
+        <!-- 模型服务：整块都是管理员专属（后端 7 条路由都要求管理员），
+             data-admin-only 让 app.js 在拿到角色后统一收起 -->
+        <section class="pane" data-pane="providers" id="paneProviders" data-admin-only>
           <p class="pane-note">界面里的模型下拉、以及实际调用哪个模型，都来自下面这份配置。改这一处即可接入任意 OpenAI 兼容服务（DeepSeek、阿里云百炼 Qwen、OpenAI 等）。</p>
           <div id="providerList" class="prov-list"></div>
           <button class="btn btn-block" id="addProviderBtn">＋ 添加模型服务</button>
@@ -186,9 +187,19 @@
 
         <!-- 连接 -->
         <section class="pane" data-pane="conn">
-          <p class="pane-note">服务端开启 ACCESS_TOKEN 后，所有接口都需要口令。口令只保存在本机浏览器，不会写进代码或仓库。</p>
+          <p class="pane-note">向管理员索取一枚邀请码，在下面注册即可使用。令牌由服务端签发、
+            只存在本机浏览器；管理员撤销或轮换之后旧令牌立即失效，重新注册一次就好。
+            各人的会话、附件与记忆互相看不到。</p>
+          <p class="pane-note" id="whoInfo">未登录</p>
+          <div class="row" id="registerRow">
+            <input id="regUsername" type="text" placeholder="用户名" autocomplete="off">
+            <input id="regCode" type="text" placeholder="邀请码，如 AB2C-DEF4" autocomplete="off">
+            <button class="btn btn-primary" id="registerBtn">注册并登录</button>
+          </div>
+          <p class="pane-note" id="registerHint"></p>
+          <p class="pane-note">已有令牌（管理员手工签发的访问口令）：直接填入并保存。</p>
           <div class="row">
-            <input id="tokenInput" type="password" placeholder="访问口令" autocomplete="off">
+            <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
             <button class="btn btn-primary" id="saveTokenBtn">保存</button>
           </div>
           <p class="pane-note" id="connInfo"></p>

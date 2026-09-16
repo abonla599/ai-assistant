@@ -139,18 +139,35 @@ class SessionStore:
             self._flush()
         return {"session_id": session_id, "created_at": now}
 
+    # 对外字段白名单。owner 不在其中：归属是存储内部实现，不是对客户端的承诺，
+    # 而它原先会被 GET /v1/sessions/{id} 原样回显（列表侧一直有白名单）。
+    SUMMARY_FIELDS = ("session_id", "title", "created_at", "model")
+    _OUT_DEFAULTS = {"session_id": "", "title": "新对话", "created_at": "", "model": ""}
+
+    @classmethod
+    def _summary(cls, session_id: str, record: dict) -> dict:
+        """列表与详情共用的那半份对外字段——白名单只有这一处。"""
+        out = {key: record.get(key, cls._OUT_DEFAULTS[key]) for key in cls.SUMMARY_FIELDS}
+        # 索引里的 key 才是权威 id：回填前的老记录可能压根没写 session_id 字段
+        out["session_id"] = session_id or out["session_id"]
+        return out
+
+    @classmethod
+    def public(cls, record: dict) -> dict:
+        """会话详情的对外形状 = 列表字段 + messages，仅此而已。
+
+        投影放在存储里而不是路由里，是为了让"哪些字段能出门"只有一处可改；
+        uploads 那边早就是这个形状（`store.public(record)`）。
+        """
+        out = cls._summary("", record)
+        out["messages"] = record.get("messages", [])
+        return out
+
     def list_summaries(self, owner: str) -> list:
         with self._lock:
-            summaries = [
-                {
-                    "session_id": sid,
-                    "title": data.get("title", "新对话"),
-                    "created_at": data.get("created_at", ""),
-                    "model": data.get("model", ""),
-                }
-                for sid, data in self._sessions.items()
-                if data.get("owner") == owner
-            ]
+            summaries = [self._summary(sid, data)
+                         for sid, data in self._sessions.items()
+                         if data.get("owner") == owner]
         summaries.sort(key=lambda x: x["created_at"], reverse=True)
         return summaries
 

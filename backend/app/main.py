@@ -403,7 +403,9 @@ async def get_session(session_id: str, principal: Principal = CurrentPrincipal):
     if session is None:
         # 404 而非 403：403 等于承认这个 id 存在，可以被拿来枚举
         raise HTTPException(status_code=404, detail="会话不存在")
-    return session
+    # 投影而不是裸记录：owner 是存储内部字段，列表侧早有白名单，详情没有就等于
+    # 三条读路径各说各话，下一个加字段的人只能猜该抄哪一条。
+    return sessions_store.public(session)
 
 @app.delete("/v1/sessions/{session_id}")
 async def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
@@ -443,17 +445,15 @@ async def list_models(_: Principal = CurrentPrincipal):
     }
 
 # ---------- 模型服务（Provider）配置 ----------
-# 这一面补上了身份依赖，但角色仍留 user。理由要说准，别写成一个不存在的威胁模型：
-# 补身份**不是**为了挡住匿名枚举——install_auth 的中间件挂在路由之前，非公开的
-# /v1 路径一律先 401（见 authz._PROTECTED_PREFIXES 与
-# tests/test_route_auth_contract.py::test_no_protected_route_is_reachable_without_credentials），
-# provider id、base_url 与密钥掩码对没凭据的人本来就不可见。这条依赖买到的是另外
-# 三件事：1) 路由契约要求每条 /v1 路由声明身份，不声明就红；2) 身份从此在端点手里，
-# Task 7 做按人隔离时不必再补一轮；3) 纵深防御——受保护前缀哪天收窄、中间件挂载
-# 顺序哪天被人动过，锁就不止一把（websocket 握手已经是一个中间件管不到的例子）。
-# 角色不动是因为写侧升级是 Task 7 明写的活（"providers 转管理员 + 前端注册界面"）：
-# 改默认 provider 会全站换上游，属于越权通道，但前端设置页现在就摆在 /app 里给
-# 普通用户用，只改后端等于把那个页面打成 403，得连着界面一起改。
+# 这一面补上了身份依赖，且角色已收归管理员。写侧升级是 Task 7 明写的活：
+# 改默认 provider、改 base_url 或塞进一把密钥，就把**所有人**的对话改道到攻击者
+# 指定的上游——那是跨用户外泄通道，不是"他能看到别人的会话"那种局部越权。
+# 邀请码人人可换（Task 3），所以"注册用户"在这道门前不含任何信任量。
+# 身份依赖本身仍然保留，理由与 /v1/models 那条一样：路由契约要求每条 /v1 路由声明
+# 身份；install_auth 的中间件之外多一把锁（受保护前缀哪天收窄、挂载顺序哪天被动过，
+# 锁不至于只有一把）；将来要按人记账时身份已经在手里。
+# 前端（/app 的设置页）配合收起这些入口，但那只是不让普通用户点到一个必然 403 的
+# 按钮：手搓请求仍旧由这里的依赖拒绝，界面从来不是边界。
 class ProviderRequest(BaseModel):
     id: Optional[str] = None
     label: str
@@ -464,12 +464,12 @@ class ProviderRequest(BaseModel):
     is_default: bool = False
 
 @app.get("/v1/providers")
-async def list_providers(_: Principal = CurrentPrincipal):
+async def list_providers(_: Principal = RequireAdmin):
     # 绝不返回明文密钥，只给掩码与"是否已配置"
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
-async def add_provider(req: ProviderRequest, _: Principal = CurrentPrincipal):
+async def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
@@ -478,7 +478,7 @@ async def add_provider(req: ProviderRequest, _: Principal = CurrentPrincipal):
 
 @app.put("/v1/providers/{provider_id}")
 async def update_provider(provider_id: str, req: ProviderRequest,
-                          _: Principal = CurrentPrincipal):
+                          _: Principal = RequireAdmin):
     record = req.model_dump()
     record["id"] = provider_id
     try:
@@ -488,19 +488,19 @@ async def update_provider(provider_id: str, req: ProviderRequest,
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/providers/{provider_id}")
-async def remove_provider(provider_id: str, _: Principal = CurrentPrincipal):
+async def remove_provider(provider_id: str, _: Principal = RequireAdmin):
     if provider_store.delete(provider_id):
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
-async def set_default_provider(provider_id: str, _: Principal = CurrentPrincipal):
+async def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
     if provider_store.set_default(provider_id):
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/test")
-async def test_provider(provider_id: str, _: Principal = CurrentPrincipal):
+async def test_provider(provider_id: str, _: Principal = RequireAdmin):
     """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。"""
     try:
         return provider_store.ping(provider_id)
@@ -508,7 +508,7 @@ async def test_provider(provider_id: str, _: Principal = CurrentPrincipal):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/v1/providers/test")
-async def test_provider_draft(req: ProviderRequest, _: Principal = CurrentPrincipal):
+async def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())

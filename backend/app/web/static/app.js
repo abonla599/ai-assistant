@@ -19,11 +19,14 @@ const pref = {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   },
   set theme(v) { localStorage.setItem("theme", v); },
-  get userId() {
-    let id = localStorage.getItem("userId");
-    if (!id) { id = "web_" + Math.random().toString(36).slice(2, 10); localStorage.setItem("userId", id); }
-    return id;
-  },
+  /* 身份两件套：令牌是 /v1/auth/register 签发的那一枚（或由管理员手工给出），
+   * userId 是服务端回的那个，不再是本机随机造的 web_xxxx——自造标识曾经既当
+   * "用户标识"显示在关于页里，又被人以为是后端认的身份。
+   */
+  get token() { return localStorage.getItem("accessToken") || ""; },
+  set token(v) { v ? localStorage.setItem("accessToken", v) : localStorage.removeItem("accessToken"); },
+  get userId() { return localStorage.getItem("userId") || ""; },
+  set userId(v) { v ? localStorage.setItem("userId", v) : localStorage.removeItem("userId"); },
   persona(sessionId) { return localStorage.getItem("persona:" + sessionId) || ""; },
   setPersona(sessionId, text) {
     text ? localStorage.setItem("persona:" + sessionId, text) : localStorage.removeItem("persona:" + sessionId);
@@ -41,6 +44,7 @@ const state = {
   filter: "",
   memoryQuery: "",
   editingProvider: null,
+  me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -97,14 +101,51 @@ function safeFilename(text) {
   return (cleaned || "对话").slice(0, 40);
 }
 
-/** 接口返回 401 时引导到设置→连接，而不是笼统报"请求失败" */
-function needsToken(err) {
-  if (err && err.status === 401) {
-    setStatus("需要访问口令：请在「设置 → 连接」中填写", true);
-    openSettings("conn");
-    return true;
+/** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
+ *  - 本机压根没存过令牌：首启，该拿邀请码注册（「设置 → 连接」里就摆着注册框）；
+ *  - 存了却被服务端拒：管理员撤销或轮换过。这时叫他"填写口令"，他会反复重试
+ *    一枚已经作废的令牌，而真正要做的是重新注册。
+ * 403 不走这里：那是"身份是真的、角色不够"，改令牌没有用。
+ */
+function needsAuth(err) {
+  if (!err || err.status !== 401) return false;
+  setStatus(pref.token
+    ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），请在「设置 → 连接」重新注册"
+    : "还没有登录：请在「设置 → 连接」用邀请码注册", true);
+  openSettings("conn");
+  return true;
+}
+
+/* ---------------- 身份与角色 ----------------
+ * 角色只决定"看得见什么"，它从来不是边界：模型服务那 7 条路由在后端就是管理员
+ * 专属，手搓请求照样 403。这里把入口收起来，是为了不让普通用户点进一个只会报
+ * "需要管理员权限"的面板——那句话他自己解决不了，只会以为东西坏了。
+ */
+function isAdmin() {
+  return (state.me || {}).role === "admin";
+}
+
+async function loadWho() {
+  try {
+    state.me = await API.me();
+  } catch (e) {
+    state.me = null;
+    // 401/403 是"这台设备还没登录"这一种正常状态；其余（连不上、服务端没配凭据
+    // 的 503）得照原样抛出去，由 boot 说成后端连接问题。
+    if (e.status !== 401 && e.status !== 403) throw e;
   }
-  return false;
+  applyRole();
+  return state.me;
+}
+
+function applyRole() {
+  const admin = isAdmin();
+  document.querySelectorAll("[data-admin-only]")
+    .forEach((el) => el.classList.toggle("hidden", !admin));
+  $("whoInfo").textContent = state.me
+    ? `当前身份：${state.me.username}（${admin ? "管理员" : "普通用户"}）`
+    : "未登录：用邀请码注册，或直接把管理员给您的令牌填在下面";
+  if (!admin && $("paneProviders").classList.contains("active")) selectTab("conn");
 }
 
 /* ---------------- 模型服务 ---------------- */
@@ -116,8 +157,13 @@ async function loadModels() {
   const usable = state.providers.filter((p) => p.usable);
   if (!usable.length) {
     setConn(false, "没有可用的模型服务");
-    setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
-    openSettings("providers");
+    // 「模型服务」是管理员面：把普通用户推进那个页签，他只会对着 403 站着。
+    if (isAdmin()) {
+      setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
+      openSettings("providers");
+    } else {
+      setStatus("服务端还没有可用的模型，请联系管理员配置模型服务", true);
+    }
   } else {
     setConn(true, `${usable.length} 个模型可用`);
   }
@@ -520,7 +566,8 @@ function emptyState() {
   h.textContent = "开始一段对话";
   const p = document.createElement("p");
   p.textContent = "支持 Markdown 与代码高亮，可上传文本/代码和图片。"
-    + "模型在「设置 → 模型服务」里自行接入。";
+    + (isAdmin() ? "模型在「设置 → 模型服务」里自行接入。"
+                 : "用哪个模型由管理员在「模型服务」里配好，您只管聊。");
   el.append(img, h, p);
   return el;
 }
@@ -674,7 +721,7 @@ async function replaceMessages(list) {
   try {
     await API.replaceMessages(pref.sessionId, payload);
   } catch (e) {
-    if (!needsToken(e)) setStatus("同步到服务端失败：" + e.message, true);
+    if (!needsAuth(e)) setStatus("同步到服务端失败：" + e.message, true);
   }
 }
 
@@ -684,13 +731,17 @@ async function send(text) {
   if ((!text && !state.pending.length) || state.streaming) return;
 
   if (!currentProvider() || !currentProvider().usable) {
-    setStatus("当前没有可用模型，请在「设置 → 模型服务」中配置", true);
-    openSettings("providers");
+    if (isAdmin()) {
+      setStatus("当前没有可用模型，请在「设置 → 模型服务」中配置", true);
+      openSettings("providers");
+    } else {
+      setStatus("当前没有可用模型，请联系管理员配置模型服务", true);
+    }
     return;
   }
 
   try { await ensureSession(); }
-  catch (e) { if (!needsToken(e)) setStatus("会话创建失败：" + e.message, true); return; }
+  catch (e) { if (!needsAuth(e)) setStatus("会话创建失败：" + e.message, true); return; }
 
   const atts = state.pending.map((a) => ({ id: a.id, name: a.name, kind: a.kind, size: a.size, url: a.url }));
   state.messages.push({ role: "user", content: text, attachments: atts });
@@ -736,7 +787,7 @@ async function runStream(holder) {
       failed = true;
       holder.transient = true;
       holder.content = holder.content ? holder.content + "\n\n⚠️ " + e.message : "⚠️ " + e.message;
-      if (!needsToken(e)) setStatus(e.message, true);
+      if (!needsAuth(e)) setStatus(e.message, true);
     } else {
       try {
         const data = await API.chat({ model: providerId, provider: providerId,
@@ -747,7 +798,7 @@ async function runStream(holder) {
       } catch (e2) {
         failed = true;
         holder.transient = true;
-        if (needsToken(e2)) holder.content = "⚠️ " + e2.message;
+        if (needsAuth(e2)) holder.content = "⚠️ " + e2.message;
         else { holder.content = "⚠️ " + e2.message; setStatus(e2.message, true); }
       }
     }
@@ -788,13 +839,17 @@ async function sendFeedback(index, rating, btn) {
 /* ---------------- 设置面板 ---------------- */
 function openSettings(tab) {
   $("settings").classList.remove("hidden");
-  selectTab(tab || "providers");
-  if ((tab || "providers") === "memory") loadMemories();
-  if (tab === "about") loadAbout();
+  selectTab(tab || (isAdmin() ? "providers" : "conn"));   // 加载由 selectTab 一处负责
 }
 function closeSettings() { $("settings").classList.add("hidden"); }
 
 function selectTab(name) {
+  // 模型服务这一面对普通用户全是 403：入口平时已被 applyRole 收走，这里是第二道，
+  // 免得别处（默认页签、快捷键、角色切换后的旧状态）把他推进一个只会报错的表单。
+  if (name === "providers" && !isAdmin()) {
+    setStatus("模型服务只能由管理员配置，请联系管理员", true);
+    name = "conn";
+  }
   $("settingsTabs").querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   $("settings").querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
   if (name === "providers") loadProviders();
@@ -805,9 +860,8 @@ function selectTab(name) {
 }
 
 function syncConnPane() {
-  const saved = localStorage.getItem("accessToken") || "";
-  $("tokenInput").value = saved;
-  $("connInfo").textContent = `当前服务：${location.origin}　·　口令${saved ? "已设置" : "未设置"}`;
+  $("tokenInput").value = pref.token;
+  $("connInfo").textContent = `当前服务：${location.origin}　·　${pref.token ? "本机已存令牌" : "本机未存令牌"}`;
 }
 
 function emptyItem(text) {
@@ -821,8 +875,10 @@ async function loadMemories() {
   const ul = $("memoryList");
   ul.innerHTML = "";
   try {
+    // 20 = 后端肯给的条数上限（api.js 的 MEMORY_TOP_K_MAX，两处由测试对齐）。
+    // 以前这里发 30，后端 le=20 直接 422：搜索框永远是坏的，而看起来只是"没结果"。
     const data = state.memoryQuery
-      ? await API.searchMemory(state.memoryQuery, 30)
+      ? await API.searchMemory(state.memoryQuery, 20)
       : await API.listMemory(50);
     const items = data.memories || data.results || [];
     if (!items.length) {
@@ -850,19 +906,34 @@ async function loadMemories() {
       ul.appendChild(li);
     });
   } catch (e) {
-    ul.appendChild(emptyItem("记忆服务不可用：" + e.message));
+    ul.appendChild(emptyItem(memoryListErrorText(e)));
   }
+}
+
+/** "记忆服务不可用"是一句会让人去做错事的话：重启后端治不了没登录。 */
+function memoryListErrorText(e) {
+  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 连接」重新注册";
+  if (e.status === 403) return "这个账号没有读取记忆的权限，请找管理员确认";
+  return "记忆服务不可用：" + e.message;
 }
 
 async function loadAbout() {
   const dl = $("aboutInfo");
   dl.innerHTML = "";
-  const rows = [["界面", "PWA（同源托管，可添加到主屏幕）"], ["当前模型", (currentProvider() || {}).name || "未选择"]];
-  try {
-    const stats = await API.memoryStats();
-    rows.push(["记忆库", `${stats.collection_name || "-"} · ${stats.total_memories ?? "?"} 条`]);
-  } catch (e) { rows.push(["记忆库", "不可用：" + e.message]); }
-  rows.push(["用户标识", pref.userId], ["温度 / 上下文", `${pref.temperature} / ${pref.contextWindow} 条`]);
+  const rows = [["界面", "PWA（同源托管，可添加到主屏幕）"],
+                ["当前模型", (currentProvider() || {}).name || "未选择"],
+                ["登录身份", state.me
+                  ? `${state.me.username} · ${isAdmin() ? "管理员" : "普通用户"}`
+                  : "未登录"]];
+  // 全库统计是管理员端点：普通用户那儿的 403 不是"记忆服务坏了"，
+  // 所以这一枪根本不该发（他自己的条数在「长期记忆」页签里看得见）。
+  if (isAdmin()) {
+    try {
+      const stats = await API.memoryStats();
+      rows.push(["记忆库", `${stats.collection_name || "-"} · ${stats.total_memories ?? "?"} 条`]);
+    } catch (e) { rows.push(["记忆库", "读取失败：" + e.message]); }
+  }
+  rows.push(["温度 / 上下文", `${pref.temperature} / ${pref.contextWindow} 条`]);
   rows.forEach(([k, v]) => {
     const dt = document.createElement("dt"); dt.textContent = k;
     const dd = document.createElement("dd"); dd.textContent = v;
@@ -983,6 +1054,45 @@ function autosize(el) {
   el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + "px";
 }
 
+/* ---------------- 注册 ----------------
+ * 邀请码换一枚个人令牌：这一步之后，"我是谁"才由服务端说了算。
+ * 成功之后当场重取身份与数据——boot 那一次是在没有凭据的状态下跑的，模型清单
+ * 和会话列表全是 401；不重跑就得叫用户手动刷新一次页面才算注册成功。
+ */
+async function registerWithInvite() {
+  const hint = $("registerHint");
+  const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
+  hint.classList.remove("err");
+  const code = $("regCode").value.trim();
+  const username = $("regUsername").value.trim();
+  if (!code || !username) {
+    fail("邀请码和用户名都要填");
+    return;
+  }
+  hint.textContent = "注册中…";
+  let res;
+  try {
+    res = await API.register(code, username);
+  } catch (e) {
+    // 后端已经把原因说成人话了（邀请码无效 / 用户名已被占用），照实转述
+    fail("注册失败：" + e.message);
+    return;
+  }
+  pref.token = res.token;
+  pref.userId = res.user_id;
+  syncConnPane();
+  hint.textContent = `已登录为 ${res.username}，正在载入…`;
+  try {
+    await loadWho();
+    await loadServerData();
+    renderMessages();
+    hint.textContent = `已登录为 ${res.username}`;
+  } catch (e) {
+    fail(`已登录为 ${res.username}，刷新后生效`);
+    if (!needsAuth(e)) setStatus("数据载入失败：" + e.message, true);
+  }
+}
+
 /* ---------------- 事件绑定 ---------------- */
 function bind() {
   $("openSidebar").onclick = openSidebar;
@@ -997,7 +1107,8 @@ function bind() {
   $("modelSel").onchange = (e) => {
     const picked = state.providers.find((p) => p.id === e.target.value);
     if (picked && !picked.usable) {
-      setStatus("该模型未配置密钥，请先在「设置 → 模型服务」补全", true);
+      setStatus(isAdmin() ? "该模型未配置密钥，请先在「设置 → 模型服务」补全"
+                          : "该模型还没配好密钥，请联系管理员处理", true);
       e.target.value = pref.provider;
       return;
     }
@@ -1092,11 +1203,10 @@ function bind() {
   };
 
   $("saveTokenBtn").onclick = () => {
-    const value = $("tokenInput").value.trim();
-    if (value) localStorage.setItem("accessToken", value);
-    else localStorage.removeItem("accessToken");
-    location.reload();   // 让所有请求带上新口令（重跑 boot 会重复绑定事件）
+    pref.token = $("tokenInput").value.trim();
+    location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
   };
+  $("registerBtn").onclick = registerWithInvite;
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
@@ -1145,8 +1255,16 @@ async function restore() {
     await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   } catch (e) {
     if (e.status === 404) { pref.sessionId = ""; state.messages = []; }
-    else if (!needsToken(e)) setStatus("会话加载失败：" + e.message, true);
+    else if (!needsAuth(e)) setStatus("会话加载失败：" + e.message, true);
   }
+}
+
+/** 服务端数据的四步：注册成功、令牌变更后都要原样重跑一遍，不能只活在 boot 里。 */
+async function loadServerData() {
+  await loadModels();
+  await loadSessions();
+  await restore();
+  if (!pref.sessionId && currentProvider()) await ensureSession();
 }
 
 async function boot() {
@@ -1160,12 +1278,10 @@ async function boot() {
   $("ctxVal").textContent = pref.contextWindow;
 
   try {
-    await loadModels();
-    await loadSessions();
-    await restore();
-    if (!pref.sessionId && currentProvider()) await ensureSession();
+    await loadWho();          // 先知道自己是谁：角色决定下面哪些面存在、哪些按钮该收起来
+    await loadServerData();
   } catch (e) {
-    if (!needsToken(e)) {
+    if (!needsAuth(e)) {
       setConn(false, "无法连接后端");
       setStatus("后端连接失败：" + e.message, true);
     }

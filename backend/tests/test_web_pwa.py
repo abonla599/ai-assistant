@@ -188,3 +188,165 @@ def test_replace_session_messages_rejects_non_object_items():
     sid = client.post("/v1/sessions").json()["session_id"]
     res = client.put(f"/v1/sessions/{sid}/messages", json={"messages": ["不是对象"]})
     assert res.status_code == 422
+
+
+# ---------- Task 7：注册流与按角色收敛界面 ----------
+
+
+def _ids_with_attr(html: str, attr: str) -> set:
+    """带某个属性的标签的 id 集合（没有 id 的带这个属性的标签不计）。"""
+    out = set()
+    for tag in re.findall(r"<[^>]+>", html):
+        if attr not in tag:
+            continue
+        m = re.search(r'id="([^"]+)"', tag)
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def _function_body(src: str, name: str) -> str:
+    """取 `function name(...) { ... }` 的函数体（含末尾大括号）。
+
+    需要按函数断言顺序/措辞时用它：在整份 app.js 里 grep "注册" 这种词，
+    任何一处不相干的注释都能把它喂绿。
+    """
+    start = src.index(f"function {name}(") if f"function {name}(" in src else -1
+    if start < 0:
+        raise AssertionError(f"app.js 里没有 function {name}()——按角色分流的接线大概还没落地")
+    open_at = src.index("{", start)
+    depth = 0
+    for i in range(open_at, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_at:i + 1]
+    raise AssertionError(f"{name} 的大括号没闭合（或函数被截断）")
+
+
+def test_registration_ui_elements_wired():
+    """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    defined = set(re.findall(r'id="([^"]+)"', html))
+    for el in ("regCode", "regUsername", "registerBtn"):
+        assert f'$("{el}")' in js, f"app.js 引用了 #{el} 但 HTML 未定义"
+        assert el in defined
+
+
+def test_memory_calls_no_longer_send_user_id():
+    api = (STATIC / "api.js").read_text(encoding="utf-8")
+    assert "user_id" not in api, "记忆接口已不接受客户端身份"
+
+
+def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
+    """前后端字段名对不上是静默失败：后端 422，界面只说"注册失败"。
+
+    请求形状与 app.js 读的那几个响应键一起断，且响应是真的从 /v1/auth/register
+    拿的，不是照抄一份字典——改名（token→access_token 这种）当天就该红。
+    """
+    from app.core import authz as authz_mod
+    from app.core.auth_router import RegisterRequest
+
+    api = (STATIC / "api.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert set(RegisterRequest.model_fields) == {"code", "username"}
+    m = re.search(r"register:\s*\(([^)]*)\)\s*=>\s*request\(\"/v1/auth/register\"", api)
+    assert m, "api.js 的 register 封装形状变了，这条契约要重看"
+    assert [p.strip() for p in m.group(1).split(",")] == ["code", "username"]
+    assert re.search(r'\bme:\s*\(\)\s*=>\s*request\("/v1/auth/me"\)', api), \
+        "前端没有 me 封装：角色就只能靠猜"
+
+    enforced("发码的人")
+    code = authz_mod.auth_store.create_invite("admin")
+    res = client.post("/v1/auth/register", json={"code": code, "username": "字段名契约"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    for key in ("token", "user_id", "username"):
+        assert key in body, f"后端没回 {key}：{sorted(body)}"
+        assert f"res.{key}" in js, f"后端回的是 {key}，前端读的却是别的名字"
+
+
+def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
+    """providers 转管理员之后，普通用户点进「模型服务」就是一个 403。
+
+    约定是一条属性（data-admin-only）+ JS 里一处统一开关，而不是散落的 if：
+    以后新加管理员专属控件只要带上这条属性就自动纳入，不必再改 app.js，也
+    不会"改了三处漏一处"。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    marked = _ids_with_attr(html, "data-admin-only")
+    assert {"navProviders", "tabProviders"} <= marked, f"模型服务的入口没标出来：{sorted(marked)}"
+    assert 'querySelectorAll("[data-admin-only]")' in js, "app.js 没有统一按属性收口"
+    sweep = _function_body(js, "applyRole")
+    assert re.search(r'classList\.toggle\("hidden"', sweep), "收口没有真的隐藏元素"
+    assert "isAdmin()" in sweep
+
+
+def test_boot_learns_the_role_before_loading_server_data():
+    """角色得在第一次渲染之前拿到。
+
+    loadModels() 在没有可用模型时会直接把用户推进「设置 → 模型服务」，那条
+    分支按角色分流；me 晚一步回来，普通用户就仍然被领进一个必然 403 的页签。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    boot = _function_body(js, "boot")
+    assert "loadWho" in boot and "loadServerData" in boot
+    assert boot.index("loadWho") < boot.index("loadServerData"), \
+        "boot 先取身份再取数据，否则角色分流会慢一拍"
+
+
+def test_memory_search_stays_inside_the_backends_own_cap():
+    """搜索记忆原先发 topK=30，后端 SearchMemoryRequest.top_k 是 le=20 → 恒 422。
+
+    上限只写一处（api.js 的常量），并且是**从后端读出来比对**的，不是抄一份
+    数字：后端哪天收紧到 10，这条会红着提醒，而不是让用户再撞一次看不懂的报错。
+    超限的请求夹回上限，不原样发出去挨 422。
+    """
+    from app.memory.memory_router import SearchMemoryRequest
+
+    cap = SearchMemoryRequest.model_json_schema()["properties"]["top_k"]["maximum"]
+    api = (STATIC / "api.js").read_text(encoding="utf-8")
+    m = re.search(r"MEMORY_TOP_K_MAX\s*=\s*(\d+)", api)
+    assert m, "api.js 未声明 MEMORY_TOP_K_MAX：上限散落在各调用点，迟早和后端对不上"
+    assert int(m.group(1)) == cap, f"前端上限 {m.group(1)} ≠ 后端 le={cap}"
+    assert re.search(r"Math\.min\s*\([^)]*MEMORY_TOP_K_MAX", api), "没有夹紧，超限照发"
+
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    calls = re.findall(r"API\.searchMemory\(([^)]*)\)", js)
+    assert calls, "app.js 里的搜索调用点不见了"
+    for args in calls:
+        for n in re.findall(r"\b(\d+)\b", args):
+            assert int(n) <= cap, f"app.js 又要 {n} 条，超过后端上限 {cap} 就是 422"
+
+
+def test_memory_stats_is_queried_only_for_admins():
+    """/v1/memory/stats 是管理员端点：普通用户那儿不能发这一枪。
+
+    发出去的后果不是报错本身，而是那句"记忆服务不可用"——服务明明好着，只是
+    他没权限，用户于是去重启后端，而重启完全治不了这件事。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "loadAbout")
+    assert "memoryStats" in body, "关于页已经不读记忆统计了？那这条契约该删还是该改，得有人说清"
+    assert "isAdmin()" in body and body.index("isAdmin()") < body.index("memoryStats"), \
+        "统计请求没有按角色分流"
+
+
+def test_a_stale_token_does_not_read_like_a_first_run():
+    """401 有两种，糊成一句就把人支使去填一个已经填对的框。
+
+    本机压根没存过令牌 = 首启，该引导他注册；存过却被拒 = 管理员撤销或轮换过，
+    再说"请填写口令"就是让人反复重试同一个废令牌。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "needsAuth")
+    assert "需要访问口令" not in js, "旧的合并文案还在，两种 401 仍是一句话"
+    assert re.search(r"err\.status\s*[!=]==\s*401", body), "needsAuth 只该管 401：403 是身份够了、角色不够"
+    assert "403" not in body
+    assert re.search(r'pref\.token', body), "未按本机是否已有令牌分叉"
+    assert "失效" in body and "注册" in body, "两条分支的措辞都得在场"

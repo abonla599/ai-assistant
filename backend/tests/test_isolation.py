@@ -732,6 +732,21 @@ def test_stats_requires_admin(mem_api):
     assert client.get("/v1/memory/stats", headers=BOOT).status_code == 200
 
 
+@pytest.mark.parametrize("api", ["mem_api", "mem_api_real"])
+def test_search_above_the_cap_is_refused_before_the_store_is_touched(api, request):
+    """top_k 的闸门在请求模型上，与后端是假存储还是真 ChromaDB 无关。
+
+    前端的夹取（api.js 的 MEMORY_TOP_K_MAX）对着的就是这道门：越界不是"少给几
+    条"，而是整次搜索 422。两条后端各测一遍，免得又出现"守卫只写在假存储那条
+    路、线上照旧"的那种盲区。
+    """
+    client, ha, _ = request.getfixturevalue(api)
+    assert client.post("/v1/memory/search", json={"query": "在吗", "top_k": 20},
+                       headers=ha).status_code == 200
+    over = client.post("/v1/memory/search", json={"query": "在吗", "top_k": 30}, headers=ha)
+    assert over.status_code == 422, f"上限没有守住：{over.status_code} {over.text}"
+
+
 def test_old_list_path_can_no_longer_address_a_user(mem_api):
     """GET /v1/memory/list/{user_id} 换成 /v1/memory/list?limit=。
 
@@ -1097,4 +1112,57 @@ def test_feedback_rebuilds_only_the_callers_preference(client, enforced, tmp_pat
     assert "反馈消极" in pa.read_preference(a_uid), "他自己的反馈汇到他自己的摘要里"
     assert pa.read_preference(b_uid) == "", "B 读不到任何别人的结论"
     assert not admin_file.exists(), "别人的反馈不能写进那份共享的 preference.txt"
+
+
+# ---------- 模型服务配置：管理员专属 ----------
+
+PROVIDER_ROUTES = [
+    ("GET", "/v1/providers"),
+    ("POST", "/v1/providers"),
+    ("PUT", "/v1/providers/fake-model"),
+    ("DELETE", "/v1/providers/fake-model"),
+    ("POST", "/v1/providers/fake-model/default"),
+    ("POST", "/v1/providers/fake-model/test"),
+    ("POST", "/v1/providers/test"),
+]
+
+
+@pytest.mark.parametrize("method,path", PROVIDER_ROUTES)
+def test_non_admin_cannot_touch_providers(client, enforced, method, path):
+    """模型服务配置能改掉整个后端行为，必须管理员专属。
+
+    用 enforced fixture 而非全局 client：后者是 disabled 模式，人人都是管理员。
+    """
+    res = client.request(method, path, headers=enforced("普通用户"), json={})
+    assert res.status_code == 403, f"{method} {path} 竟然放行了"
+
+
+@pytest.mark.parametrize("method,path", PROVIDER_ROUTES)
+def test_the_admin_side_of_those_same_routes_still_opens(client, enforced, method, path):
+    """上一条的反面：7 条路由整体改成无条件 403 时，上一条照样全绿。
+
+    管理员（bootstrap 口令的持有者）仍然要能用设置页，这才是"只有普通用户被
+    收走"。路径里的 fake-model 换成不存在的 id，免得把 conftest 播种的那份
+    provider 真删掉——后面几百条用例都要靠它当默认模型。
+    """
+    path = path.replace("fake-model", "no-such-provider")
+    res = client.request(method, path, headers=BOOT, json={})
+    assert res.status_code != 403, (
+        f"管理员被挡在自己的模型服务之外：{method} {path} → {res.status_code} {res.text}")
+
+
+# ---------- 会话详情：存储内部字段不外泄 ----------
+
+def test_session_detail_does_not_echo_the_owner_field(client, enforced):
+    """GET /v1/sessions/{id} 必须与列表同形：owner 是存储内部字段。
+
+    危害本身不大（这条路由只对属主回话，他读到的只是自己的 id），不一致才是
+    问题——list_summaries 有字段白名单、uploads 有 public() 投影，唯独这里直接
+    返回整条记录。下一个人加字段时只能猜该抄哪一条，而猜错的代价是又漏一个。
+    """
+    me = enforced("看自己会话的人")
+    sid = client.post("/v1/sessions", headers=me).json()["session_id"]
+    body = client.get(f"/v1/sessions/{sid}", headers=me).json()
+    assert "owner" not in body, f"详情回显了存储内部字段：{sorted(body)}"
+    assert body["session_id"] == sid and body["messages"] == [], "投影不能把有用字段也夹掉"
 
