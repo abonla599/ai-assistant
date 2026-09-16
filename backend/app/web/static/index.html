@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#0e1013">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>AI 智能助手</title>
   <link rel="manifest" href="manifest.webmanifest">
@@ -14,7 +14,7 @@
 </head>
 <body>
   <div class="app">
-    <!-- 侧栏：会话管理 -->
+    <!-- 侧栏 -->
     <aside class="sidebar" id="sidebar">
       <div class="sb-head">
         <div class="brand">
@@ -24,17 +24,23 @@
         <button class="icon-btn only-mobile" id="closeSidebar" aria-label="关闭侧栏">×</button>
       </div>
 
-      <button class="btn btn-primary btn-block" id="newChatBtn">＋ 新对话</button>
+      <nav class="sb-nav">
+        <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
+        <button class="nav-item" id="navProviders"><span class="ni-ico">⌗</span>模型服务</button>
+        <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
+      </nav>
 
       <div class="search-box">
         <input id="sessionSearch" type="search" placeholder="搜索会话" autocomplete="off">
       </div>
 
+      <div class="sb-label">会话</div>
       <nav class="sb-list" id="sessionGroups" aria-label="会话列表"></nav>
 
       <div class="sb-foot">
-        <button class="btn btn-ghost" id="settingsBtn">⚙︎ 设置</button>
-        <button class="icon-btn" id="themeBtn" aria-label="切换主题" title="切换主题">◐</button>
+        <button class="btn btn-ghost btn-small" id="themeBtn">◐ 主题</button>
+        <span class="conn-dot" id="connDot" title="服务状态"></span>
+        <span class="conn-text" id="connText">连接中…</span>
       </div>
     </aside>
     <div class="backdrop" id="backdrop"></div>
@@ -52,15 +58,21 @@
       <section class="messages" id="messages" aria-live="polite"></section>
 
       <div class="composer">
+        <div class="att-row" id="attRow"></div>
         <div class="suggestions" id="suggestions"></div>
         <form class="input-card" id="chatForm">
           <textarea id="input" rows="1" placeholder="发消息，Shift + Enter 换行" autocomplete="off"></textarea>
           <div class="input-foot">
+            <button type="button" class="icon-btn" id="attachFileBtn" title="上传文本/代码文件" aria-label="添加文件">📎</button>
+            <button type="button" class="icon-btn" id="attachImageBtn" title="上传图片（需支持视觉的模型）" aria-label="添加图片">🖼</button>
             <span class="hint" id="statusHint"></span>
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
-            <button type="submit" class="btn btn-primary" id="sendBtn">发送</button>
+            <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
         </form>
+        <input type="file" id="filePicker" hidden multiple
+               accept=".txt,.md,.markdown,.py,.js,.ts,.json,.yaml,.yml,.csv,.tsv,.log,.ini,.cfg,.html,.css,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml">
+        <input type="file" id="imagePicker" hidden multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp">
       </div>
     </main>
   </div>
@@ -70,8 +82,8 @@
     <div class="modal-card">
       <div class="modal-head">
         <div class="tabs" id="settingsTabs">
-          <button class="tab active" data-tab="memory">长期记忆</button>
-          <button class="tab" data-tab="model">模型参数</button>
+          <button class="tab" data-tab="providers">模型服务</button>
+          <button class="tab" data-tab="memory">长期记忆</button>
           <button class="tab" data-tab="persona">角色设定</button>
           <button class="tab" data-tab="conn">连接</button>
           <button class="tab" data-tab="about">关于</button>
@@ -80,7 +92,44 @@
       </div>
 
       <div class="modal-body">
-        <section class="pane active" data-pane="memory">
+        <!-- 模型服务 -->
+        <section class="pane" data-pane="providers">
+          <p class="pane-note">界面里的模型下拉、以及实际调用哪个模型，都来自下面这份配置。改这一处即可接入任意 OpenAI 兼容服务（DeepSeek、阿里云百炼 Qwen、OpenAI 等）。</p>
+          <div id="providerList" class="prov-list"></div>
+          <button class="btn btn-block" id="addProviderBtn">＋ 添加模型服务</button>
+
+          <form class="prov-form hidden" id="provForm">
+            <input type="hidden" id="provId">
+            <div class="preset-row" id="presetRow"></div>
+            <label class="field"><span>显示名称</span><input id="provLabel" type="text" placeholder="例如 DeepSeek Chat" autocomplete="off"></label>
+            <label class="field"><span>Base URL</span><input id="provBase" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off"></label>
+            <label class="field"><span>API Key</span><input id="provKey" type="password" placeholder="留空则保留原密钥" autocomplete="off"></label>
+            <label class="field"><span>模型名</span><input id="provModel" type="text" placeholder="deepseek-chat / qwen-vl-max" autocomplete="off"></label>
+            <label class="check"><input id="provVision" type="checkbox"><span>该模型支持图片输入（视觉）</span></label>
+            <div class="row">
+              <button class="btn" type="button" id="provTestBtn">测试连通</button>
+              <button class="btn btn-primary" type="submit">保存</button>
+              <button class="btn btn-ghost" type="button" id="provCancelBtn">取消</button>
+            </div>
+            <p class="pane-note" id="provTestResult"></p>
+          </form>
+
+          <div class="params">
+            <label class="field">
+              <span>温度 temperature <b id="tempVal">0.7</b></span>
+              <input type="range" id="tempRange" min="0" max="2" step="0.1" value="0.7">
+              <em>越低越严谨，越高越发散。当前后端接口尚未透传该参数，仅作记录。</em>
+            </label>
+            <label class="field">
+              <span>携带上下文条数 <b id="ctxVal">10</b></span>
+              <input type="range" id="ctxRange" min="2" max="40" step="2" value="10">
+              <em>每次请求附带的历史消息数量，过长会超出模型上下文窗口</em>
+            </label>
+          </div>
+        </section>
+
+        <!-- 长期记忆 -->
+        <section class="pane" data-pane="memory">
           <p class="pane-note">记忆存在后端向量库里，按用户隔离、跨重启保留。对话中提到的事实可在此查看、搜索或删除。</p>
           <form class="row" id="memoryAddForm">
             <input id="memoryInput" type="text" placeholder="让助手记住一件事，例如：我叫张三" autocomplete="off">
@@ -93,20 +142,7 @@
           <ul class="mem-list" id="memoryList"></ul>
         </section>
 
-        <section class="pane" data-pane="model">
-          <label class="field">
-            <span>温度 temperature <b id="tempVal">0.7</b></span>
-            <input type="range" id="tempRange" min="0" max="2" step="0.1" value="0.7">
-            <em>越低越严谨，越高越发散</em>
-          </label>
-          <label class="field">
-            <span>携带上下文条数 <b id="ctxVal">10</b></span>
-            <input type="range" id="ctxRange" min="2" max="40" step="2" value="10">
-            <em>每次请求附带的历史消息数量</em>
-          </label>
-          <p class="pane-note" id="paramNote">参数保存在本机。当前后端接口尚未支持透传 temperature，此项在接口补齐前仅作记录。</p>
-        </section>
-
+        <!-- 角色设定 -->
         <section class="pane" data-pane="persona">
           <p class="pane-note">角色设定会作为系统提示词随每次请求发送，仅对当前会话生效，保存在本机。</p>
           <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
@@ -116,6 +152,7 @@
           </div>
         </section>
 
+        <!-- 连接 -->
         <section class="pane" data-pane="conn">
           <p class="pane-note">服务端开启 ACCESS_TOKEN 后，所有接口都需要口令。口令只保存在本机浏览器，不会写进代码或仓库。</p>
           <div class="row">
@@ -125,6 +162,7 @@
           <p class="pane-note" id="connInfo"></p>
         </section>
 
+        <!-- 关于 -->
         <section class="pane" data-pane="about">
           <dl class="about" id="aboutInfo"></dl>
         </section>
@@ -136,6 +174,7 @@
     <article class="msg">
       <div class="msg-role"></div>
       <div class="msg-body"></div>
+      <div class="msg-atts"></div>
       <div class="msg-tools">
         <button data-act="copy">复制</button>
         <button data-act="edit">编辑</button>

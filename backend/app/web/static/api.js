@@ -1,5 +1,5 @@
 /* 后端接口封装。一律使用相对路径：页面与 API 同源，
- * 手机通过局域网 IP 访问时无需任何地址配置。
+ * 手机通过任何地址（局域网 IP、隧道域名）访问都无需改前端配置。
  */
 "use strict";
 
@@ -8,6 +8,14 @@ const API = (() => {
   function authHeaders() {
     const token = localStorage.getItem("accessToken");
     return token ? { Authorization: "Bearer " + token } : {};
+  }
+
+  async function parseError(res) {
+    let detail = res.statusText || ("HTTP " + res.status);
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    const err = new Error(detail);
+    err.status = res.status;
+    return err;
   }
 
   async function request(path, { method = "GET", body, signal } = {}) {
@@ -20,29 +28,27 @@ const API = (() => {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) {
-      let detail = res.statusText || ("HTTP " + res.status);
-      try { detail = (await res.json()).detail || detail; } catch (_) {}
-      const err = new Error(detail);
-      err.status = res.status;
-      throw err;
-    }
+    if (!res.ok) throw await parseError(res);
     return res.status === 204 ? null : res.json();
   }
 
   /* 流式对话。POST 无法用 EventSource，故手工读流并按空行分帧。
    * 服务端 error 事件带 retryable=false：原因已给出，上层不应再重试。
    */
-  async function streamChat({ model, messages, sessionId, signal }, onChunk) {
+  async function streamChat({ model, provider, messages, attachments, sessionId, signal }, onChunk) {
     const res = await fetch("/v1/chat/stream", {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ model, messages, session_id: sessionId }),
+      body: JSON.stringify({
+        model, provider, messages,
+        attachments: attachments || [],
+        session_id: sessionId,
+      }),
     });
     if (!res.ok || !res.body) {
-      const err = new Error("流式接口不可用 (" + res.status + ")");
-      err.retryable = true;
+      const err = await parseError(res);
+      err.retryable = true;      // 通道层面失败，可退回非流式
       throw err;
     }
 
@@ -80,15 +86,43 @@ const API = (() => {
     return finished;
   }
 
+  /* 图片预览：浏览器不会为 <img> 带上 Authorization 头，
+   * 因此取回 blob 再造本地 URL，避免开了访问口令后缩略图全 401。
+   */
+  async function fileBlobUrl(uploadId) {
+    const res = await fetch(`/v1/uploads/${encodeURIComponent(uploadId)}/file`,
+      { headers: authHeaders() });
+    if (!res.ok) throw await parseError(res);
+    return URL.createObjectURL(await res.blob());
+  }
+
+  async function upload(file) {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const res = await fetch("/v1/uploads", { method: "POST", body: fd, headers: authHeaders() });
+    if (!res.ok) throw await parseError(res);   // 不设 Content-Type，交给浏览器带 boundary
+    return res.json();
+  }
+
   return {
     models: () => request("/v1/models"),
+    upload,
+    fileBlobUrl,
+
+    providers: () => request("/v1/providers"),
+    addProvider: (rec) => request("/v1/providers", { method: "POST", body: rec }),
+    updateProvider: (id, rec) => request("/v1/providers/" + encodeURIComponent(id), { method: "PUT", body: rec }),
+    deleteProvider: (id) => request("/v1/providers/" + encodeURIComponent(id), { method: "DELETE" }),
+    setDefaultProvider: (id) => request(`/v1/providers/${encodeURIComponent(id)}/default`, { method: "POST" }),
+    testProvider: (id) => request(`/v1/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),
+    testProviderDraft: (rec) => request("/v1/providers/test", { method: "POST", body: rec }),
+
     createSession: (model) => request("/v1/sessions?model=" + encodeURIComponent(model), { method: "POST" }),
     listSessions: () => request("/v1/sessions"),
     getSession: (id) => request("/v1/sessions/" + encodeURIComponent(id)),
     deleteSession: (id) => request("/v1/sessions/" + encodeURIComponent(id), { method: "DELETE" }),
     replaceMessages: (id, messages) =>
-      request("/v1/sessions/" + encodeURIComponent(id) + "/messages",
-        { method: "PUT", body: { messages } }),
+      request("/v1/sessions/" + encodeURIComponent(id) + "/messages", { method: "PUT", body: { messages } }),
     chat: (payload) => request("/v1/chat", { method: "POST", body: payload }),
     streamChat,
 

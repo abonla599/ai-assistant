@@ -13,6 +13,11 @@ import threading
 import uuid
 
 from openai import OpenAI
+from dotenv import load_dotenv
+
+# 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
+# 否则首次运行时读不到 DEEPSEEK_API_KEY、播种不出任何模型配置。
+load_dotenv()
 
 PLACEHOLDER_HINTS = ("your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme")
 
