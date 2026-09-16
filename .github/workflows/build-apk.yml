@@ -20,7 +20,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      # ubuntu-latest 镜像自带 Android SDK（ANDROID_HOME 已设好），无需再装。
+      # 之前多跑一步 android-actions/setup-android 反而把构建弄挂，故改为只做自检。
+      - name: Report preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
 
       # 仓库里没有 gradle-wrapper.jar（二进制），因此直接由 action 提供 gradle
       - uses: gradle/actions/setup-gradle@v4
@@ -28,7 +34,7 @@ jobs:
           gradle-version: "8.7"
 
       - name: Assemble debug APK
-        run: gradle -p android --no-daemon assembleDebug
+        run: gradle -p android --no-daemon --stacktrace assembleDebug
 
       - uses: actions/upload-artifact@v4
         with:
