@@ -1,0 +1,4 @@
+// 只用平台 WebView，不引 appcompat/material，APK 体积才能压到 1MB 量级
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}

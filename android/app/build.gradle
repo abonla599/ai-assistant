@@ -1,0 +1,42 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "xyz.fenever.assistant"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "xyz.fenever.assistant"
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        // 壳里只钉地址，不写任何口令：公开仓库的 Actions 产物任何人都能下载，
+        // 把 ACCESS_TOKEN 编进来等于把助手的付费调用额度公开送人。
+        // 口令仍由用户在「设置 → 连接」里填一次，存 WebView 的 localStorage。
+        buildConfigField "String", "APP_URL", "\"https://ai.fenever.xyz/app/\""
+    }
+
+    buildTypes {
+        debug {
+            // CI 出调试包：Android 自动用 debug keystore 签名，装上即用
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        // AGP 8 默认关掉 BuildConfig 生成，不开的话 BuildConfig.APP_URL 编译期即报错
+        buildConfig true
+    }
+}
+
+// 零第三方依赖：全部走平台 API，APK 体积只有一个壳该有的大小
