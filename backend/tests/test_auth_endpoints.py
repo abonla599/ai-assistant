@@ -225,16 +225,10 @@ def test_the_throttle_forgets_once_the_window_passes(monkeypatch):
     assert res.status_code == 200, res.text
 
 
-def test_trailing_slash_is_not_a_credential_free_door(client, enforced):
-    """PUBLIC_PATHS 精确匹配，带斜杠的变体先被中间件挡在凭据之外。
-
-    中间件在路由之前，所以它连"重定向到真实端点"的机会都没有——这一条钉的正是
-    放行判定用的是精确路径，不是前缀。
-    """
-    enforced("路人")   # 让 enforced 库里有身份，排除 503 这条与斜杠无关的通路
-    res = client.post("/v1/auth/register/", json={"code": "EEEE-EEEE", "username": "路人甲"})
-    assert res.status_code == 401, res.text
-    assert res.json()["detail"] == "缺少或错误的访问凭据"
+# 原先这里还有一条 test_trailing_slash_is_not_a_credential_free_door：它断的是
+# authz 中间件"精确匹配 PUBLIC_PATHS"，把 auth_router 整个摘掉它照样绿，测的从来
+# 不是注册端点。已挪到 tests/test_route_auth_contract.py，与公开面钉在一起；
+# 留在下面的这条才是注册端点自己的事（斜杠变体烧的是同一份限流预算）。
 
 
 def test_trailing_slash_cannot_dodge_the_throttle():
@@ -321,12 +315,9 @@ def test_no_admin_route_leaks_past_the_role_check(client, enforced, method, path
     assert res.status_code == 403, f"{method.upper()} {path} -> {res.status_code}"
 
 
-def test_admin_endpoints_are_not_reachable_without_credentials(client, enforced):
-    """403 的前提是有身份；没身份应当是 401，两者不能糊在一起。"""
-    # 先造一个身份，避免 _has_any_identity() 的 503 抢在 401 之前
-    enforced("垫底用户")
-    assert client.get("/v1/admin/users").status_code == 401
-    assert client.post("/v1/admin/invites", json={}).status_code == 401
+# 原先这里还有一条 test_admin_endpoints_are_not_reachable_without_credentials：
+# 401 是中间件在路由之前发的，把 auth_router 摘掉它仍然绿，所以它守的是"凭据先于
+# 路由"这条中间件性质，不是管理端点。已挪到 tests/test_route_auth_contract.py。
 
 
 # ---------- 管理端：邀请码 ----------
@@ -460,7 +451,20 @@ def test_rotate_keeps_a_disabled_user_disabled():
     assert row["disabled"] is True
 
 
-def test_unknown_user_is_404_on_every_user_route():
+def test_unknown_user_is_404_because_it_is_absent_not_because_the_route_is_gone():
+    """404 只在"同一条路对真用户回 200"的前提下才有意义。
+
+    原先这里只断四个 404：把 auth_router 整个摘掉，每条路由都改成"路由不存在"的
+    404，测试照样全绿——那不是断言，是巧合。所以先用一个真用户把这四条路走活，
+    再要求不存在的 id 得到同一个 404（而不是 403/500，那才是要防的泄露）。
+    """
+    created, _ = _register("四条路都走一遍")
+    uid = created["user_id"]
+    assert client.post(f"/v1/admin/users/{uid}/disable").status_code == 200
+    assert client.post(f"/v1/admin/users/{uid}/enable").status_code == 200
+    assert client.post(f"/v1/admin/users/{uid}/rotate-token").status_code == 200
+    assert client.delete(f"/v1/admin/users/{uid}").status_code == 200
+
     for path in ("/v1/admin/users/u_none/disable", "/v1/admin/users/u_none/enable",
                  "/v1/admin/users/u_none/rotate-token"):
         assert client.post(path).status_code == 404, path

@@ -116,7 +116,7 @@ from app.web.web_router import mount_pwa
 # 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
 # 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
 from app.core.authz import (_auth_mode, CurrentPrincipal, docs_kwargs_for_mode,
-                            install_auth, Principal)
+                            install_auth, Principal, RequireAdmin)
 
 # 非 disabled 模式连文档路由都不生成（路由表本身就是侦察材料）
 app = FastAPI(
@@ -427,7 +427,14 @@ from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
 @app.get("/v1/models")
-async def list_models():
+async def list_models(_: Principal = CurrentPrincipal):
+    """模型清单：前端那个下拉就靠它渲染。
+
+    身份在这里刻意不用取名（catalog() 是全站视图），挂上它只为两件事：
+    "这台机器接了哪些上游"本身就是对外侦察材料，不该由没凭据的人读到；
+    而路由契约（tests/test_route_auth_contract.py）不接受任何 /v1 端点没有身份。
+    key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
+    """
     return {
         "models": provider_store.catalog(),
         "default": (provider_store.default() or {}).get("id"),
@@ -435,6 +442,11 @@ async def list_models():
     }
 
 # ---------- 模型服务（Provider）配置 ----------
+# 这一面先补上身份（Task 6 的契约要求每条 /v1 路由都声明身份：没有它，任何人
+# 不带凭据就能枚举 provider id、base_url 与密钥掩码），但角色仍留 user——
+# 写侧升级为管理员是 Task 7 的活（"providers 转管理员 + 前端注册界面"）：
+# 改默认 provider 会全站换上游，属于越权通道，但前端设置页现在就摆在
+# /app 里给普通用户用，只改后端等于把那个页面打成 403，得连着界面一起改。
 class ProviderRequest(BaseModel):
     id: Optional[str] = None
     label: str
@@ -445,12 +457,12 @@ class ProviderRequest(BaseModel):
     is_default: bool = False
 
 @app.get("/v1/providers")
-async def list_providers():
+async def list_providers(_: Principal = CurrentPrincipal):
     # 绝不返回明文密钥，只给掩码与"是否已配置"
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
-async def add_provider(req: ProviderRequest):
+async def add_provider(req: ProviderRequest, _: Principal = CurrentPrincipal):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
@@ -458,7 +470,8 @@ async def add_provider(req: ProviderRequest):
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.put("/v1/providers/{provider_id}")
-async def update_provider(provider_id: str, req: ProviderRequest):
+async def update_provider(provider_id: str, req: ProviderRequest,
+                          _: Principal = CurrentPrincipal):
     record = req.model_dump()
     record["id"] = provider_id
     try:
@@ -468,19 +481,19 @@ async def update_provider(provider_id: str, req: ProviderRequest):
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/providers/{provider_id}")
-async def remove_provider(provider_id: str):
+async def remove_provider(provider_id: str, _: Principal = CurrentPrincipal):
     if provider_store.delete(provider_id):
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
-async def set_default_provider(provider_id: str):
+async def set_default_provider(provider_id: str, _: Principal = CurrentPrincipal):
     if provider_store.set_default(provider_id):
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/test")
-async def test_provider(provider_id: str):
+async def test_provider(provider_id: str, _: Principal = CurrentPrincipal):
     """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。"""
     try:
         return provider_store.ping(provider_id)
@@ -488,7 +501,7 @@ async def test_provider(provider_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/v1/providers/test")
-async def test_provider_draft(req: ProviderRequest):
+async def test_provider_draft(req: ProviderRequest, _: Principal = CurrentPrincipal):
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())
@@ -597,8 +610,15 @@ async def submit_feedback(feedback: FeedbackRequest,
     }
 
 # ---------- 智能体 ----------
+# 这一面挂的是 require_admin，不是 current_principal，理由是"没有归属可谈"：
+# 编排与任务表（app/agents/task_store）是一个进程级全局 dict，条目上没有 owner，
+# 所以这里若只声明"我是某个注册用户"，契约会是绿的，而任何人都能列出、取消、
+# 删除别人的任务；agent 本身还拿着本机自己的上游配置跑付费调用，跑在谁的账上
+# 无人知道。要做成普通用户可用，先给 task 加 owner（与会话同一套归属规则），
+# 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
+# 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
 @app.post("/v1/agent/run")
-async def run_agent(request: AgentRequest):
+async def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
     try:
         from app.agents.react_agent import ReActAgent
         agent = ReActAgent(
@@ -614,7 +634,7 @@ async def run_agent(request: AgentRequest):
         return {"result": "智能体模块尚未就绪，请稍后再试"}
 
 @app.post("/v1/agent/orchestrate")
-async def orchestrate_task(request: OrchestrateRequest):
+async def orchestrate_task(request: OrchestrateRequest, _: Principal = RequireAdmin):
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
     result = orchestrator.run(
@@ -624,8 +644,10 @@ async def orchestrate_task(request: OrchestrateRequest):
     return result
 
 # ---------- 任务状态 ----------
+# 与上面两组同一个守卫：读侧必须和写侧一样严，否则"谁的任务"这件事就只
+# 在取消/删除那两条上被守住，列出全部目标一句话就能拿到。
 @app.get("/v1/tasks/{task_id}")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, _: Principal = RequireAdmin):
     if get_task is None:
         raise HTTPException(status_code=503, detail="任务存储模块尚未就绪")
     task = get_task(task_id)
@@ -653,7 +675,7 @@ async def get_task_status(task_id: str):
     return response
 
 @app.get("/v1/tasks")
-async def list_all_tasks():
+async def list_all_tasks(_: Principal = RequireAdmin):
     if task_store is None:
         return {"total": 0, "tasks": []}
     tasks = list(task_store.values())
@@ -672,7 +694,7 @@ async def list_all_tasks():
     }
 
 @app.post("/v1/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str):
+async def cancel_task(task_id: str, _: Principal = RequireAdmin):
     if task_id not in task_store:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     task = task_store[task_id]
@@ -690,7 +712,7 @@ async def cancel_task(task_id: str):
     }
 
 @app.delete("/v1/tasks/{task_id}")
-async def delete_task(task_id: str):
+async def delete_task(task_id: str, _: Principal = RequireAdmin):
     if task_id in task_store:
         del task_store[task_id]
         return {"status": "deleted", "task_id": task_id}
