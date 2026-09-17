@@ -248,6 +248,45 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} 的大括号没闭合（或函数被截断）")
 
 
+# 没有闭合标签的元素：不能当祖先压进栈里，否则后面的 </div> 会错位
+_VOID_TAGS = ("input", "img", "br", "hr", "meta", "link", "path", "circle", "source")
+
+
+def _tag_is_hidden(tag: str) -> bool:
+    """这个开标签是否被 hidden 挂住：class 里有 `hidden` 这个词，或自带 hidden 属性。
+
+    不写 `"hidden" in tag` 是因为 `aria-hidden="true"` 会被误判成隐藏——那是一条无障碍
+    属性，恰恰是给屏幕阅读器说"这一格存在"的。
+    """
+    classes = re.search(r'class="([^"]*)"', tag)
+    if classes and "hidden" in classes.group(1).split():
+        return True
+    return re.search(r"\shidden[\s/>=]", tag) is not None
+
+
+def _open_tags_to(html: str, container: str, el_id: str) -> list:
+    """从 `id=container` 那个 div 的开标签走到 `id=el_id` 的开标签，返回沿途开标签。
+
+    含容器自己（第一项，它默认 hidden、由 JS 摘掉），其余都是 #el_id 的祖先。
+    走不通（容器不存在、#el_id 在容器外面或压根没有）返回 []：调用方据此判红。
+    """
+    m = re.search(r'<div\b[^>]*\bid="%s"[^>]*>' % re.escape(container), html)
+    if not m:
+        return []
+    path = [m.group(0)]
+    for tag in re.findall(r"<[a-zA-Z][^>]*>|</[a-zA-Z]+>", html[m.end():]):
+        if tag.startswith("</"):
+            if len(path) == 1:
+                return []          # 容器的闭合标签到了：#el_id 不在容器内部
+            path.pop()
+            continue
+        if f'id="{el_id}"' in tag:
+            return path + [tag]
+        if re.match(r"</?([a-zA-Z][\w-]*)", tag).group(1).lower() not in _VOID_TAGS:
+            path.append(tag)       # void 元素不会有闭合标签，压进去就会把后面的配对全错位
+    return []
+
+
 def test_registration_ui_elements_wired():
     """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。
 
@@ -348,6 +387,12 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
     才有资格谈请求，而 `/v1/auth/recovery` 这个端点**已经不存在了**——旧代码在这
     一步打的是"问服务器要问题"那一枪，如今三题是常量、前端自己渲染，那条信道整个
     没了。所以这里断的是"函数体里一个 API. 都不许出现"，而不是"别打错端点"。
+
+    闸门那条断的是**字面短路形状** `{ goNext(); return; }`，不是"调用点排得早"：
+    后者对一条已经写在函数开头的 `regNext(); return;` 来说恒成立，把 `return;` 删掉
+    之后 395 条测试全绿（评审实测），而函数于是会继续往下走到发请求。可达后果不是
+    理论值：第二步填过答案后点「上一步」（答案仍在框里）再点「下一步」，本地那道
+    "三道答案都非空"的闸门就失效了，真的会发出 POST /v1/auth/register。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     for name, required in (("regNext", ("authUser", "authPass", "authPass2")),
@@ -357,7 +402,6 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
             f"{name} 在第一步就发了请求：答案还没填，那一枪必然 422"
         for el in required:
             assert f'$("{el}")' in body, f"{name} 没校验 #{el}"
-        assert "return" in body, f"{name} 校验不过时没有拦下来的动作"
 
     # 确认密码只在前端判：后端多一个 confirm_password 字段只是把客户端语义塞进契约
     reg = _function_body(js, "regNext")
@@ -368,9 +412,12 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
     for name, go, api_call in (("submitAuth", "regNext", "API.register"),
                                ("submitRecovery", "rcNext", "API.resetPassword")):
         body = _function_body(js, name)
-        assert f"{go}();" in body, f"{name} 没把第一步分流到 {go}()：那一格按回车就直接发请求了"
-        assert body.index(f"{go}();") < body.index(api_call), \
-            f"{name} 的步骤闸门晚于发请求：第一步那一枪照样打出去"
+        gate = re.search(r"\{ %s\(\); return; \}" % re.escape(go), body)
+        assert gate, (f"{name} 的第一步闸门不是短路形状（`{{ {go}(); return; }}`）："
+                      f"{go}() 之后没有 return，第一步就会穿着闸门继续往下走到发请求")
+        assert api_call in body, f"{name} 里找不到 {api_call}：第二步那一枪不发了吗"
+        assert gate.start() < body.index(api_call), \
+            f"{name} 的短路闸门晚于发请求：第一步那一枪照样打出去"
 
 
 def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
@@ -380,6 +427,10 @@ def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
     第一次变成两个独立维护的副本：后端改了题面而前端没改，人答的就是另一套问题，
     找回永远对不上、而界面还会说"答案不正确"——没有任何一处会报错。这条测试是
     唯一能挡住"两边各改一版题面"的东西，所以它比对了原始字面量，不是个数。
+
+    顺手钉第二件事（M3）：**题面**固定不等于**答案**固定。找回第二步那句说明一旦把
+    答案也写成"全站固定的那三道"，就是在安全流程里把秘密描述成公开的——人会照着
+    "反正大家一样"敷衍作答（"随便填一个"），而一个敷衍的答案等于没有找回通道。
     """
     from app.core.auth import ANSWER_COUNT
 
@@ -396,6 +447,14 @@ def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
         assert question not in html, f"#{question} 被抄进了 index.html：题面有了第二份事实来源"
         assert js.count(question) == 1, f"{question} 在 app.js 里出现了 {js.count(question)} 次"
 
+    # M3：找回第二步那句说明把话说反过一次（"题目与答案都是全站固定的那三道"）。
+    # 反向锁点名那句错话，正面锁钉住它得说清答案是注册第二步留的那三句（同一块
+    # 上半句刚说过"答案只有你自己知道才对得上"）。
+    assert "题目与答案都是全站固定" not in html, \
+        "找回的说明又把答案说成公开的：人会照着「反正大家一样」敷衍作答"
+    assert re.search(r"题目是全站固定的那三道[^<]*答案是注册第二步留的那三句", html), \
+        "找回第二步没说明答案是哪来的：人会以为随便填一个就行"
+
 
 def test_the_answer_boxes_follow_the_backends_question_count():
     """三条答案格的数量与顺序都得跟着后端那一条常量走。
@@ -403,6 +462,13 @@ def test_the_answer_boxes_follow_the_backends_question_count():
     后端加一句问题，这里就是第一个红的地方——而不是注册满 3 个号之后有人发现
     第 4 格没地方填。顺序同样钉住：记录里按 RECOVERY_QUESTIONS 的次序存三枚摘要，
     格子的次序错了就等于把第一题的答案送去比对第三题。
+
+    "id 存在于 HTML"远远不够：格子藏在带 hidden 的容器里，人照样填不满三格，
+    submitAuth 那道"三格都非空"的本地闸门就把他按在第二步，永远走不到请求——用户
+    后果与"少一格"完全相同，而 id 锁与 test_all_js_element_ids_exist_in_html 全绿
+    （评审实测：给 regAns2 外面那层 <div class="auth-qa"> 加 hidden → 35 条全绿）。
+    所以这里断的是**可达**：这一格在对应那个步骤容器内部，且它自己与它的祖先都没被
+    hidden 挂住。容器自己默认是 hidden 的，那是 JS 按步摘掉的，于是另断一次"有人摘"。
 
     app.js 一律写死 `$("regAns1")` 这种整串字面量、不用 `$("regAns" + i)`：拼接会
     绕过 test_all_js_element_ids_exist_in_html 那把锁，引用到不存在的 id 时
@@ -416,6 +482,15 @@ def test_the_answer_boxes_follow_the_backends_question_count():
             el = f"{prefix}{i}"
             assert el in defined, f"HTML 里没有 #{el}：第 {i} 题在界面上没地方填或没地方看"
             assert f'$("{el}")' in js, f"app.js 没引用 #{el}"
+            container = ("regStep2" if prefix.startswith("reg") else "rcStep2")
+            path = _open_tags_to(html, container, el)
+            assert path, f"#{el} 不在 #{container} 内部：第 {i} 题在第二步铺不出来"
+            blocked = [t for t in path[1:] if _tag_is_hidden(t)]
+            assert not blocked, f"#{el} 这一格被 hidden 挡住了，谁也摘不掉：{blocked}"
+    for container, renderer in (("regStep2", "renderRegister"), ("rcStep2", "renderRecovery")):
+        body = _function_body(js, renderer)
+        assert re.search(r'\$\("%s"\)\.classList\.toggle\("hidden",\s*!step2\)' % container, body), \
+            f"#{container} 的 hidden 没人按步摘掉：整个第二步永远铺不出来"
     for name, prefix in (("registerAnswers", "regAns"), ("recoveryAnswers", "rcAns")):
         body = _function_body(js, name)
         for i in range(1, len(RECOVERY_QUESTIONS) + 1):
@@ -689,6 +764,73 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
         assert f'$("regAns{i}").value = ""' in tail, f"第 {i} 格答案没清出输入框"
 
 
+def test_leaving_a_flow_wipes_every_credential_from_the_boxes():
+    """离开流程时凭据不许留在隐藏框里——清格子只有**一处**，且在 setAuthMode 收口。
+
+    原来只有 submitRecovery 的成功分支清那五格：猜错拿 401 之后人还留在这一层，
+    三句找回答案与新密码就躺在 DOM 里（hidden 是"看不见"，不是"没内容"——手机上是
+    切回去就还在，凑过来是能看见的），点「回去登录」或被 needsAuth 重新弹层时一个字
+    都没清。注册同理：setAuthMode 从前只把 regStep 归零，留着上一次没提交出去的答案。
+
+    为什么收口选 setAuthMode：showAuth（首启、needsAuth 重弹层、设置里的「注册一个新
+    账号」、改密成功回登录）与 authSwitch 换模式全都经过它，清一处就覆盖所有"进出这一
+    层"的路径。而留在屏内重试不受影响——setAuthMode 不在登录失败的那条路上，密码故意
+    留着（见上一条测试的注释），用户名更不该抹。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    fields = (["authPass", "authPass2"]
+              + [f"regAns{i}" for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
+              + [f"rcAns{i}" for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
+              + ["rcNew", "rcNew2"])
+
+    clearer = _function_body(js, "clearAuthCredentials")
+    for el in fields:
+        assert f'$("{el}").value = ""' in clearer, \
+            f"离开流程时 #{el} 没人清：格子里还躺着明文"
+    assert "authUser" not in clearer, "清格子不许顺手抹掉用户名：留在屏内重试的人得重敲"
+
+    # 唯一的收口：进出这一层、换模式都经过 setAuthMode
+    assert "clearAuthCredentials()" in _function_body(js, "setAuthMode"), \
+        "清格子退回成功分支了：猜错 401 之后离开流程就漏"
+
+    # 「回去登录」必须走过这个收口，而不是只把两块表单的 class 换一换
+    assert '$("rcBack").onclick = () => showAuth("login")' in js, \
+        "rcBack 绕过了 setAuthMode：找回失败后离开流程，三句答案与新密码还在 DOM 里"
+
+    # 清格子只有一处。成功分支再单独清一次，就是"哪条路径忘了清"的下一次起点
+    # （submitRecovery 的成功分支正是这么漏掉失败分支的）
+    recovery = _function_body(js, "submitRecovery")
+    for el in fields:
+        assert f'$("{el}").value = ""' not in recovery, \
+            f"#{el} 又在成功分支里单独清了：清凭据的地方变成了两处"
+
+
+def test_going_back_a_step_leaves_no_orphan_message():
+    """「上一步」与成功提示这两处颜色/文案的错位（M1 + M2）。
+
+    1. 第二步留下的红字（authFail 与撞名的 setUserError）会跟人回到第一步，而第一步
+       上压根没有那些格子——人只知道"点了没反应"。regNext 进门先清，regBack 也得清。
+    2. 改密成功那句是**好消息**，写在 #authHint 上，而 `.auth-hint.err` 是红色的
+       （style.css）。上一次登录失败留下的 err 态不清掉，这句话就显示成错误色。
+       顺序因此是硬约束：showAuth→setAuthMode 先复位提示与 err 态，成功文案后写。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    back = re.search(r'\$\("regBack"\)\.onclick = \(\) => \{([\s\S]*?)\};', js)
+    assert back, "「上一步」的接线找不到了"
+    assert 'authFail("");' in back.group(1) and 'setUserError("");' in back.group(1), \
+        f"上一步不清旧提示，第二步的红字会跟到第一步：{back.group(1)}"
+    assert '$("authPass2").focus()' in back.group(1), \
+        "焦点没落回第一步最后填过的那一格（确认密码），却对着注释说落回来了"
+
+    mode = _function_body(js, "setAuthMode")
+    assert 'authFail("");' in mode, "进这一层不复位提示：成功文案会沿用上一次的 err 色"
+    assert 'setUserError("");' in mode, "进这一层不清用户名那一格的旧红字"
+
+    recovery = _function_body(js, "submitRecovery")
+    assert recovery.index('showAuth("login")') < recovery.index('$("authHint").textContent'), \
+        "成功文案写在复位之前：那句好消息显示成红色"
+
+
 def test_the_second_step_is_the_only_one_that_registers():
     """注册第二步才是真提交：三条答案收齐了才发，少一格是本地手滑、不该挨 422。
 
@@ -701,8 +843,9 @@ def test_the_second_step_is_the_only_one_that_registers():
         < body.index("API.register"), "三条答案没在发请求之前收齐"
     assert "API.register(username, password, answers)" in body, \
         "注册那一枪没按三格发：后端会当成缺字段"
-    assert body.index("regStep") < body.index("API.register"), \
-        "第二步之外的状态也能走到发请求：第一步就变成必然的 422"
+    # "regStep 出现得比 API.register 早"这条装饰性断言已删（M4）：它在任何合理实现下
+    # 都成立，闸门真正的形状由 test_the_first_step_of_both_flows_asks_nothing_of_the_server
+    # 那条字面短路锁钉住。
     # 到了第二步，用户名那一格仍然在场——撞名的红字要有地方落
     assert '$("authUser")' in body, "第二步不再读用户名"
 
@@ -717,8 +860,6 @@ def test_a_taken_username_still_lands_under_the_username_field():
     body = _function_body(js, "submitAuth")
     assert re.search(r"if \(e\.status === 409\) \{[\s\S]{0,200}setUserError\(e\.message\)", body), \
         "撞名不再走 setUserError：那句话会被混进表单末尾的通用提示"
-    assert body.index("setUserError(e.message)") < body.index("finally"), \
-        "撞名的处理跑到了 finally 之外？"
     setter = _function_body(js, "setUserError")
     assert '$("authUserErr")' in setter and '$("authUser").focus()' in setter, \
         "红字没写在用户名那一格下面，或没聚焦到那一格"

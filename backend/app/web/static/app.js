@@ -157,11 +157,35 @@ function recoveryAnswers() {
   return [$("rcAns1").value.trim(), $("rcAns2").value.trim(), $("rcAns3").value.trim()];
 }
 
+/** 离开一条流程 = 这一层的凭据格子一律清空。**清格子的地方只有这一处。**
+ *  hidden 只是"看不见"，不是"没内容"：猜错拿 401 之后人还留在这一层，三句找回答案与
+ *  新密码就躺在 DOM 里，点「回去登录」或被 needsAuth 重新弹层时一个字都没清。找回答案
+ *  走的是和密码同一个慢哈希，它往往是个能猜的地名，所以同样是凭据。
+ *  用户名不在名单里：留在屏内重试的人不该重敲名字，改密成功后还要把它回填给登录框。
+ */
+function clearAuthCredentials() {
+  $("authPass").value = "";
+  $("authPass2").value = "";
+  $("regAns1").value = "";
+  $("regAns2").value = "";
+  $("regAns3").value = "";
+  $("rcAns1").value = "";
+  $("rcAns2").value = "";
+  $("rcAns3").value = "";
+  $("rcNew").value = "";
+  $("rcNew2").value = "";
+}
+
 function setAuthMode(mode) {
   authMode = mode === "register" ? "register" : "login";
   // 每次进这一层都从第一步开始：第二步那三格是上一次没提交出去的答案，
   // 留着它们再进来等于让人对着一屏填过的格子不知道从哪儿改。
   regStep = 1;
+  // 先复位提示与 err 态，再清凭据：改密成功那句好消息是 showAuth→这里之后才写的，
+  // 不复位就会沿用上一次的红色（.auth-hint.err）被读成失败。
+  authFail("");
+  setUserError("");
+  clearAuthCredentials();
   const reg = authMode === "register";
   $("authSwitch").textContent = reg ? "已有账号？去登录" : "立即注册";
   // 密码管理器要分清"改密/新建"与"登录"，填错一半的话注册那枪会带上旧密码。
@@ -340,20 +364,18 @@ async function submitRecovery() {
   $("rcHint").textContent = "改密码中…";
   try {
     await API.resetPassword(rcName, answers, pw);
-    // 答案与新密码同样是凭据，用完就清出输入框：这一层还开着，凑过来就能看见
-    $("rcAns1").value = "";
-    $("rcAns2").value = "";
-    $("rcAns3").value = "";
-    $("rcNew").value = "";
-    $("rcNew2").value = "";
+    // 答案与新密码同样是凭据，但这里不单独清：清格子只有 clearAuthCredentials() 一处，
+    // 由下面的 showAuth → setAuthMode 走到。上一版只在成功分支逐格清，于是猜错 401
+    // 之后离开流程就漏——同一个 bug 的成因就是"清凭据的地方不止一处"。
     rcStep = 1;
     renderRecovery();
     // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去。那句提示不许省：
     // "我改了密码，因为手机丢了"是这条路存在的理由，别的设备掉线是它的**设计后果**，
     // 藏起来只会让人以为那台设备坏了。
     $("authUser").value = rcName;
-    $("authPass").value = "";
     showAuth("login");
+    // 顺序是硬约束：上面那句 showAuth 里的 setAuthMode 先把提示与 err 态复位，
+    // 这句好消息才不会被上一次失败留下的红色显示成错误
     $("authHint").textContent = "密码已重置，请用新密码登录。其他设备需要重新登录一次。";
   } catch (e) {
     rcFail(e.message);
@@ -1455,9 +1477,19 @@ function bind() {
   $("openRegister").onclick = () => { closeSettings(); showAuth("register"); };
   $("authEye").onclick = toggleAuthPass;
   $("authForgot").onclick = () => showAuthView("recover");
-  $("rcBack").onclick = () => showAuthView("auth");
-  // 填错答案不该逼人重开整张表单：退回第一步，焦点落回他刚填过的那一格
-  $("regBack").onclick = () => { regStep = 1; renderRegister(); $("authPass").focus(); };
+  // 回去登录走 showAuth 这个收口，不是只把两块表单的 class 换一换：猜错 401 之后
+  // 离开这条流程的人，三句找回答案与新密码得跟着清出格子（见 clearAuthCredentials）
+  $("rcBack").onclick = () => showAuth("login");
+  // 填错答案不该逼人重开整张表单：退回第一步，清掉第二步留下的那两处红字（第一步
+  // 没有那些格子，红字跟过来就是指着一屏已隐藏的东西），焦点落回第一步里他最后填过
+  // 的那一格——确认密码
+  $("regBack").onclick = () => {
+    regStep = 1;
+    authFail("");
+    setUserError("");
+    renderRegister();
+    $("authPass2").focus();
+  };
   $("recoverForm").onsubmit = (e) => { e.preventDefault(); submitRecovery(); };
   $("authSwitch").onclick = () => setAuthMode(authMode === "register" ? "login" : "register");
   // 提交挂在 form 上而不是某个按钮上：两个框里按回车都该等于点主按钮。
