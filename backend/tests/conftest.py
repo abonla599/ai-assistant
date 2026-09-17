@@ -121,6 +121,34 @@ def _cleanup_test_data():
     shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
 
 
+# 上面那轮 CI 红换来的守卫：一次没还原成功的 monkeypatch 会把
+# AUTH_MODE=enforced + ACCESS_TOKEN=boot-token 留满整场，于是三十条与故障毫不
+# 相干的用例集体 401，红的地方离真凶隔了六个文件。
+_PRISTINE_AUTH_ENV = {k: os.environ.get(k) for k in ("AUTH_MODE", "ACCESS_TOKEN")}
+_PREV_TEST = {"nodeid": None}
+
+
+@pytest.fixture(autouse=True)
+def _auth_env_pristine(request):
+    """每条用例开跑前，全局鉴权 env 必须还是 conftest 设的那一份。
+
+    换模式请走 enforced / wired / _memory_app 那类 fixture——它们用 monkeypatch，
+    会自己还原。这里钉的不是业务行为而是"状态不许带出用例"：还原一旦中途抛，
+    泄漏的是整个进程，而第一个撞上它的用例往往离真凶很远。让它红在这里，并且
+    把上一个跑过的用例名字说出来——漏还原该只红一条，且当场报出嫌疑人。
+    """
+    prev = _PREV_TEST["nodeid"]
+    _PREV_TEST["nodeid"] = request.node.nodeid
+    drifted = {k: os.environ.get(k)
+               for k, v in _PRISTINE_AUTH_ENV.items() if os.environ.get(k) != v}
+    assert not drifted, (
+        f"鉴权 env 带着上一条用例的状态进了这条用例：{drifted}"
+        f"（期望 {_PRISTINE_AUTH_ENV}）。嫌疑人是上一条 {prev}——"
+        "它的 monkeypatch 收尾多半被异常打断（pytest 的 undo 先回滚 setattr，"
+        "再回滚 environ，前者一抛后者就不做了）。")
+    yield
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
