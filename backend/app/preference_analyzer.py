@@ -4,12 +4,15 @@ import os
 import re
 from datetime import datetime
 
-from app.core.paths import data_root
+from app.core.paths import data_file, ensure_parent
 from app.feedback_storage import FEEDBACK_FILE
 
 # --- 配置文件 ---
 # 反馈路径只有一个定义处（feedback_storage），避免两边写到不同文件
-PREFERENCE_FILE = os.path.join(data_root(), "preference.txt")    # 本机管理员的那一份偏好摘要
+# 本机管理员的那一份偏好摘要。落点规则（$PREFERENCE_FILE 优先、默认进 data/、
+# 兼容项目根那份历史数据）见 paths.data_file；下面 preference_path() 按人分账时
+# 用的就是这个路径所在的那棵目录，所以指走这一个常量等于把所有人的摘要一起指走。
+PREFERENCE_FILE = data_file("PREFERENCE_FILE", "preference.txt")
 
 # 与 authz.BOOTSTRAP_PRINCIPAL、session_store.LEGACY_OWNER 同一个身份。
 # 按人分账之前的反馈行没有 user_id，那时人人都是本机管理员，所以这些历史行
@@ -40,7 +43,7 @@ def preference_path(user_id: str) -> str:
         # 而那是两个不同的人互相改写对方的摘要。身份串里只要有害字符，
         # 就整条退回稳定哈希：名字短一点没关系，撞车不行。
         slug = hashlib.sha256(wanted.encode("utf-8")).hexdigest()[:16]
-    return os.path.join(os.path.dirname(PREFERENCE_FILE), f"{stem}-{slug}{ext}")
+    return os.path.join(os.path.dirname(PREFERENCE_FILE) or ".", f"{stem}-{slug}{ext}")
 
 
 def _all_feedback_rows() -> list:
@@ -122,7 +125,7 @@ def analyze_and_update_preference(user_id: str):
         preference_summary += "用户反馈不明确，建议保持中立和友善的沟通方式。\n"
 
     # 步骤 5: 将生成的摘要写入**他自己**那份文件
-    path = preference_path(user_id)
+    path = ensure_parent(preference_path(user_id))
     with open(path, "w", encoding="utf-8") as f:
         f.write(preference_summary)
 

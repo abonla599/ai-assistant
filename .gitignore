@@ -1,8 +1,13 @@
 # 本地数据库与数据文件
+# 这几行只兜"数据"这一类东西，形状必须是 glob 而不是逐个记名字：本仓已经因运行数据
+# 被跟踪付出过代价（chroma_db/ 与 .env 曾入库，一把 API Key 因此公开了五个月），而
+# "漏一个名字就裸奔"正是那种事故的形状——按人分账之后偏好摘要叫 preference-<uid>.txt，
+# 精确名 `preference.txt` 挡不住它。feedback/preference 现在默认落在 data/ 下
+# （见 backend/app/core/paths.py::data_file），下面两行是给历史遗留的根目录那一份兜底。
 data/
 *.sqlite3
 feedback.json
-preference.txt
+preference*.txt
 chroma_db/
 
 # 其他临时文件
@@ -40,7 +45,11 @@ generate_docx.py
 
 # 本地工具产物与临时备份（不属于源码，勿提交）
 .qoder/
-tools/
+# 写成 tools/* 而不是 tools/：被排除的目录 git 根本不会进去，里面的 ! 例外一律失效，
+# 而 tools/make-invite.bat 是运维要用的签发脚本，必须入库（其余仍是本机产物：
+# cloudflared.exe、隧道 yml、启动脚本）。
+tools/*
+!tools/make-invite.bat
 server.log
 tunnel.log
 PATH_backup_*.txt

@@ -1,11 +1,12 @@
 import json
 import os
 
-from app.core.paths import data_root
+from app.core.paths import data_file, ensure_parent
 
 # 必须是绝对路径：裸相对名会随进程工作目录漂移。打包版入口 chdir 到 EXE 目录，
 # 而该目录每次重建都被清空，等于把反馈数据写进一个注定消失的地方。
-FEEDBACK_FILE = os.path.join(data_root(), "feedback.json")
+# 落点规则（环境变量优先、默认进 data/、兼容项目根那份历史数据）见 paths.data_file。
+FEEDBACK_FILE = data_file("FEEDBACK_FILE", "feedback.json")
 
 # 修改函数入参，直接接收独立参数
 def save_feedback(message_id: str, rating: int, comment: str, user_id: str):
@@ -22,6 +23,9 @@ def save_feedback(message_id: str, rating: int, comment: str, user_id: str):
         "comment": comment,
         "user_id": user_id
     }
+
+    # data/ 在全新检出时还不存在，而这里是第一次写它的人
+    ensure_parent(FEEDBACK_FILE)
 
     if os.path.exists(FEEDBACK_FILE):
         with open(FEEDBACK_FILE, "r", encoding="utf-8") as f:
