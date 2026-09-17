@@ -189,6 +189,67 @@ def test_only_bad_invite_codes_cost_the_throttle_budget():
                              "username": "被挡住的人"}).status_code == 429
 
 
+def test_replaying_a_spent_code_does_not_cost_the_throttle_budget():
+    """重复提交一枚已经花掉的码不是猜码：一格都不该记。
+
+    手机上的第二下手指发出的是同一个 POST /v1/auth/register，用的正是第一枪已经
+    用掉的那枚码，于是必然 403。而来源键在 cloudflared 后面恒为 127.0.0.1，全网
+    共用这一个桶（预算 10 格）：把这类重试算成攻击，等于五六次双击就能把唯一的
+    注册入口对所有人锁 10 分钟。反过来，不记这一格也挡不住真猜测者——他手里的
+    码压根不存在，照样一格一记（见下面那段反向断言）。
+    """
+    from app.core.auth_router import MAX_FAILURES_PER_WINDOW
+
+    code = auth_store.create_invite("default_user")
+    first = client.post("/v1/auth/register", json={"code": code, "username": "双击的人"})
+    assert first.status_code == 200, first.text
+    assert _budget_used() == 0, "前提：成功注册不留账"
+
+    for i in range(MAX_FAILURES_PER_WINDOW + 2):
+        res = client.post("/v1/auth/register", json={"code": code, "username": "再点一下"})
+        # 整份响应体都在断言里：多回一个字段就是邀请码探测器
+        assert (res.status_code, res.json()) == (403, {"detail": "邀请码无效"}), f"第 {i} 次"
+    assert _budget_used() == 0, "重复提交已花掉的码不该进限流账本"
+    ok = client.post("/v1/auth/register",
+                     json={"code": auth_store.create_invite("default_user"),
+                           "username": "双击之后的人"})
+    assert ok.status_code == 200, "预算完好：一个人双击不该把下一个新人挡在门外"
+
+    # 反向：不存在的码仍是"猜"，一格一格填满到 429
+    for i in range(MAX_FAILURES_PER_WINDOW):
+        res = client.post("/v1/auth/register",
+                          json={"code": f"JJJJ-{i:04d}", "username": "这回收钱"})
+        assert res.status_code == 403, f"第 {i} 次应当仍是 403"
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW, "坏码必须照旧计费"
+    assert client.post("/v1/auth/register",
+                       json={"code": auth_store.create_invite("default_user"),
+                             "username": "被挡住的人"}).status_code == 429
+
+
+def test_spent_and_unknown_codes_differ_only_inside_the_process():
+    """限流分账要用的那个区别，只许活在异常对象里。
+
+    存储层必须分得清"码存在但已用尽"（正当重试）与"码不存在"（猜），否则路由器
+    无从免记这一格；但两句话的 reason 必须一字不差——那个区别一旦进到 detail，
+    这个免凭据端点就成了"哪些邀请码真实存在"的探测器。
+    """
+    from app.core.auth import AuthError
+
+    code = auth_store.create_invite("default_user")
+    auth_store.register(code=code, username="第一个签的人")
+
+    def error_of(c):
+        try:
+            auth_store.register(code=c, username="后来的签的人")
+        except AuthError as e:
+            return e
+        raise AssertionError("花掉的码不该还能换到身份")
+
+    spent, unknown = error_of(code), error_of("NOPE-NOPE")
+    assert spent.reason == unknown.reason, "对内可以分，对外必须是同一句话"
+    assert (spent.code_was_spent, unknown.code_was_spent) == (True, False)
+
+
 def test_a_success_resets_the_throttle():
     """一次成功注册说明这来源确实是正当用户，别让他之前的手滑继续记账。"""
     from app.core.auth_router import MAX_FAILURES_PER_WINDOW

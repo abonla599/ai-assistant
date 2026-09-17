@@ -40,6 +40,7 @@ const state = {
   presets: {},
   pending: [],            // 待发送附件 [{id,name,kind,size,url}]
   streaming: false,
+  registering: false,     // 注册请求在途：与 streaming 同一个套路，挡双击
   controller: null,
   filter: "",
   memoryQuery: "",
@@ -1058,8 +1059,12 @@ function autosize(el) {
  * 邀请码换一枚个人令牌：这一步之后，"我是谁"才由服务端说了算。
  * 成功之后当场重取身份与数据——boot 那一次是在没有凭据的状态下跑的，模型清单
  * 和会话列表全是 401；不重跑就得叫用户手动刷新一次页面才算注册成功。
+ * 全程锁住按钮：手机双击会发出第二个 POST /v1/auth/register，那枚码在第一枪里
+ * 就花掉了，第二枪只能拿回 403"邀请码无效"——把已经注册成功的人显示成失败，
+ * 还要两次一起抢 pref.token 与 loadServerData 的渲染顺序。
  */
 async function registerWithInvite() {
+  if (state.registering) return;
   const hint = $("registerHint");
   const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
   hint.classList.remove("err");
@@ -1069,27 +1074,37 @@ async function registerWithInvite() {
     fail("邀请码和用户名都要填");
     return;
   }
+  state.registering = true;
+  $("registerBtn").disabled = true;
   hint.textContent = "注册中…";
-  let res;
   try {
-    res = await API.register(code, username);
-  } catch (e) {
-    // 后端已经把原因说成人话了（邀请码无效 / 用户名已被占用），照实转述
-    fail("注册失败：" + e.message);
-    return;
-  }
-  pref.token = res.token;
-  pref.userId = res.user_id;
-  syncConnPane();
-  hint.textContent = `已登录为 ${res.username}，正在载入…`;
-  try {
-    await loadWho();
-    await loadServerData();
-    renderMessages();
-    hint.textContent = `已登录为 ${res.username}`;
-  } catch (e) {
-    fail(`已登录为 ${res.username}，刷新后生效`);
-    if (!needsAuth(e)) setStatus("数据载入失败：" + e.message, true);
+    let res;
+    try {
+      res = await API.register(code, username);
+    } catch (e) {
+      // 后端已经把原因说成人话了（邀请码无效 / 用户名已被占用），照实转述
+      fail("注册失败：" + e.message);
+      return;
+    }
+    pref.token = res.token;
+    pref.userId = res.user_id;
+    // 令牌已经落地，这枚码从此作废：留在输入框里等于下一次双击的素材
+    $("regCode").value = "";
+    syncConnPane();
+    hint.textContent = `已登录为 ${res.username}，正在载入…`;
+    try {
+      await loadWho();
+      await loadServerData();
+      renderMessages();
+      hint.textContent = `已登录为 ${res.username}`;
+    } catch (e) {
+      fail(`已登录为 ${res.username}，刷新后生效`);
+      if (!needsAuth(e)) setStatus("数据载入失败：" + e.message, true);
+    }
+  } finally {
+    // 失败也得解锁：一次网络抖动不该把注册入口按死到刷新页面为止
+    state.registering = false;
+    $("registerBtn").disabled = false;
   }
 }
 

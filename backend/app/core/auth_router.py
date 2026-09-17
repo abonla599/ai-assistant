@@ -2,9 +2,10 @@
 
 这里是身份存储（app/core/auth.py）与 HTTP 之间唯一的一层，规则三条：
 1. 对外说话保守。注册失败的原因一律收敛成"邀请码无效"——区分"码不存在"和
-   "码已用尽"，就把这个免凭据端点变成了探测邀请码是否存在的信道。同一条也管
-   用户名："这名字被占了"只对已经握着一枚有效未用码的人说（顺序在
-   AuthStore.register 里保证：先验码，再谈用户名）。
+   "码已用尽"，就把这个免凭据端点变成了探测邀请码是否存在的信道。存储层内部
+   当然分得清这两者（AuthError.code_was_spent），但那个记号只用来给限流分账，
+   不写进任何响应。同一条也管用户名："这名字被占了"只对已经握着一枚有效未用
+   码的人说（顺序在 AuthStore.register 里保证：先验码，再谈用户名）。
 2. 响应按字段白名单出。存储层的记录带着 token_hash 和内建的 username_lc，
    顺手 return record 等于把口令摘要交给前端与日志。
 3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与轮换的响应，邀请码见于
@@ -27,6 +28,7 @@ router = APIRouter(tags=["身份"])
 # 重启即清零是可接受的，因为真正的凭据是 40 位随机邀请码。
 # 账本只记猜码，不记撞名/用户名不合格（见 register 里的注释）：来源键在隧道
 # 后面人人相同，把无害的打字错误算进预算，锁住的是唯一的 onboarding 入口。
+# 同样不记"重复提交一枚已花掉的码"——那和撞名一样是正当用户的手滑，不是猜测。
 FAILURE_WINDOW_SECONDS = 600
 MAX_FAILURES_PER_WINDOW = 10
 # 来源键取自 uvicorn 看到的对端地址：谁都能连接，所以它也可以是攻击者影响的
@@ -125,13 +127,17 @@ async def register(req: RegisterRequest, request: Request):
         principal, token = _store().register(code=req.code, username=req.username)
     except AuthError as e:
         exc = _register_error(e)
-        if exc.status_code == 403:
+        if exc.status_code == 403 and not e.code_was_spent:
             # 只有猜码才进账本。409（撞名）与 422（用户名不合格）的前提是这来源
             # 手里已经有一枚有效码——那是打错字的人，不是攻击者。
             # 而预算只有 10 格，躲过 cloudflared 之后 request.client.host 恒为
             # 127.0.0.1，全网络共用同一个桶：把撞名计进去，一个人手滑撞两次名
             # 就能把唯一的注册入口锁掉 10 分钟，真在瞎猜 40 位随机码的人反倒没被
             # 多挡住一下（他每一次尝试本来就计一格）。计费的口径必须对准威胁。
+            # 同一枚已花掉的码被重复提交也是这一类：它在第一次那枪里就已经用掉了
+            # （用户此刻已经注册成功），双击的第二下既没在猜码也没在注册，把它算
+            # 进预算等于让手机上的五六次双击锁掉全网唯一的 onboarding 入口 10 分钟。
+            # 压根不存在的码照旧一格一格计——那才是猜。
             _note_failure(ip)
         raise exc
     _FAILS.pop(ip, None)   # 成功即证明这来源是正当用户，别让它之前的手滑继续记账

@@ -350,3 +350,30 @@ def test_a_stale_token_does_not_read_like_a_first_run():
     assert "403" not in body
     assert re.search(r'pref\.token', body), "未按本机是否已有令牌分叉"
     assert "失效" in body and "注册" in body, "两条分支的措辞都得在场"
+
+
+def test_registration_locks_its_button_while_the_request_is_in_flight():
+    """注册没有在途闸门 = 手机双击发出第二个 POST /v1/auth/register。
+
+    第二下用的正是第一枪已经花掉的那枚码，只能拿回 403"邀请码无效"：界面于是把
+    一个已经注册成功的人标成红色失败，两次调用还一起抢 pref.token 的写入与
+    loadWho→loadServerData→renderMessages 的顺序。约定跟 send() 守 state.streaming
+    一模一样——进门先挡、解锁放在 finally（失败也必须解，否则一次网络抖动就把唯一
+    的注册入口按死到刷新页面为止），并且令牌一落地就把那枚废码清出输入框。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert re.search(r"streaming: false,\s*\n\s*registering: false", js), \
+        "state 里没有了 registering：在途闸门大概退回了只靠 disabled 一处"
+
+    body = _function_body(js, "registerWithInvite")
+    assert re.search(r"if \(state\.registering\) return", body), "双击不再被挡下"
+    assert body.index("if (state.registering) return") < body.index("API.register"), \
+        "闸门得在发请求之前"
+    assert "state.registering = true" in body and '$("registerBtn").disabled = true' in body, \
+        "请求在途时按钮还亮着"
+    unlock = body[body.index("finally"):]
+    assert '$("registerBtn").disabled = false' in unlock and "state.registering = false" in unlock, \
+        "解锁不在 finally 里：注册失败一次就再也点不动了"
+    assert '$("regCode").value = ""' in body, "花掉的邀请码还留在输入框里，等着下一次双击"
+    assert body.index("pref.token = res.token") < body.index('$("regCode").value = ""'), \
+        "清空必须晚于令牌落库：早一步就是在丢凭据"

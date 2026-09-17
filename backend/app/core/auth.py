@@ -80,11 +80,18 @@ class Principal:
 
 
 class AuthError(Exception):
-    """注册/鉴权失败。reason 面向用户，不外泄"码存在但已用尽"之类的区别。"""
+    """注册/鉴权失败。reason 面向用户；用户听到的那句不分"码不存在"与"码已用尽"。
 
-    def __init__(self, reason: str):
+    code_was_spent 是**只在进程内**用的记号，给 HTTP 层分账用（见
+    auth_router.register：重复提交一枚已经花掉的码是正当重试，不是猜码，
+    不该烧限流预算）。它不进任何响应体——对外两句 reason 完全相同这件事由
+    test_auth_endpoints.py 的 ..._look_identical 钉着，别把它写成 detail。
+    """
+
+    def __init__(self, reason: str, *, code_was_spent: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.code_was_spent = code_was_spent
 
 
 def _default_users_path() -> str:
@@ -177,8 +184,12 @@ class AuthStore:
         """
         with self._lock:
             invite = self._invites.get(self._normalize_code(code))
-            if invite is None or self._invite_spent(invite):
+            if invite is None:
                 raise AuthError("邀请码无效或已用完")
+            if self._invite_spent(invite):
+                # 与上面那一句一字不差——差别只在进程内的记号：这枚码真的存在过，
+                # 重复提交它的人就是当初拿到它的人（手机上双击的正是这一支）。
+                raise AuthError("邀请码无效或已用完", code_was_spent=True)
 
             # 用户名的形状与占用都排在码之后、也排在消耗码之前：打错字或撞名
             # 都不该烧掉一枚邀请码（否则用户只能回去找管理员重新要码）。
