@@ -284,6 +284,30 @@ def test_a_correct_login_resets_the_failure_budget():
     assert _budget_used() == 0, "登进来就说明这来源是本人，别让他之前的手滑继续记账"
 
 
+# ---------- 自助改密 ----------
+
+
+def test_reset_through_http_replaces_the_password_and_kills_the_sessions():
+    """改密请求体刚换过形状（一条答案 → 三条答案 + 可选轮换），而全套件里只有这条
+    真的从 /v1/auth/reset 拿到 200。少了它，参数顺序写反（把新密码当答案传）也照样
+    全绿——那正是这条自救路径唯一没人看着的一段。
+    """
+    created = _register("改密的人")
+    assert auth_store.resolve(created["token"]) is not None, "前提：注册即登录"
+
+    res = client.post("/v1/auth/reset",
+                      json={"username": "改密的人", "answers": RECOVERY["security_answers"],
+                            "new_password": PW2},
+                      headers={"CF-Connecting-IP": HOME})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"status": "password_reset"}
+    # 这里不能用 /v1/auth/me 判令牌：本文件的 client 是 disabled 模式，中间件根本不
+    # 看凭据，谁都 200。撤销是否生效只能直接问存储层。
+    assert auth_store.resolve(created["token"]) is None, "改密必须作废名下所有令牌"
+    assert _login("改密的人", PW).status_code == 401, "旧密码要立刻登不进"
+    assert _login("改密的人", PW2).status_code == 200, "新密码要能登进来"
+
+
 # ---------- /v1/auth/me 与令牌真的能用 ----------
 
 

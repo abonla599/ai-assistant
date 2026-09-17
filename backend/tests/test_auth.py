@@ -9,6 +9,12 @@
 靠邀请码挡住"任何人都能问这个名字被占了吗"，现在注册全开放，那道泄露面改由
 auth_router 按真实 IP 计费来限（见 test_auth_endpoints.py），而登录端点则必须
 对"查无此人 / 密码错 / 已停用"三件事给出逐字节相同的回答，包括耗时。
+
+2026-09-18 密保从"每人自设一个问题"换成全站固定的三题。`recovery_question()` 与
+"报出问题"那条信道一起删掉，针对它的两条用例随之删除——问题已是常量，没有服务器
+可问；单答案那条 bcrypt 耗时判据也一并没了，它被"三条必须付满三次"那条覆盖。剩下
+的判据换成三件事：三条全对才放行、比对不许短路（拿 bcrypt 次数当尺子）、答案能在
+重置时轮换。
 """
 import json
 import os
@@ -22,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from app.core import auth as auth_module
-from app.core.auth import AuthError, AuthStore
+from app.core.auth import RESET_FAIL, AuthError, AuthStore
 
 PW = "correct-horse-battery"
 PW2 = "another-correct-horse"
@@ -436,72 +442,149 @@ def test_delete_user_removes_the_record_and_its_tokens(tmp_path):
     assert reloaded.resolve(token) is None
 
 
-# ---------- 密码找回：安全问题 ----------
-# 注册时留一个自己写的问题 + 答案，忘了密码就答一次。答案是人编的低熵值，
-# 所以它和密码走同一个慢哈希；而这两个端点免凭据，措辞与耗时都必须保守。
+# ---------- 密码找回：全站固定三题 ----------
+# 问题不再是用户自设，而是 auth.RECOVERY_QUESTIONS 那三句常量，所以每个人名下只存
+# 三个答案的慢哈希（顺序与常量对齐）。三条必须全对，比对还不许短路——否则"第几题
+# 猜对了"就漏进响应耗时里，三题被拆成三份独立预算，整条路的强度除以三。
 
-Q = "我小学的校名？"
-A = "河海大学附属小学"
-
-
-def _reg(store, username="找回用", password=PW, question=Q, answer=A):
-    return store.register(username=username, password=password,
-                          security_question=question, security_answer=answer)
+ANS = ["新市场小学", "hehai2024", "李建国"]
 
 
-def test_the_answer_is_stored_as_a_slow_hash_only(store):
+def _reg(store, username="找回用", password=PW, answers=ANS):
+    return store.register(username=username, password=password, security_answers=answers)
+
+
+def test_register_needs_all_three_answers_or_none(store):
+    for bad in ([], ["新市场小学"], ANS[:2]):
+        with pytest.raises(AuthError) as e:
+            store.register(username="甲", password="correct-horse-battery", security_answers=bad)
+        assert "三" in str(e.value) or "答案" in str(e.value), f"{bad} 的报错没说到三题：{e.value}"
+    principal, _ = store.register(username="甲", password="correct-horse-battery", security_answers=ANS)
+    record = json.loads(open(store.path, encoding="utf-8").read())[principal.user_id]
+    assert len(record["answer_hashes"]) == 3
+    assert "security_question" not in record, "问题已是常量，不该再存进每个人名下"
+    for answer in ANS:
+        assert answer not in open(store.path, encoding="utf-8").read(), "明文答案绝不能落盘"
+
+
+def test_reset_requires_every_answer_and_never_short_circuits(store):
+    """三题全对才放行，而且错在哪一题不许有可观察差别。
+
+    短路返回等于把"第一题猜对了"漏出去：攻击者于是有三份独立预算，
+    每 10 分钟各猜一题，整条路的强度除以三。这里用耗时把这条钉住——
+    只错第 1 题与只错第 3 题，都必须付满三次 bcrypt 的代价。
+    """
+    store.register(username="乙", password="correct-horse-battery", security_answers=ANS)
+    for wrong in (0, 1, 2):
+        bad = list(ANS)
+        bad[wrong] = "错的答案"
+        with pytest.raises(AuthError) as e:
+            store.reset_password(username="乙", answers=bad, new_password="another-correct-horse")
+        assert str(e.value) == RESET_FAIL
+    store.reset_password(username="乙", answers=ANS, new_password="another-correct-horse")
+    assert store.login("乙", "another-correct-horse")[0].username == "乙"
+
+
+def test_answer_comparison_pays_three_bcrypts_whatever_the_answer(store, monkeypatch):
+    """耗时判据：错答案与"查无此人"都必须跑满三次 bcrypt。
+
+    只错第 1 题就返回的话，这里只会数到 1 次——那正是 R3 要挡的事。
+    """
+    calls = []
+    real = auth_module.bcrypt.checkpw
+
+    def spy(pw, hashed):
+        calls.append(1)
+        return real(pw, hashed)
+
+    monkeypatch.setattr(auth_module.bcrypt, "checkpw", spy)
+    store.register(username="丙", password="correct-horse-battery", security_answers=ANS)
+    calls.clear()
+    with pytest.raises(AuthError):
+        store.reset_password(username="丙", answers=["x1", "x2", "x3"],
+                             new_password="another-correct-horse")
+    assert len(calls) == 3, f"比对短路了：只跑了 {len(calls)} 次"
+    calls.clear()
+    with pytest.raises(AuthError):
+        store.reset_password(username="查无此人", answers=["x1", "x2", "x3"],
+                             new_password="another-correct-horse")
+    assert len(calls) == 3, "查无此人也要付满三次代价，否则快慢本身就是一份名单"
+
+
+def test_answers_can_be_rotated_at_reset(store):
+    """答案泄露过就该换得掉——固定问题不等于固定答案。"""
+    store.register(username="丁", password="correct-horse-battery", security_answers=ANS)
+    store.reset_password(username="丁", answers=ANS, new_password="another-correct-horse",
+                         new_answers=["沙北", "hehai2025", "李建国"])
+    with pytest.raises(AuthError):
+        store.reset_password(username="丁", answers=ANS, new_password="third-correct-horse")
+    store.reset_password(username="丁", answers=["沙北", "hehai2025", "李建国"],
+                         new_password="third-correct-horse")
+    assert store.login("丁", "third-correct-horse")[0].username == "丁"
+
+
+def test_partial_new_answers_are_rejected_without_touching_anything(store):
+    principal, token = store.register(username="戊", password="correct-horse-battery", security_answers=ANS)
+    with pytest.raises(AuthError):
+        store.reset_password(username="戊", answers=ANS, new_password="another-correct-horse",
+                             new_answers=["只有一条"])
+    assert store.resolve(token) is not None, "被拒的重置不该已经动过令牌或口令"
+    assert store.login("戊", "correct-horse-battery")[0].user_id == principal.user_id
+
+
+def test_reset_still_revokes_tokens_and_never_un_disables(store):
+    principal, token = store.register(username="己", password="correct-horse-battery", security_answers=ANS)
+    store.disable_user(principal.user_id)
+    with pytest.raises(AuthError):
+        store.reset_password(username="己", answers=ANS, new_password="another-correct-horse")
+    store.enable_user(principal.user_id)
+    store.reset_password(username="己", answers=ANS, new_password="another-correct-horse")
+    assert store.resolve(token) is None, "改密的理由之一就是让别的设备掉线"
+    assert [u for u in store.list_users() if u["user_id"] == principal.user_id][0]["disabled"] is False
+
+
+# ---------- 上面那六条之外的另一半：措辞与落盘形状 ----------
+
+
+def test_the_three_answers_are_stored_as_slow_hashes_only(store):
     """答案熵比密码还低（往往是能猜的地名），只存 sha256 等于把库给人拿去离线猜。"""
     principal, _ = _reg(store)
     raw = open(store.path, encoding="utf-8").read()
-    assert A not in raw, "明文答案绝不能落盘"
     record = json.loads(raw)[principal.user_id]
-    assert record["security_question"] == Q
-    assert record["answer_hash"].startswith("bcrypt:")
-    assert "answer" not in record or record.get("answer") is None
-
-
-def test_recovery_question_says_the_same_thing_for_no_user_and_no_question(store):
-    """免凭据的"报出问题"端点不能顺手回答"这个用户名存在吗"。
-
-    没设过找回问题的真实用户，与压根不存在的用户，必须拿到同一句话；只有真设过
-    问题的人才看到问题文本。剩下的泄露面只有"谁开了找回"这一比特，由 HTTP 层
-    那份按 IP 的失败预算限着。
-    """
-    _reg(store, username="开了找回的")
-    store.register(username="没开找回的", password=PW)
-
-    missing = store.recovery_question("从没注册过")
-    none_set = store.recovery_question("没开找回的")
-    assert missing == none_set, f"这两种情况同形才对：{missing!r} / {none_set!r}"
-    assert store.recovery_question("开了找回的") == Q
+    assert [h.startswith("bcrypt:") for h in record["answer_hashes"]] == [True, True, True]
+    for answer in ANS:
+        assert answer not in raw, "明文答案绝不能落盘"
 
 
 def test_every_wrong_answer_says_the_very_same_thing(store):
-    """答案错、这个人没开找回、查无此人、账号被停用——四句必须一字不差。"""
+    """答案错、这个人没设找回答案、查无此人、账号被停用——四句必须一字不差。
+
+    四条路都在免凭据端点上，多说一个字就是"哪个用户名真存在"的免费查询。
+    """
     principal, _ = _reg(store, username="开着的")
     store.register(username="没开的", password=PW)
     store.disable_user(principal.user_id)
 
     reasons = {}
-    for label, args in (("答案错", ("开着的", "肯定不对", PW2)),
-                       ("没开找回", ("没开的", A, PW2)),
-                       ("查无此人", ("没这个人", A, PW2)),
-                       ("已停用", ("开着的", A, PW2))):
+    for label, args in (("答案错", ("开着的", ["肯定不对", "肯定也不对", "第三个也不对"])),
+                        ("没设找回", ("没开的", ANS)),
+                        ("查无此人", ("没这个人", ANS)),
+                        ("已停用", ("开着的", ANS))):
         with pytest.raises(AuthError) as e:
-            store.reset_password(*args)
+            store.reset_password(username=args[0], answers=args[1], new_password=PW2)
         reasons[label] = str(e.value)
     assert len(set(reasons.values())) == 1, f"四种失败说出了不同的话：{reasons}"
 
 
-def test_a_bad_new_password_is_rejected_before_the_answer_is_consulted(store):
+def test_a_bad_new_password_is_rejected_before_the_answers_are_consulted(store):
     """先问答案再看新密码合不合格，等于给攻击者一个"答案对了"的信号。
 
     顺序反过来之后，"密码太短"这句只描述调用方填的新密码，与答案对不对无关。
     """
     _reg(store, username="按顺序的")
-    for answer in ("肯定不对的答案", A):
+    for answers in (["肯定不对的答案", "肯定也不对", "第三个也不对"], ANS):
         with pytest.raises(AuthError) as e:
-            store.reset_password("按顺序的", answer, "短")
+            store.reset_password(username="按顺序的", answers=answers, new_password="短")
         assert "密码" in str(e.value), f"新密码形状没先查：{e.value}"
 
 
@@ -515,7 +598,7 @@ def test_reset_swaps_the_password_and_kills_every_session_token(store):
     _, second = store.login("丢了手机", PW)
     assert store.resolve(first) and store.resolve(second)
 
-    store.reset_password("丢了手机", A, PW2)
+    store.reset_password(username="丢了手机", answers=ANS, new_password=PW2)
 
     assert store.resolve(first) is None, "改密之后旧令牌必须立刻解不出来"
     assert store.resolve(second) is None, "每一台设备都得掉线，包括偷到令牌那台"
@@ -528,46 +611,30 @@ def test_reset_swaps_the_password_and_kills_every_session_token(store):
 
 def test_the_answer_match_ignores_case_and_surrounding_spaces(store):
     """人会输入 "Hehai University " 而不是精确串：归一化只碰大小写与首尾空白。"""
-    _reg(store, username="归一化", answer="Hehai University")
-    store.reset_password("归一化", "  hehai university  ", PW2)
+    _reg(store, username="归一化", answers=["Hehai University", "hehai2024", "李建国"])
+    store.reset_password(username="归一化", answers=["  hehai university  ", "HEHAI2024", "李建国"],
+                         new_password=PW2)
     assert store.login("归一化", PW2)
 
 
-def test_reset_password_always_pays_the_bcrypt_cost(store, monkeypatch):
-    """查无此人也要跑一次 bcrypt，否则"秒回"本身就是一份用户名名单。"""
-    calls = []
-    real = auth_module.bcrypt.checkpw
-
-    def spy(*a, **k):
-        calls.append(1)
-        return real(*a, **k)
-
-    monkeypatch.setattr(auth_module.bcrypt, "checkpw", spy)
-    _reg(store, username="有找回的")
-
-    with pytest.raises(AuthError):
-        store.reset_password("有找回的", "肯定不对", PW2)
-    known = len(calls)
-    calls.clear()
-    with pytest.raises(AuthError):
-        store.reset_password("查无此人", "肯定不对", PW2)
-    assert len(calls) == known, "查无此人没付 bcrypt 的代价，快慢差泄露了用户名是否存在"
-
-
-@pytest.mark.parametrize("question,answer", [
-    ("", A), (Q, ""), (Q, "  "), ("问" * 80, A), (Q, "答" * 200),
+@pytest.mark.parametrize("answers", [
+    [], ["新市场小学"], ANS[:2], ANS + ["第四条"],
+    ["", "hehai2024", "李建国"], ["  ", "hehai2024", "李建国"],
+    ["答" * 200, "hehai2024", "李建国"], ["x", "yy", "zzz"],
+    "新市场小学",
 ])
-def test_missing_or_absurd_recovery_fields_are_rejected(store, question, answer):
-    """注册时的问题与答案都得是个能用的东西：空的、超长的一律 422 那一类。"""
+def test_absurd_recovery_answers_are_rejected(store, answers):
+    """注册时三条答案都得是个能用的东西：空的、太短的、超长的、条数不对的一律 422 那一类。"""
     with pytest.raises(AuthError):
-        store.register(username="不合格", password=PW,
-                       security_question=question, security_answer=answer)
+        store.register(username="不合格", password=PW, security_answers=answers)
 
 
-def test_giving_only_one_of_the_two_recovery_fields_is_rejected(store):
-    """半套找回凭据比没有更糟：界面会以为能自助，走到第二步才发现答不上来。"""
-    with pytest.raises(AuthError):
-        store.register(username="半个", password=PW, security_question=Q)
-    with pytest.raises(AuthError):
-        store.register(username="半个", password=PW, security_answer=A)
+def test_a_rejected_register_leaves_no_record(store):
+    """半套找回凭据比没有更糟：界面会以为能自助，走到第二步才发现答不上来。
+
+    被拒的那次注册必须在写盘之前就抛出去，否则库里躺着一堆解不开的残骸。
+    """
+    for answers in ([], ANS[:2], ["", "x2", "x3"]):
+        with pytest.raises(AuthError):
+            store.register(username="半个", password=PW, security_answers=answers)
     assert store.list_users() == [], "被拒的注册不该留下半成品记录"

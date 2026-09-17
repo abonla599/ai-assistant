@@ -184,35 +184,34 @@ def test_every_v1_route_declares_an_identity_dependency():
 def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     """免凭据端点必须逐个点名，多一条就红。
 
-    现在是四条：注册、登录，以及密码找回的两步（报出问题、验答案改密）。它们不是
-    "漏了鉴权"——没有身份的人本来就得能进来拿身份、也得能在忘了密码时自救。但每
-    一条都是攻击面，所以这条钉的是"不许悄悄多第五条"；这四条自己的防线不在这里，
-    在 auth_router（真实 IP 限流、几种失败同一句话）与 auth 存储层（同形措辞与
-    同形耗时）里。
+    现在是三条：注册、登录，以及自助改密。它们不是"漏了鉴权"——没有身份的人本来
+    就得能进来拿身份、也得能在忘了密码时自救。但每一条都是攻击面，所以这条钉的是
+    "不许悄悄多第四条"；这三条自己的防线不在这里，在 auth_router（真实 IP 限流、
+    几种失败同一句话）与 auth 存储层（同形措辞与同形耗时）里。
     """
-    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login",
-                            "/v1/auth/recovery", "/v1/auth/reset"}
+    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"}
 
 
-def test_the_two_recovery_steps_are_reachable_without_credentials(client, enforced):
-    """忘了密码的人手里没有任何凭据——这两步要凭据就是自救路径不存在。
+def test_the_reset_step_is_reachable_without_credentials(client, enforced):
+    """忘了密码的人手里没有任何凭据——这一步要凭据就是自救路径不存在。
 
     与注册那条对称：先证明真路径免凭据可达，再证明"免凭据"没有滑成前缀放行。
+    这里没有"先问服务器要问题"那一步：三题是全站常量，页面自己渲染，于是那条
+    能回答"这个用户名存在吗"的信道整个不存在了——顺手把路由也钉死。
     """
     enforced("垫底用户")
-    res = client.post("/v1/auth/recovery", json={"username": "没开找回的"})
-    assert res.status_code == 200, res.text
-    assert res.json()["question"]
+    assert "/v1/auth/recovery" not in {getattr(r, "path", "") for r in client.app.routes}, \
+        "问题已是常量，报出问题的端点没有存在价值；它回来了就是多一条免凭据信道"
 
     res = client.post("/v1/auth/reset",
-                      json={"username": "没开找回的", "answer": "猜一个",
+                      json={"username": "没留答案的", "answers": ["猜一个", "再猜一个", "还猜一个"],
                             "new_password": "correct-horse-battery"})
     assert res.status_code == 401, f"答案不对必须 401，而不是被鉴权层挡成 401 之外的话：{res.text}"
     assert res.json()["detail"] == "答案不正确"
 
     # 前缀化就漏：带斜杠与多一段子路径都不许免凭据
-    for path in ("/v1/auth/recovery/", "/v1/auth/reset/anything"):
-        res = client.post(path, json={"username": "没开找回的"})
+    for path in ("/v1/auth/reset/", "/v1/auth/reset/anything"):
+        res = client.post(path, json={"username": "没留答案的"})
         assert res.status_code == 401, f"{path} 白拿到了免凭据通道 -> {res.status_code}"
 
 

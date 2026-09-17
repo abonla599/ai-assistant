@@ -6,6 +6,11 @@
 密码**只用来换一枚会话令牌**，运行时鉴权走的仍然是令牌，密码不作为每请求
 凭据——否则它会出现在每一次请求头、代理与访问日志里。
 
+2026-09-18 密保从"每人自设一个问题"换成全站固定的三题（RECOVERY_QUESTIONS）：
+记录里只存三个答案的 bcrypt 摘要（answer_hashes，顺序与常量对齐），不再有自设
+问题，也就不再有"报出问题"这条免凭据信道——问服务器要一句服务器抄出来的话，
+只是白白多一条能回答"这个用户名存在吗"的路。
+
 令牌只存 SHA-256：本文件的数据与 sessions.json 同目录，而本仓库有过 .env
 被跟踪导致密钥泄露 5 个月的前科，明文存令牌等于把所有人的访问权一起放在
 一个随时可能被误提交的文件里。令牌本身是 256 位随机值，故 sha256 足够，
@@ -45,14 +50,20 @@ BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
 LAST_USED_FLUSH_AFTER = timedelta(hours=1)
 
 _LOGIN_FAIL = "用户名或密码不正确"
-# 找回流程的两句话是安全边界，不是文案：
-#   NO_RECOVERY 同时用于"查无此人"与"这个人没开找回"——两者同形，这个免凭据
-#     端点才不会顺手报出"哪些用户名真实存在"；
-#   RESET_FAIL 同时用于"答案错"、"没开找回"、"查无此人"与"账号被停用"。
-NO_RECOVERY = "这个用户名没有设置密码找回"
+# RESET_FAIL 是同一条免凭据路径上四种失败的同一句话：答案错、这个人没留找回
+# 答案、查无此人、账号被停用。多说一个字，这个端点就是一份用户名存在性名单；
+# 耗时也一样，见 reset_password 里那三枚 dummy 摘要。
 RESET_FAIL = "答案不正确"
 
-QUESTION_MAX = 60
+# 找回问题全站固定，这一份就是唯一事实来源：界面自己渲染这三句，不必问服务器要，
+# 于是"报出问题"那条能回答"这个用户名存在吗"的信道整个不存在了。列表顺序即答案
+# 顺序：记录里按这个次序存三枚摘要，问题文本本身不进库。
+RECOVERY_QUESTIONS: tuple[str, str, str] = ("你小学在哪上？",
+                                            "你的用户名是什么？",
+                                            "你的父亲叫什么名字？")
+# 条数从常量取，不留第二个"三"：以后加一句问题，比对与文案自己就跟上了。
+ANSWER_COUNT = len(RECOVERY_QUESTIONS)
+
 ANSWER_MIN = 2
 ANSWER_MAX = 64
 
@@ -96,7 +107,8 @@ def _check_password(password: str, stored) -> bool:
 
 # "用户名不存在"与"密码错"必须连时间都一样，否则响应快慢本身就是一份用户名名单。
 # 这个固定摘要只在 import 时算一次，让"查无此人"那一支也付一次 bcrypt 的代价。
-# 找回密码用的答案走同一枚摘要：答案错、没开找回、查无此人三件事同样不许有快慢差。
+# 找回密码的三条答案各走一枚这样的摘要：答案错、没留答案、查无此人三件事同样
+# 不许有快慢差，而且这个"同样"是拿三条 dummy 凑出来的，不是靠运气。
 _DUMMY_PW_HASH = "bcrypt:" + bcrypt.hashpw(_prehash("timing-equalizer"),
                                            bcrypt.gensalt()).decode("ascii")
 
@@ -104,8 +116,9 @@ _DUMMY_PW_HASH = "bcrypt:" + bcrypt.hashpw(_prehash("timing-equalizer"),
 def _answer_key(answer: str) -> str:
     """比对用的宽松归一化：人会输入 "Hehai University " 而不是精确串。
 
-    这里刻意**不**做长度校验——"答案太短"这种话一旦出现在找回流程里，
-    它就成了一条新的、可区分的失败措辞。严格校验只属于注册（_check_answer_shape）。
+    这里刻意**不**做长度校验——"答案太短"这种话一旦出现在找回流程的比对环节，
+    它就成了一条新的、可区分的失败措辞。严格校验属于形状闸门（_check_answer_shapes），
+    它在读库之前跑完，说的只是调用方刚提交的东西。
     """
     return (answer or "").strip().casefold()
 
@@ -119,15 +132,17 @@ def _check_answer_shape(answer: str) -> str:
     return key
 
 
-def _check_question_shape(question: str) -> str:
-    cleaned = (question or "").strip()
-    if not cleaned:
-        raise AuthError("找回问题不能为空")
-    if len(cleaned) > QUESTION_MAX:
-        raise AuthError(f"找回问题最长 {QUESTION_MAX} 个字符")
-    if re.search(r"[\x00-\x1f\x7f]", cleaned):
-        raise AuthError("找回问题含不可见字符")
-    return cleaned
+def _check_answer_shapes(answers) -> list:
+    """找回答案的形状闸门：条数必须是 ANSWER_COUNT，逐条还得是能用的东西。
+
+    条数**先**查：少一条就抛，而不是后面比对时悄悄少跑一次 bcrypt——静默截断等于
+    把"第几题没填"漏成耗时差，那正是这条路径要挡的事。这句话只描述调用方提交的
+    内容，与库里任何一枚摘要无关，所以它不构成"答案猜对了"的信号。
+    """
+    if not isinstance(answers, list) or len(answers) != ANSWER_COUNT:
+        raise AuthError(f"找回的 {ANSWER_COUNT} 题答案都要填，"
+                        f"且每题至少 {ANSWER_MIN} 个字符")
+    return [_check_answer_shape(a) for a in answers]
 
 
 def _as_hash_bytes(value) -> bytes:
@@ -286,23 +301,19 @@ class AuthStore:
             del tokens[:len(tokens) - MAX_SESSION_TOKENS]
         return token
 
-    def register(self, username: str, password: str, security_question: str = None,
-                 security_answer: str = None):
+    def register(self, username: str, password: str, security_answers: list = None):
         """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。
 
-        找回问题与答案在这里是**可选**的，因为真实库里就有它们之前注册的账号；
-        强制"新注册必须填"的是 HTTP 层的 RegisterRequest（见 auth_router），
-        那里少一个字段就是 422。半套凭据在存储层同样被拒：界面会以为能自助，
-        走到第二步才发现答不上来。
+        三条找回答案在这里是**可选**的，因为真实库里就有它们之前注册的账号，
+        历史数据与测试都靠"一条不给"这条走路。但只要给，就必须给满三条：半套
+        凭据比没有更糟——界面会以为能自助，走到第二步才发现答不上来。
         """
         with self._lock:
             cleaned = self._normalize_username(username)
             pw = self._check_password_shape(password)
-            carrying = [security_question is not None, security_answer is not None]
-            if any(carrying) and not all(carrying):
-                raise AuthError("找回问题与答案要一起填")
-            question = _check_question_shape(security_question) if all(carrying) else None
-            answer = _check_answer_shape(security_answer) if all(carrying) else None
+            keys = None
+            if security_answers is not None:
+                keys = _check_answer_shapes(security_answers)
 
             lc = cleaned.casefold()
             if any(u.get("username_lc") == lc for u in self._users.values()):
@@ -320,10 +331,10 @@ class AuthStore:
                 "created_at": _now(),
                 "last_used_at": _now(),
             }
-            if question is not None:
-                record["security_question"] = question
+            if keys is not None:
                 # 答案与密码同一个慢哈希：它往往是个能猜的地名，熵比密码还低。
-                record["answer_hash"] = hash_password(answer)
+                # 问题本身不进库——它是全站那三句常量。
+                record["answer_hashes"] = [hash_password(k) for k in keys]
             self._users[user_id] = record
             token = self._issue_token(record)
             self._flush()
@@ -355,43 +366,48 @@ class AuthStore:
         return Principal(user_id=record["user_id"], username=record["username"],
                          role=record.get("role", "user")), token
 
-    def recovery_question(self, username: str) -> str:
-        """报出这个人的找回问题；没得报的两种情况说同一句话。
+    def reset_password(self, username: str, answers: list, new_password: str,
+                       new_answers: list = None):
+        """三题全答对就换密码（顺手也能换答案），并作废这个人名下所有会话令牌。
 
-        返回问题文本本身就是泄露面（"这个用户名开了找回"），所以这里只保留那一
-        比特：查无此人与开了账号但没设找回问题的人，拿到逐字节相同的 NO_RECOVERY。
-        HTTP 层再按真实 IP 给这个端点计失败预算（见 auth_router）。
-        """
-        want = (username or "").strip().casefold()
-        with self._lock:
-            record = next((u for u in self._users.values()
-                           if u.get("username_lc") == want), None) or {}
-            if record.get("disabled"):
-                # 停用的人不该在这里被认出来：那等于告诉别人"这个号存在且被停了"。
-                return NO_RECOVERY
-            return record.get("security_question") or NO_RECOVERY
-
-    def reset_password(self, username: str, answer: str, new_password: str):
-        """答对找回问题就换密码，并把这个人名下所有会话令牌一起作废。
-
-        两处顺序是安全属性，不是风格：
-        1. 新密码的形状先查，答案后验。反过来时"密码太短"会变成"答案猜对了"的
-           确认信号，一个免凭据端点就多了一比特可问的东西；
-        2. 改密必须清令牌。"我改了密码，因为手机丢了"是这条路径存在的理由，
+        三处顺序是安全属性，不是风格：
+        1. 新密码与两组答案的形状先查，再读库。反过来时"密码太短"会变成"答案
+           猜对了"的确认信号，一个免凭据端点就多了一比特可问的东西；
+        2. 三条比对全部算完再判，不因为某一条错了就提前返回。短路等于把"第几题
+           猜对了"漏进耗时里，三题于是拆成三份互相独立的预算，整条路的强度除以三；
+        3. 改密必须清令牌。"我改了密码，因为手机丢了"是这条路径存在的理由，
            旧令牌还活着的话它就是个假动作。
         """
         pw = self._check_password_shape(new_password)
+        keys = _check_answer_shapes(answers)
+        # 轮换：固定问题不等于固定答案，答案泄露过就该换得掉。不给就原样留着。
+        replacement = _check_answer_shapes(new_answers) if new_answers is not None else None
+
         want = (username or "").strip().casefold()
         with self._lock:
             record = next((u for u in self._users.values()
                            if u.get("username_lc") == want), None)
-            stored = (record or {}).get("answer_hash") or _DUMMY_PW_HASH
-            if not _check_password(_answer_key(answer), stored):
-                # 答案错、没开找回、查无此人：三条走同一句、同一份 bcrypt 代价
+            # 查无此人与没留答案都补齐成 ANSWER_COUNT 枚 dummy：比对的条数与耗时
+            # 都不随人变，否则"这一次回得快一点"本身就是一份用户名名单。
+            digests = ((record or {}).get("answer_hashes") or []) \
+                + [_DUMMY_PW_HASH] * ANSWER_COUNT
+            # 显式循环，不是 any/all 生成式：三条 bool 必须先全算完再判。早退一处，
+            # "第几题猜对了"就漏进耗时里，三题变成三份互相独立的预算。
+            results = []
+            for index, key in enumerate(keys):
+                results.append(_check_password(key, digests[index]))
+            # 查无此人与没留答案也归到同一句 RESET_FAIL——挪到循环之前判断，就是给
+            # 它们开一条"秒回"的快路径。all() 之后仍要判这两条：dummy 摘要理论上
+            # 会被 "timing-equalizer" 这个答案撞中，只靠 all() 不够硬。
+            if not all(results) or record is None or not record.get("answer_hashes"):
                 raise AuthError(RESET_FAIL)
             if record.get("disabled"):
+                # 停用与答案错也说同一句话：告诉调用方"这个账号被停用了"等于让
+                # 任何人确认账号存在、并知道该去找谁求情。
                 raise AuthError(RESET_FAIL)
             record["pw_hash"] = hash_password(pw)
+            if replacement is not None:
+                record["answer_hashes"] = [hash_password(k) for k in replacement]
             record["tokens"] = []
             record["last_used_at"] = _now()
             self._flush()

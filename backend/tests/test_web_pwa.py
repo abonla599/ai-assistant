@@ -364,17 +364,16 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
 
     请求形状与 app.js 读的那几个响应键一起断，且响应是真的从 /v1/auth/register
     拿的，不是照抄一份字典——改名（token→access_token 这种）当天就该红。
+    找回不再有"问服务器要问题"这一步：三题是常量，服务器上没有那个端点了。
     """
-    from app.core.auth_router import RecoveryRequest, RegisterRequest, ResetRequest
+    from app.core.auth_router import RegisterRequest, ResetRequest
 
     api = (STATIC / "api.js").read_text(encoding="utf-8")
 
-    assert set(RegisterRequest.model_fields) == {"username", "password",
-                                                 "security_question", "security_answer"}
-    assert set(RecoveryRequest.model_fields) == {"username"}
-    assert set(ResetRequest.model_fields) == {"username", "answer", "new_password"}
-    for name, fields in (("register", RegisterRequest), ("recovery", RecoveryRequest),
-                         ("reset", ResetRequest)):
+    assert set(RegisterRequest.model_fields) == {"username", "password", "security_answers"}
+    assert set(ResetRequest.model_fields) == {"username", "answers", "new_password",
+                                              "new_answers"}
+    for name, fields in (("register", RegisterRequest), ("reset", ResetRequest)):
         m = re.search(r"%s:\s*\(([^)]*)\)\s*=>" % name, api)
         assert m, f"api.js 里没有 {name} 封装"
         assert [p.strip() for p in m.group(1).split(",")] == list(fields.model_fields), \
@@ -385,16 +384,11 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
     enforced("发码的人")
     res = client.post("/v1/auth/register",
                       json={"username": "字段名契约", "password": "correct-horse-battery",
-                            "security_question": "我小学的校名？",
-                            "security_answer": "河海大学附属小学"})
+                            "security_answers": ["新市场小学", "hehai2024", "李建国"]})
     assert res.status_code == 200, res.text
     body = res.json()
     for key in ("token", "user_id", "username"):
         assert key in body, f"后端没回 {key}：{sorted(body)}"
-
-    rec = client.post("/v1/auth/recovery", json={"username": "字段名契约"})
-    assert rec.status_code == 200 and rec.json()["recovery_available"] is True
-    assert rec.json()["question"] == "我小学的校名？"
 
 
 

@@ -164,10 +164,10 @@ def sample_messages():
     return [{"role": "user", "content": "你好"}]
 
 
-# 注册请求体现在要四格齐全：用户名、密码、找回问题、答案。每个测试文件各抄一份
-# 迟早会有一份抄漏，于是"少一格也算过"的假绿就回来了。
-RECOVERY_FIELDS = {"security_question": "我小学的校名？",
-                   "security_answer": "河海大学附属小学"}
+# 注册请求体现在是三格齐全：用户名、密码、三条固定问题的答案（顺序与
+# auth.RECOVERY_QUESTIONS 对齐）。每个测试文件各抄一份迟早会有一份抄漏，
+# 于是"少一格也算过"的假绿就回来了。
+RECOVERY_FIELDS = {"security_answers": ["新市场小学", "hehai2024", "李建国"]}
 
 
 @pytest.fixture

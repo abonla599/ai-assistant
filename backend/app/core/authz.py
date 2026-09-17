@@ -16,10 +16,10 @@ BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
 # 无需凭据即可到达的端点，精确匹配。注册与登录本来就是给"还没有身份的人"用的，
 # 所以它们必然公开——代价是这几个端点自己变成攻击面，防线全部落在 auth_router
-# 的真实 IP 限流与"几种失败同一句话、同一份耗时"上（注册/登录/找回都是）。
+# 的真实 IP 限流与"几种失败同一句话、同一份耗时"上（注册/登录/改密都是）。
+# 找回只有改密这一条公开端点：三题是全站常量，页面自己渲染，不必问服务器要。
 # 新增公开端点必须同时改这里，否则路由契约测试会红。
-PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login",
-                           "/v1/auth/recovery", "/v1/auth/reset"})
+PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"})
 _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 
 # 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺

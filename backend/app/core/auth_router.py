@@ -13,12 +13,13 @@
 """
 import time
 from collections import defaultdict
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core import authz
-from app.core.auth import NO_RECOVERY, RESET_FAIL, AuthError
+from app.core.auth import RESET_FAIL, AuthError
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -114,10 +115,10 @@ def _too_many(retry_after: int) -> HTTPException:
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    # 必填：存储层允许记录没有找回凭据（真实库里就有那之前的老账号），但经
-    # API 新注册的人必须留下它，否则"忘记密码"这条路对新人永远走不通。
-    security_question: str
-    security_answer: str
+    # 三条固定问题的答案，顺序与 auth.RECOVERY_QUESTIONS 对齐。这里是必填：存储层
+    # 允许记录没有找回凭据（真实库里就有那之前的老账号），但经 API 新注册的人必须
+    # 留下它，否则"忘记密码"这条路对新人永远走不通。少一条就是 422。
+    security_answers: List[str]
 
 
 class LoginRequest(BaseModel):
@@ -125,14 +126,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class RecoveryRequest(BaseModel):
-    username: str
-
-
 class ResetRequest(BaseModel):
     username: str
-    answer: str
+    answers: List[str]
     new_password: str
+    # 给了就连找回答案一起轮换（固定问题不等于固定答案），不给就是原样留着。
+    new_answers: Optional[List[str]] = None
 
 
 @router.post("/v1/auth/register")
@@ -152,7 +151,7 @@ async def register(req: RegisterRequest, request: Request):
     try:
         principal, token = _store().register(
             username=req.username, password=req.password,
-            security_question=req.security_question, security_answer=req.security_answer)
+            security_answers=req.security_answers)
     except AuthError as e:
         raise _register_error(e, ip)
     _note_registration(ip)
@@ -169,7 +168,7 @@ def _register_error(e: AuthError, ip: str) -> HTTPException:
         # 它背后真有一张分布式网络，那时限流本来也挡不住，只是把成本抬上去。
         _note_failure(ip)
         return HTTPException(status_code=409, detail=e.reason)
-    # 用户名、密码、找回问题本身不合格：都是当事人自己能改好的，不计费也不该挡别人的路。
+    # 用户名、密码、三条找回答案本身不合格：都是当事人自己能改好的，不计费也不该挡别人的路。
     return HTTPException(status_code=422, detail=e.reason)
 
 
@@ -190,40 +189,27 @@ async def login(req: LoginRequest, request: Request):
             "username": principal.username, "role": principal.role}
 
 
-@router.post("/v1/auth/recovery")
-async def recovery(req: RecoveryRequest, request: Request):
-    """报出这个用户名的找回问题；答对才能进下一步改密。
+@router.post("/v1/auth/reset")
+async def reset(req: ResetRequest, request: Request):
+    """三题全答对就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。
 
-    它免凭据，所以两件事一起做：先过登录那份按真实 IP 的失败预算，问到"没有
-    设置密码找回"就记一格——查无此人与没开找回的人在响应里同形（见存储层
-    recovery_question），这一格是那条信道唯一还剩下的代价。
+    这里没有"先把问题念给你听"那一步：三题是全站常量，前端自己渲染，服务器不为
+    一句抄来的话开一条免凭据信道。答案与新密码**一次提交**——分开验答案就等于给
+    外人一个 oracle。
     """
     ip = _client_ip(request)
     if _throttled(ip):
         raise _too_many(FAILURE_WINDOW_SECONDS)
-    question = _store().recovery_question(req.username)
-    available = question != NO_RECOVERY
-    if not available:
-        _note_failure(ip)
-    # recovery_available 是这一格唯一的额外信息：false 同时覆盖"没这个人"与
-    # "有这个人但没设找回"，所以它没有把用户名存在性多说出去一个字。
-    return {"question": question, "recovery_available": available}
-
-
-@router.post("/v1/auth/reset")
-async def reset(req: ResetRequest, request: Request):
-    """答案正确就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。"""
-    ip = _client_ip(request)
-    if _throttled(ip):
-        raise _too_many(FAILURE_WINDOW_SECONDS)
     try:
-        _store().reset_password(req.username, req.answer, req.new_password)
+        _store().reset_password(req.username, req.answers, req.new_password,
+                                req.new_answers)
     except AuthError as e:
         if e.reason == RESET_FAIL:
-            # 答案错、没开找回、查无此人、已停用：同一句、同一格预算、同一个 401
+            # 答案错、没留找回答案、查无此人、已停用：同一句、同一格预算、同一个 401
             _note_failure(ip)
             raise HTTPException(status_code=401, detail=e.reason)
-        # 新密码本身不合格（太短、太长、空）：那是当事人自己能改好的，不计费
+        # 新密码或答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
+        # 改好的，不计费
         raise HTTPException(status_code=422, detail=e.reason)
     _FAILS.pop(ip, None)
     return {"status": "password_reset"}
