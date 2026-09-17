@@ -27,6 +27,11 @@ Task 2（端点收口）在本文件里只做两件事，产品代码一行未�
 与 answers 侧对称的零次 bcrypt 判据（旧的那条只断"被拒之后库没变"，看不见顺序），
 以及修掉那条读源码的结构锁的两处卫生问题——注释与 docstring 里提到被禁写法就误伤、
 打包环境（本仓要进 EXE）读不到源码时误报成失败而不是跳过。
+
+修复轮 1（F4）接着修同一把尺子的第三处卫生问题：上一轮只跳过了整行注释，行尾挂着代码
+的那种（`return x  # record["disabled"] = False`）照旧参与匹配，将来一句解释性行尾注释
+就能把锁误红。现在按 "#" 先切再判非空，判据是 test_the_structural_ruler_ignores_trailing_comments
+——两支都在本文件里：误伤的那半与真赋值仍咬得到的那半。
 """
 import inspect
 import json
@@ -687,7 +692,9 @@ def _code_lines(func) -> list:
     1. **注释咬人**。这条锁要挡的是"以后有人在成功路径里加一行赋值"，而解释为什么
        不加的那句注释里完全可能出现 `record["disabled"] = False` 这个字样——那时改
        一句文档就红，红得没有道理，而一条会误报的锁最后被人删掉。docstring 整段切
-       掉，整行注释逐行跳过；行尾还挂着代码的那种（`x = 1  # ...`）照旧参与匹配。
+       掉；注释整行跳过，挂在代码后面的那半截也先切掉（`return x  # ...` 只留
+       `return x` 参与匹配）。判据与被切的字样见
+       test_the_structural_ruler_ignores_trailing_comments。
     2. **打包环境**。本仓要打进 EXE（PyInstaller），`inspect.getsource` 在拿不到
        源文件时抛 OSError。一个读不到源码的自检应当明说"我没跑成"，而不是把整套
        测试判红——红在这里等于告诉别人"改密路径坏了"，而坏的是测试的尺子。
@@ -699,7 +706,44 @@ def _code_lines(func) -> list:
     doc = func.__doc__
     if doc:                       # -O / -OO 运行时 docstring 已被剥掉，这里跟着退化
         source = source.replace(doc, "", 1)
-    return [line for line in source.splitlines() if not line.lstrip().startswith("#")]
+    lines = []
+    for line in source.splitlines():
+        code = line.split("#")[0]     # 行尾注释先切掉：解释"为什么不许写"的那句里完全
+        if code.strip():              # 可能出现被禁字样；切完还剩东西才算这一行有代码
+            lines.append(code)
+    return lines
+
+
+def _offenders(lines) -> list:
+    """把三条被禁写法在一批行上过一遍，返回咬到的行。"""
+    return [line.strip() for pattern in _DISABLED_WRITES
+            for line in lines if pattern.search(line)]
+
+
+def test_the_structural_ruler_ignores_trailing_comments():
+    """**新增锁（修复轮 1 / F4）**：尺子只认真代码——行尾注释不误伤，真赋值仍咬得到。
+
+    这把锁最该容忍的情形，恰恰是"以后有人在成功路径旁边加一句解释性行尾注释，里面提到
+    被禁的写法"：一句文档改动把锁判红，红得没有道理，而一条会误报的锁最后被人删掉。
+    上一轮只跳过了整行注释，`return x  # record["disabled"] = False` 这种行尾挂着代码的
+    照旧参与匹配——实测就是误红。反向那半一样要成立：真写了一行赋值必须还咬得到，
+    否则"修卫生"就是"把牙磨掉"。
+    """
+    def a_prose_comment():
+        record = {"disabled": True}
+        return record  # record["disabled"] = False 这种写法永远不许出现在这条路径上
+
+    assert _offenders(_code_lines(a_prose_comment)) == [], \
+        "行尾注释被当成了代码：改一句解释就把锁判红"
+
+    def a_real_write():
+        record = {"disabled": True}
+        record["disabled"] = False
+        return record
+
+    offenders = _offenders(_code_lines(a_real_write))
+    assert offenders == ['record["disabled"] = False'], \
+        f"真赋值没被咬到（{offenders}）：这把锁已经没有牙了"
 
 
 def test_reset_password_source_never_writes_the_disabled_flag():

@@ -13,9 +13,11 @@
 
 2026-09-18 密保换成全站固定三题之后，/v1/auth/reset 也是免凭据端点了，而它成功一次
 的代价比登录更大（名下每台设备都掉线）。于是多出一本**成功**账：同一来源一天最多
-重置 3 次；同时重置成功**不再**抹掉这个来源的失败账——抹掉等于奖励猜中答案的人，
-"猜错 9 次 + 猜对 1 次"就变成每 10 分钟一次的无限续命。下面那几条改密预算的锁就是
-钉这两件事的。
+重置 3 次。同一天的修复轮又把猜找回答案的**失败**拆成第四本账（_RESET_FAILS）：原本
+三本账共用 _FAILS 一个键，而 register 与 login 成功时都 `_FAILS.pop(ip)`——同一 IP 猜错
+四次、登进自己的号（或再注册一个小号）账就清零，无限续命。找回这本现在谁的成功都不清，
+"猜错 9 次 + 猜对 1 次"不再是每 10 分钟一次的免死金牌。下面那几条改密预算的锁就是钉
+这两本的。
 """
 import sys
 from pathlib import Path
@@ -46,6 +48,15 @@ def _budget_used() -> int:
     from app.core.auth_router import _FAILS
 
     return sum(len(v) for v in _FAILS.values())
+
+
+def _guessing_budget_used() -> int:
+    """找回流程那本**独立**的失败账记了几次猜错（修复轮 1 / F2）。同一个理由：
+    只数时间戳。两条判据都得摆出来，因为"猜口令"与"猜找回答案"现在分家了——
+    只数 _FAILS 的那半看不见找回这本，反之亦然。"""
+    from app.core.auth_router import _RESET_FAILS
+
+    return sum(len(v) for v in _RESET_FAILS.values())
 
 
 from tests.conftest import RECOVERY_FIELDS as RECOVERY
@@ -381,12 +392,14 @@ def test_the_reset_budget_is_keyed_on_the_same_trusted_source():
         "伪造 X-Forwarded-For 换不来第四格改密配额"
 
 
-def test_a_successful_reset_leaves_the_failure_ledger_alone():
-    """**新增锁（本轮核心）**：改密成功不许顺手抹掉这个来源已花掉的失败格。
+def test_a_successful_reset_leaves_the_guessing_ledger_alone():
+    """**重述后的锁（修复轮 1 / F2）**：改密成功不许顺手抹掉这个来源已花掉的猜错格。
 
-    五格猜错 → 猜中一次 → 再猜五格：账上应当攒到十条，于是下一格是 429。旧行为里
-    猜中那一下把账清成零，第二次猜错五格照样 401——攻击者只要每 10 次里蒙中一次就
-    永远不会被限。这条钉的就是成功路径上那一行 _FAILS.pop 已经被拿掉。
+    五格猜错 → 猜中一次 → 再猜五格：找回那本独立账应当攒到十条，于是下一格是 429。
+    旧行为里猜中那一下把账清成零，第二次猜错五格照样 401——攻击者只要每 10 次里蒙中
+    一次就永远不会被限。判据直接数 _RESET_FAILS 的条数而不是只数状态码：状态码在
+    "清账 vs 不清账"这两支上要到第 11 次才分得开，账上那一格当场就分得开。
+    另断 _FAILS 全程为零：猜找回答案记的是找回那本账，不是登录那本（两本分家）。
     """
     from app.core.auth_router import FAILURE_WINDOW_SECONDS, MAX_FAILURES_PER_WINDOW
 
@@ -395,15 +408,55 @@ def test_a_successful_reset_leaves_the_failure_ledger_alone():
         assert _reset("被猜答案的人", WRONG, ip="192.0.2.62").status_code == 401, \
             f"第 {i} 次猜错应当还在预算内被答 401"
     assert _reset("被猜答案的人", ip="192.0.2.62").status_code == 200
-    assert _budget_used() == 5, "猜中一次就把失败账清零 = 奖励猜中者"
+    assert _guessing_budget_used() == 5, "猜中一次就把找回那本账清零 = 奖励猜中者"
+    assert _budget_used() == 0, "猜答案不该烧掉登录预算：那是另一个端点的账"
     for i in range(5):
         assert _reset("被猜答案的人", WRONG, ip="192.0.2.62").status_code == 401, \
             f"第 {i} 次仍在 10 格之内"
-    assert _budget_used() == MAX_FAILURES_PER_WINDOW, "两段失败必须累计，中间的成功不算清账"
+    assert _guessing_budget_used() == MAX_FAILURES_PER_WINDOW, \
+        "两段失败必须累计，中间那次成功不算清账"
     locked = _reset("被猜答案的人", WRONG, ip="192.0.2.62")
     assert locked.status_code == 429, "旧行为在这里回 401：那人还能再猜十次"
     assert locked.headers.get("retry-after") == str(FAILURE_WINDOW_SECONDS), \
-        "挡下他的是失败预算（十分钟），不是那本成功账——他今天只用了一次成功"
+        "挡下他的是那本十分钟的猜错账，不是 24 小时的改密成功账——他今天只用了一次成功"
+
+
+@pytest.mark.parametrize("success_path", ("login", "register"))
+def test_no_other_success_pays_off_the_guessing_ledger(success_path):
+    """**新增锁（F2 主体）**：猜找回答案的失败预算独立成册，别的端点成功洗不掉它。
+
+    上一轮三本账（失败 / 注册成功 / 改密成功）里只有那本失败账是安全预算，而它只按来源
+    IP 一个键、被三个端点共用：register 与 login 成功时都执行 `_FAILS.pop(ip, None)`。
+    评审实测过那条洗白路径——同一 IP 猜错 4 次（budget=4）→ 用**自己的号**登录成功一次
+    → budget=0 → 继续 401 无限续命；再注册第二个号同样清零。本轮把 reset 变成免凭据
+    端点之后这条第一次变得致命：猜中一次口令、或随手建一个新号，都是伸手就有的"成功"。
+    判据照旧数账，并且两支都跑到 429：只断状态码的话，差一位置会藏住清账。
+    """
+    from app.core.auth_router import FAILURE_WINDOW_SECONDS, MAX_FAILURES_PER_WINDOW
+
+    ip = "192.0.2.71" if success_path == "login" else "192.0.2.72"
+    # 参数化两支与上面那条登录用例共用同一份 users.json，名字必须各自唯一
+    victim = f"被猜的人{success_path}"
+    _register(victim, ip=ip)
+    for i in range(4):
+        assert _reset(victim, WRONG, ip=ip).status_code == 401, f"第 {i} 次猜错"
+    assert _guessing_budget_used() == 4, "前提：猜错确实进了找回那本账"
+
+    if success_path == "login":
+        assert _login(victim, PW, ip=ip).status_code == 200
+    else:
+        assert _reg("换个号的人", ip=ip).status_code == 200
+    assert _guessing_budget_used() == 4, \
+        f"{success_path} 成功替找回清了账：预算又还给猜中者了"
+    assert _budget_used() == 0, "登录/注册那本账按既有契约被清干净了——但找回这本不能跟着清"
+
+    for i in range(MAX_FAILURES_PER_WINDOW - 4):
+        assert _reset(victim, WRONG, ip=ip).status_code == 401, \
+            f"累到第 {i} 次仍应在预算内"
+    assert _guessing_budget_used() == MAX_FAILURES_PER_WINDOW, "两段猜错必须累计"
+    locked = _reset(victim, WRONG, ip=ip)
+    assert locked.status_code == 429, "旧行为在这里回 401：那人每成功一次就把预算回满"
+    assert locked.headers.get("retry-after") == str(FAILURE_WINDOW_SECONDS)
 
 
 def test_a_partially_correct_answer_set_says_what_a_wrong_one_says():
@@ -439,25 +492,19 @@ def test_a_missing_answer_at_register_is_a_free_typo():
 
 
 @pytest.mark.parametrize("answers", [WRONG[:2], WRONG + ["第四条"]])
-def test_the_answer_count_is_rejected_by_the_request_model(monkeypatch, answers):
-    """**新增锁**：条数在 pydantic 层就限死，错条数的请求根本走不到存储层。
+def test_a_wrong_answer_count_is_a_free_typo(answers):
+    """**降级后的锁（修复轮 1 / F1）**：数错格子仍是一句人话的 422，而且一格都不记。
 
-    只断 422 是恒真的——存储层那道闸门也会给 422，那样的话这条测试对"HTTP 层漏了
-    闸门"毫无鉴别力。所以判据是 reset_password **一次都没被调用**：闸门若在模型层，
-    存储层就连看都看不到这个请求。数错格子该看到的是一条指着 answers 字段的校验错误
-    （detail 是个列表，loc 里写着 ["body","answers"]），而不是被拿去和"答案不对"混成
-    一句；而错条数的请求也不该在库里留下任何痕迹。
+    上一轮在这里加过一层 pydantic 的 `Field(min_length=3, max_length=3)`，评审裁定撤掉：
+    撤掉之后状态码、bcrypt 次数、计费、库里留没留痕迹四个维度实测全部等价，唯一区别
+    是错误形状，而那个区别是成本——detail 变成结构化列表、会把提交的答案原样回显给
+    调用方，且前端 `api.js` 是 `new Error(detail)`，数组到浏览器里就是 [object Object]；
+    判据还会绑在 pydantic 的错误布局（`detail[0]["loc"]`）上，升级即碎。
+    所以"哪一层拦下来的"不再是被钉的东西，"拦下来时说的是不是人话"才是：必须是存储层
+    那句指着题数的中文，不许与"答案不正确"混成一句。原判据一条没丢：422、不计费、
+    answer_hashes 逐字节未变、旧口令仍可用、新口令没被装上。
     """
-    called = []
-    real = auth_store.reset_password
-
-    def spy(*args, **kwargs):
-        called.append(1)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(auth_store, "reset_password", spy)
-
-    # 参数化两支共用同一份 users.json，名字必须各不相同，否则第二支是撞名不是测闸门
+    # 参数化两支共用同一份 users.json，名字必须各不相同，否则第二支是撞名不是测条数
     name = f"条数的人{len(answers)}"
     created = _register(name, ip="192.0.2.66")
 
@@ -470,41 +517,79 @@ def test_the_answer_count_is_rejected_by_the_request_model(monkeypatch, answers)
     before = digests()
     res = _reset(name, answers, ip="192.0.2.66")
     assert res.status_code == 422, f"{len(answers)} 条答案 -> {res.status_code} {res.text}"
-    assert res.json()["detail"][0]["loc"] == ["body", "answers"], \
-        "这条 422 没再指着 answers 字段：它说的就不是「你数错了格子」这件事了"
-    assert called == [], f"{len(answers)} 条答案被递进了存储层：模型层没有闸门"
-    assert digests() == before, "answer_hashes 不许被动过"
+    detail = res.json()["detail"]
+    assert isinstance(detail, str), \
+        f"422 吐回了结构化列表（前端 new Error(detail) 会显示 [object Object]）：{detail!r}"
+    assert "3 题" in detail and "答案" in detail, \
+        f"{len(answers)} 条答案说的是别的话：{detail!r}"
+    assert detail != RESET_FAIL, "数错格子被说成了『答案不正确』：手滑和猜混成了一句"
     assert _budget_used() == 0, "自己填错条数不计费"
+    assert _guessing_budget_used() == 0, \
+        "F2 之后'不计费'要两本账都断：数错格子若被记进找回那本，只数 _FAILS 就漏了"
+    assert digests() == before, "answer_hashes 不许被动过"
     assert _login(name, PW, ip="192.0.2.66").status_code == 200, "旧口令必须还在用"
     # 下面这一格是这条用例自己猜的一次口令，本来就该计费——所以它必须在"不计费"
     # 那条断言之后才发生，别把自己探测出来的账算到闸门头上。
     assert _login(name, PW2, ip="192.0.2.66").status_code == 401
 
 
-def test_the_prune_sweeps_all_three_ledgers(monkeypatch):
-    """内存压力清账必须覆盖三本账：没被扫到的那本就是一本只胀不收的表。
+def test_the_prune_sweeps_all_four_ledgers(monkeypatch):
+    """内存压力清账必须覆盖四本账：没被扫到的那本就是一本只胀不收的表。
 
     触发条件（来源数超过 4096）今天这台机器碰不到，所以这条挡的不是现行故障，而是
-    "以后加第四本账时忘了把它加进那个元组"——那种遗漏不会让任何对外行为变错（读数
+    "以后加第五本账时忘了把它加进那个元组"——那种遗漏不会让任何对外行为变错（读数
     另有 _recent 按窗口过滤，过期条目挡不住合法请求），只会让表在常年不重启的进程里
     悄悄长出去，而这台机器是开机自启的。反向也要成立：还热着的条目不许被顺手清掉，
     否则这条锁在"无条件清空"那种改法面前就是空的。
     """
     from app.core import auth_router
-    from app.core.auth_router import _FAILS, _REGISTERS, _RESETS
+    from app.core.auth_router import _FAILS, _REGISTERS, _RESET_FAILS, _RESETS
 
     monkeypatch.setattr(auth_router, "MAX_TRACKED_SOURCES", 0)
     moment = auth_router._now() + auth_router.FAILURE_WINDOW_SECONDS * 2
-    ledgers = (_FAILS, _REGISTERS, _RESETS)
+    # 时间戳取"比最宽那本窗口还老"，这条才只管覆盖度、不管阈值——阈值归下面那条锁
+    long_overdue = moment - auth_router.RESET_WINDOW_SECONDS - 1
+    ledgers = (_FAILS, _REGISTERS, _RESETS, _RESET_FAILS)
     for ledger in ledgers:
         ledger.clear()
         for i in range(5):
-            ledger[f"192.0.2.{i}"] = [0.0]          # 整桶都过了最严的那个窗口
-        ledger["198.51.100.7"] = [moment]           # 还热着
+            ledger[f"192.0.2.{i}"] = [long_overdue]   # 整桶在哪本账里都过期了
+        ledger["198.51.100.7"] = [moment]             # 还热着
     auth_router._prune(moment)
     for ledger in ledgers:
         assert set(ledger) == {"198.51.100.7"}, \
             f"{ledger} 没被扫到（过期桶还留着），或热桶被一起清了"
+
+
+def test_prune_uses_each_ledgers_own_window(monkeypatch):
+    """**新增锁（修复轮 1 / F3）**：清内存要用每本账自己的窗口，不能一把尺子量四本。
+
+    _prune 由**内存**上限触发，不是安全窗口。上一轮那把统一的最短窗口（十分钟）去量 24
+    小时的两本就是 fail-open：来源数一旦真超过 4096，"这个人今天注册过/改过密"的记录会
+    被提前丢掉，两本配额当场悄悄放宽。反向同样错：量 _RESET_FAILS 时十分钟是对的，可要是
+    哪天有人图省事把阈值改成最宽的那本，猜答案的预算就从十分钟变成二十四小时——把一个
+    安全闸门改成了另一个。所以两边都要断：长窗口那两本留住"只在 24 小时内"的那一格，
+    短窗口那两本把它扫掉。
+    """
+    from app.core import auth_router
+    from app.core.auth_router import _FAILS, _REGISTERS, _RESET_FAILS, _RESETS
+
+    monkeypatch.setattr(auth_router, "MAX_TRACKED_SOURCES", 0)
+    moment = auth_router._now()
+    in_long_window_only = moment - auth_router.FAILURE_WINDOW_SECONDS - 1
+    overdue_everywhere = moment - auth_router.RESET_WINDOW_SECONDS - 1
+    for ledger in (_FAILS, _REGISTERS, _RESET_FAILS, _RESETS):
+        ledger.clear()
+        ledger["in-long-window"] = [in_long_window_only]
+        ledger["overdue-everywhere"] = [overdue_everywhere]
+
+    auth_router._prune(moment)
+    for ledger in (_REGISTERS, _RESETS):
+        assert set(ledger) == {"in-long-window"}, \
+            "24 小时那两本被拿十分钟的窗口去过了：记录被提前清掉 = 配额悄悄放宽"
+    for ledger in (_FAILS, _RESET_FAILS):
+        assert set(ledger) == set(), \
+            f"十分钟那两本没按自己的窗口过期：{ledger}"
 
 
 # ---------- /v1/auth/me 与令牌真的能用 ----------

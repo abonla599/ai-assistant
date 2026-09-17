@@ -16,10 +16,10 @@ from collections import defaultdict
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.core import authz
-from app.core.auth import ANSWER_COUNT, RESET_FAIL, AuthError
+from app.core.auth import RESET_FAIL, AuthError
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -53,6 +53,21 @@ MAX_TRACKED_SOURCES = 4096
 _FAILS = defaultdict(list)
 _REGISTERS = defaultdict(list)
 _RESETS = defaultdict(list)
+# 猜找回答案的失败单独一册（窗口与上限都沿用上面那两条常量，换的只是账本）。
+# 理由：_FAILS 在登录与注册成功时会被 _FAILS.pop(ip) 清空——那是这两个端点的既有契约
+# （"密码对了"基本说明来路正当）。但一个正在猜三题答案的人，随手就能拿到一次那样的
+# 成功：猜对自己的口令、或再注册一个小号。共用一本账等于每成功一次就把找回的预算还给他，
+# 于是"每 10 次里蒙中一次"就能无限猜下去。找回这本账任何成功路径都不许清，改密成功也不行
+# （判据：test_no_other_success_pays_off_the_guessing_ledger）。
+_RESET_FAILS = defaultdict(list)
+
+# 每本账配自己的窗口：_prune 是内存闸门，拿十分钟那把尺子去过 24 小时那两本，就是
+# 在来源数超过 4096 时把整桶有效记录提前丢掉——配额被悄悄放宽，是一条 fail-open。
+# 这份元组同时是"账本有哪几本"的唯一清单：新加一本忘了加进来，就是只胀不收。
+_LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
+            (_REGISTERS, REGISTER_WINDOW_SECONDS),
+            (_RESETS, RESET_WINDOW_SECONDS),
+            (_RESET_FAILS, FAILURE_WINDOW_SECONDS))
 
 
 def _store():
@@ -77,30 +92,44 @@ def _recent(ledger, ip: str, window: float, moment: float) -> list:
 
 
 def _prune(moment: float) -> None:
-    """来源数超出上限时丢掉"整桶都已过期"的那些键——三本账都要扫，漏一本就是只胀不收。
+    """来源数超出上限时丢掉"整桶都已过期"的那些键——四本账都要扫，且各按自己的窗口过。
 
-    保留阈值沿用最短的那本窗口（FAILURE_WINDOW_SECONDS），这是既有取舍、不是新决定：
-    它由**内存**上限触发，不是安全窗口，所以来源数一旦真超过 4096，_REGISTERS 与
-    _RESETS 那两本 24 小时的账会被提前清成 10 分钟。要收紧就得让每本账带自己的窗口，
-    并且那两本一起改。今天这台机器上同时在用的来源是个位数，所以留在这里当说明，
-    没有为它扩范围。
+    触发条件是**内存**上限，不是安全窗口，所以两件事都不能凑：漏掉一本就是只胀不收，
+    拿统一的最短窗口去过 24 小时的那两本则会在来源数超过 4096 时把整桶有效记录提前丢掉
+    （注册与改密的配额被悄悄放宽，那是一条 fail-open）。窗口就在 _LEDGERS 里跟账本绑在
+    一起，判据见 test_prune_uses_each_ledgers_own_window。
     """
-    for ledger in (_FAILS, _REGISTERS, _RESETS):
+    for ledger, window in _LEDGERS:
         if len(ledger) <= MAX_TRACKED_SOURCES:
             continue
         for key in [k for k, v in ledger.items()
-                    if not any(moment - t < FAILURE_WINDOW_SECONDS for t in v)]:
+                    if not any(moment - t < window for t in v)]:
             ledger.pop(key, None)
 
 
 def _throttled(ip: str) -> bool:
+    """登录与注册共用的那本失败账（猜口令、撞名）。找回流程不看这本，见下。"""
     moment = _now()
     _prune(moment)
     return len(_recent(_FAILS, ip, FAILURE_WINDOW_SECONDS, moment)) >= MAX_FAILURES_PER_WINDOW
 
 
+def _reset_throttled(ip: str) -> bool:
+    """找回流程自己那本失败账：同一个窗口、同一个上限，只是另一本账——
+    登录成功、注册成功、改密成功都清不到它（为什么必须分开，见 _RESET_FAILS 上面那段）。
+    """
+    moment = _now()
+    _prune(moment)
+    return len(_recent(_RESET_FAILS, ip, FAILURE_WINDOW_SECONDS,
+                       moment)) >= MAX_FAILURES_PER_WINDOW
+
+
 def _note_failure(ip: str) -> None:
     _FAILS[ip].append(_now())
+
+
+def _note_reset_failure(ip: str) -> None:
+    _RESET_FAILS[ip].append(_now())
 
 
 def _registrations_full(ip: str) -> bool:
@@ -155,11 +184,10 @@ class LoginRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     username: str
-    # 条数在模型层就钉死成三条。存储层那道闸门（auth._check_answer_shapes）管的是
-    # "绕过 HTTP 直接调存储层"的调用方，替不了这一层：数错格子要看到一条指着 answers
-    # 的 422（填的人自己改得好、不计费），而不是与"答案不正确"同一出口——一句说明填的
-    # 是自己人，另一句说明有人在猜，两者在安全上不是一回事。数字取自 auth 的常量。
-    answers: List[str] = Field(min_length=ANSWER_COUNT, max_length=ANSWER_COUNT)
+    # 条数不在这里判，和下面的 new_answers 同一层：存储层那道闸门（auth._check_answer_shapes）
+    # 在读库与比对之前就会抛出，落到 HTTP 还是那句指着题数的中文 422、照样不计费（判据见
+    # test_auth.py 里那条零次 bcrypt 锁与本文件那条 free_typo 锁）。
+    answers: List[str]
     new_password: str
     # 给了就连找回答案一起轮换（固定问题不等于固定答案），不给就是原样留着。
     # "不给"本身合法，所以条数只能由存储层判：它同样在读库与比对之前抛出，落到 HTTP
@@ -230,14 +258,17 @@ async def reset(req: ResetRequest, request: Request):
     一句抄来的话开一条免凭据信道。答案与新密码**一次提交**——分开验答案就等于给
     外人一个 oracle。
 
-    两本账都要看，顺序是先失败后成功：前者挡"一直在猜"，后者挡"已经猜中过几次"。
-    成功路径只往 _RESETS 记一格，**不清** _FAILS——登录与注册敢在成功时清账，是因为
-    "密码对了"基本能说明来路正当；这里不行，三题的文本和常见答案组合本来就是公开的，
-    猜中一次恰恰说明来路不明的那一面还没排除。清掉就等于把预算还给猜中者：每 10 次
-    里蒙中一次，他就永远限不住。
+    三本账都要看，顺序是先猜错、后猜中、再数今天改过几次：_RESET_FAILS 挡"一直在猜"，
+    _RESETS 挡"已经猜中过几次"。猜错的格子记在找回自己那本账上，而不是与登录/注册共用的
+    _FAILS——那本在登录或注册成功时会被清空（那是它们的既有契约），可一个正在猜三题的人
+    随手就能拿到一次那样的成功：猜对自己的口令、或再注册一个小号。共用一本账就等于每
+    成功一次把预算还给他，每 10 次里蒙中一次他就永远限不住。反过来同样不通融：改密成功
+    也只往 _RESETS 记一格，**不清** 任何失败账——登录与注册敢在成功时清账，是因为"密码
+    对了"基本能说明来路正当；这里不行，三题的文本和常见答案组合本来就是公开的，猜中一次
+    恰恰说明来路不明的那一面还没排除。
     """
     ip = _client_ip(request)
-    if _throttled(ip):
+    if _reset_throttled(ip):
         raise _too_many(FAILURE_WINDOW_SECONDS)
     if _resets_full(ip):
         raise _too_many(RESET_WINDOW_SECONDS)
@@ -247,7 +278,7 @@ async def reset(req: ResetRequest, request: Request):
     except AuthError as e:
         if e.reason == RESET_FAIL:
             # 答案错、没留找回答案、查无此人、已停用：同一句、同一格预算、同一个 401
-            _note_failure(ip)
+            _note_reset_failure(ip)
             raise HTTPException(status_code=401, detail=e.reason)
         # 新密码或轮换答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
         # 改好的，不计费

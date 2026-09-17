@@ -109,21 +109,21 @@ def _isolated_throttle():
     429——那时绿就只是算术运气。放在 conftest 而不是某个测试文件里，是因为它
     保护的是整个套件。
 
-    三本账都要清，一本都不能少：_FAILS 记登录失败与撞名，_REGISTERS 记注册成功数，
-    _RESETS 记改密成功数。后两本记的都是**成功**，也就是"这条用例明明什么都没做错、
-    只是正常工作了几次"就开始攒账——漏清任何一本，前面某条用例注册满 3 个号或改满
-    3 次密，后面随便一条断言 200 的用例就会拿到 429。24 小时的窗口比 10 分钟那本
-    更经不起带出用例：它当天根本不会自己松开。
+    四本账都要清，一本都不能少：_FAILS 记登录失败与撞名，_RESET_FAILS 记猜找回答案的
+    猜错（修复轮 1 / F2 起的独立一本），_REGISTERS 记注册成功数，_RESETS 记改密成功数。
+    后两本记的都是**成功**，也就是"这条用例明明什么都没做错、只是正常工作了几次"就开始
+    攒账——漏清任何一本，前面某条用例注册满 3 个号或改满 3 次密，后面随便一条断言 200 的
+    用例就会拿到 429。24 小时的两本比 10 分钟那两本更经不起带出用例：它当天根本不会自己
+    松开。而 _RESET_FAILS 漏清更隐蔽：猜错十格的用例会让后面所有走 /v1/auth/reset 的
+    用例当场 429，红的地方离真凶隔着几条。
     """
-    from app.core.auth_router import _FAILS, _REGISTERS, _RESETS
+    from app.core.auth_router import _FAILS, _REGISTERS, _RESET_FAILS, _RESETS
 
-    _FAILS.clear()
-    _REGISTERS.clear()
-    _RESETS.clear()
+    for ledger in (_FAILS, _REGISTERS, _RESETS, _RESET_FAILS):
+        ledger.clear()
     yield
-    _FAILS.clear()
-    _REGISTERS.clear()
-    _RESETS.clear()
+    for ledger in (_FAILS, _REGISTERS, _RESETS, _RESET_FAILS):
+        ledger.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
