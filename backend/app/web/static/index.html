@@ -233,19 +233,45 @@
 
   <!-- 首屏凭据层：没有有效令牌时挡住整个应用。
        登录与注册共用两个字段，差别只在打到哪个端点；角色一律由服务端 me() 说，
-       前端不猜。 -->
+       前端不猜。版式照参考图：宽屏两列、窄屏单列，模式切换是表单下面那对链接。
+       右侧那张卡不放二维码也不放协议链接——我们没有扫码登录，也没有协议文档，
+       写上去就是两个点开是 404 的谎。 -->
   <div class="auth hidden" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
-    <div class="auth-card">
-      <h1 class="auth-title">AI 助手</h1>
-      <p class="auth-sub" id="authSub">登录后继续；还没有账号就选右边那页注册一个。</p>
-      <div class="auth-tabs" role="tablist">
-        <button class="auth-tab" id="authTabLogin" type="button">登录</button>
-        <button class="auth-tab" id="authTabRegister" type="button">注册</button>
+    <div class="auth-inner">
+      <div class="auth-brand"><img src="icon.png" alt=""><span>AI 助手</span></div>
+      <div class="auth-grid">
+        <form class="auth-form" id="authForm" autocomplete="on">
+          <p class="auth-sub" id="authSub">登录后继续；还没有账号就点下面的「立即注册」。</p>
+          <div class="auth-field">
+            <input id="authUser" type="text" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="auth-field">
+            <input id="authPass" type="password" placeholder="请输入密码" autocomplete="current-password">
+            <button class="auth-eye" id="authEye" type="button" aria-label="显示密码" title="显示/隐藏密码">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-width="1.7"
+                      d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/>
+                <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.7"/>
+              </svg>
+            </button>
+          </div>
+          <p class="auth-note">对话与记忆只存在这台机器上，不会上传到别处。</p>
+          <div class="auth-links">
+            <button class="auth-link" id="authForgot" type="button">忘记密码</button>
+            <button class="auth-link" id="authSwitch" type="button">立即注册</button>
+          </div>
+          <button class="btn btn-primary auth-go" id="authGo" type="submit">登录</button>
+          <p class="auth-hint" id="authHint"></p>
+        </form>
+        <aside class="auth-side" id="authSide">
+          <h2>这是什么</h2>
+          <p>一个跑在朋友自己电脑上的 AI 助手：模型配置、对话记录、长期记忆都存在那台机器里，
+             不经过任何第三方服务器。</p>
+          <p>用户名自己定，密码自己记。这里没有自助改密——忘了密码就请管理员在
+             <code>/admin</code> 里重置。</p>
+          <p class="auth-host" id="authHost"></p>
+        </aside>
       </div>
-      <input id="authUser" type="text" placeholder="用户名" autocomplete="username">
-      <input id="authPass" type="password" placeholder="密码，至少 8 位" autocomplete="current-password">
-      <button class="btn btn-primary btn-block" id="authGo" type="button">登录</button>
-      <p class="auth-hint" id="authHint"></p>
     </div>
   </div>
 

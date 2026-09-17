@@ -370,20 +370,48 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 
 /* ---------------- 首屏凭据层 ----------------
- * 复用同一套变量与 .btn，只补这一层自己的布局：它是挡屏层，不是又一个 pane。
+ * 版式照参考图：顶部居中品牌行，宽屏两列（表单 + 一张说明卡），窄屏塌回单列。
  * z-index 必须高于 .backdrop/.modal，否则从设置页里掉线时会被设置层压住。
  */
 .auth { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center;
-        justify-content: center; padding: 20px; background: var(--bg); }
-.auth-card { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 10px; }
-.auth-title { font-size: 22px; margin: 0 0 2px; }
-.auth-sub { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.5; }
-.auth-tabs { display: flex; gap: 6px; margin-top: 4px; }
-.auth-tab { flex: 1; padding: 9px 0; border: 1px solid var(--line); border-radius: 10px;
-            background: transparent; color: var(--text-2); font-size: 14px; cursor: pointer; }
-.auth-tab.on { background: var(--surface); color: var(--text); border-color: var(--accent); }
-.auth input { padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px;
-              background: var(--surface); color: var(--text); font-size: 15px; }
-.auth input:focus { outline: none; border-color: var(--accent); }
+        justify-content: center; padding: 20px; background: var(--bg); overflow: auto; }
+.auth-inner { width: 100%; max-width: 760px; display: flex; flex-direction: column; gap: 26px; }
+.auth-brand { display: flex; align-items: center; justify-content: center; gap: 10px;
+              font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: .5px; }
+.auth-brand img { width: 30px; height: 30px; border-radius: 8px; }
+.auth-grid { display: grid; grid-template-columns: minmax(0, 380px) 1fr; gap: 40px;
+             align-items: start; justify-content: center; }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-sub { margin: 0 0 4px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.auth-field { position: relative; display: flex; }
+.auth-field input { width: 100%; padding: 14px 46px 14px 18px; border: 1px solid var(--line);
+                    border-radius: 999px; background: var(--surface); color: var(--text);
+                    font-size: 15px; }
+.auth-field input:focus { outline: none; border-color: var(--accent); }
+.auth-field input::placeholder { color: var(--text-3); }
+.auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+            display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
+            border: 0; border-radius: 50%; background: transparent; color: var(--text-3);
+            cursor: pointer; }
+.auth-eye:hover { color: var(--text-2); background: var(--bg-hover); }
+.auth-note { margin: 2px 0 0; font-size: 12.5px; color: var(--text-3); }
+.auth-links { display: flex; justify-content: space-between; margin-top: 2px; }
+.auth-link { border: 0; background: transparent; padding: 4px 0; color: var(--accent);
+             font-size: 13.5px; cursor: pointer; }
+.auth-link:hover { text-decoration: underline; }
+.auth-go { height: 48px; border-radius: 999px; font-size: 16px; margin-top: 4px; }
 .auth-hint { min-height: 18px; margin: 0; font-size: 12.5px; color: var(--text-3); }
 .auth-hint.err { color: var(--danger); }
+.auth-side { border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft);
+             padding: 20px 22px; color: var(--text-2); font-size: 13.5px; line-height: 1.7; }
+.auth-side h2 { margin: 0 0 10px; font-size: 15px; color: var(--text); font-weight: 600; }
+.auth-side p { margin: 0 0 10px; }
+.auth-side code { padding: 1px 5px; border-radius: 5px; background: var(--bg-hover);
+                  font-size: 12.5px; }
+.auth-host { margin: 4px 0 0 !important; color: var(--text-3); font-size: 12.5px; }
+
+@media (max-width: 860px) {
+  .auth-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  /* 手机上说明卡是次要信息：表单必须第一眼完整可见，不然键盘一弹就把它顶没了 */
+  .auth-side { display: none; }
+}

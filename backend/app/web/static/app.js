@@ -128,19 +128,36 @@ let authMode = "login";
 function setAuthMode(mode) {
   authMode = mode === "register" ? "register" : "login";
   const reg = authMode === "register";
-  $("authTabLogin").classList.toggle("on", !reg);
-  $("authTabRegister").classList.toggle("on", reg);
+  $("authSwitch").textContent = reg ? "已有账号？去登录" : "立即注册";
   $("authGo").textContent = reg ? "注册并登录" : "登录";
   // 密码管理器要分清"改密/新建"与"登录"，填错一半的话注册那枪会带上旧密码。
   $("authPass").autocomplete = reg ? "new-password" : "current-password";
+  // "至少 8 位"这条规则只写在这里（placeholder）：后端改了下限而这里没改，
+  // 用户就会在被拒之后对着一个看起来合规的框反复重试。
+  $("authPass").placeholder = reg ? "请设置密码，至少 8 位" : "请输入密码";
   $("authSub").textContent = reg
     ? "用户名自己定，密码至少 8 位。换手机后用这个用户名再登录就行。"
-    : "登录后继续；还没有账号就选右边那页注册一个。";
+    : "登录后继续；还没有账号就点下面的「立即注册」。";
 }
 
 function showAuth(mode) {
   setAuthMode(mode || authMode);
+  $("authSide").querySelector("#authHost").textContent = `当前地址：${location.host}`;
   $("authModal").classList.remove("hidden");
+}
+
+/** 眼睛只翻首屏这一格的 type：点一下是为了核对，不该顺手把人敲好的密码清掉。 */
+function toggleAuthPass() {
+  const pass = $("authPass");
+  pass.type = pass.type === "text" ? "password" : "text";
+  $("authEye").setAttribute("aria-label", pass.type === "text" ? "隐藏密码" : "显示密码");
+}
+
+/** 自助改密没做（本机部署的取舍，写在安装文档里），所以这一句只指一条真走得通的路。 */
+function showForgotHint() {
+  const hint = $("authHint");
+  hint.classList.remove("err");
+  hint.textContent = "这里没有自助改密：忘了密码请让管理员在 /admin 里重置（本机部署的取舍）";
 }
 
 function hideAuth() { $("authModal").classList.add("hidden"); }
@@ -1271,10 +1288,11 @@ function bind() {
     location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
   };
   $("registerBtn").onclick = registerFromSettings;
-  $("authTabLogin").onclick = () => setAuthMode("login");
-  $("authTabRegister").onclick = () => setAuthMode("register");
-  $("authGo").onclick = submitAuth;
-  $("authPass").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
+  $("authEye").onclick = toggleAuthPass;
+  $("authForgot").onclick = showForgotHint;
+  $("authSwitch").onclick = () => setAuthMode(authMode === "register" ? "login" : "register");
+  // 提交挂在 form 上而不是某个按钮上：两个框里按回车都该等于点主按钮。
+  $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;

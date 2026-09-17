@@ -231,15 +231,64 @@ def test_registration_ui_elements_wired():
 
     现在有两个入口（首屏弹层 + 设置页），所以两边的元素都要逐个对上：
     少一个 id 不会报错，只会让那个按钮点了没反应。
+
+    首屏这层按参考图重排过：登录/注册不再是两个 tab，而是表单下面那对
+    「忘记密码 / 立即注册」文字链接（切换模式的是后者）；密码框里多了一个眼睛，
+    右侧多一张说明卡。旧的 authTab* 必须一起消失——留着就分不清哪套在用。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     defined = set(re.findall(r'id="([^"]+)"', html))
     for el in ("regUsername", "regPass", "registerBtn",
                "authModal", "authUser", "authPass", "authGo", "authHint",
-               "authTabLogin", "authTabRegister"):
+               "authSwitch", "authForgot", "authEye", "authSide"):
         assert f'$("{el}")' in js, f"app.js 引用了 #{el} 但 HTML 未定义"
         assert el in defined, f"HTML 里没有 #{el}"
+    assert "authTab" not in html and "authTab" not in js, "旧的 tab 还在：两套入口并存"
+
+
+def test_auth_layer_keeps_the_two_column_layout_and_no_dead_rules():
+    """版式的两条硬约束写在 CSS 里，只能在这里钉：没有浏览器测试跑得到它。
+
+    宽屏两列、窄屏（<=860px）必须塌回单列——手机是这产品的主要入口，两列不塌陷
+    就等于把表单挤成一条缝。旧的 .auth-tabs 规则一并删掉：留着的那条不是样式，
+    是"下一次改版不知道哪套还在用"的起点。
+    """
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert ".auth-grid" in css and ".auth-side" in css, "两列版式不在了"
+    assert re.search(r"@media\s*\(max-width:\s*860px\)[\s\S]{0,200}\.auth-grid", css), \
+        "窄屏没有把两列塌成单列"
+    assert ".auth-tabs" not in css and ".auth-tab" not in css, "tab 的死规则还留在样式表里"
+
+
+def test_the_password_eye_reveals_only_that_field():
+    """眼睛按钮必须真的翻 type，而且只翻首屏这一格。
+
+    翻错框等于把设置页的密码也亮出来；只翻 type 不改 value 才不会把已输入的
+    密码清空——用户点一下眼睛是为了核对，不是为了重敲。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "toggleAuthPass")
+    assert '$("authPass")' in body, f"眼睛动的是别的框：{body}"
+    assert '"regPass"' not in body
+    assert re.search(r'type\s*=\s*.*text.*password|text.*:.*"password"', body), \
+        f"没有真的在 text/password 之间来回切：{body}"
+    assert ".value" not in body, "切明文不该顺手清空已输入的密码"
+    assert '$("authEye").onclick = toggleAuthPass' in js
+
+
+def test_forgot_password_says_so_instead_of_calling_a_missing_endpoint():
+    """没有自助改密（这是当初写进部署文档的取舍），所以这个链接只许说人话。
+
+    它一旦发出任何请求，就是把"我们其实做不到"伪装成"正在处理"；正确的一句话
+    是让人去找管理员，因为 /admin 里确实有重置令牌/停用/删除这些能办事的按钮。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "showForgotHint")
+    assert "API." not in body and "fetch(" not in body, "忘记密码不该发出任何请求"
+    assert "admin" in body.lower() and "重置" in body, f"没指路到管理员：{body}"
+    assert '$("authHint")' in body
+    assert '$("authForgot").onclick = showForgotHint' in js
 
 
 def test_memory_calls_no_longer_send_user_id():
