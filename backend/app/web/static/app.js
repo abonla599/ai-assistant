@@ -120,27 +120,74 @@ function needsAuth(err) {
 }
 
 /* ---------------- 首屏凭据层 ----------------
- * 登录与注册共用两个字段，差别只在打到哪个端点；两者返回的是同一份
- * {token, user_id, username, role}，所以成功之后走同一条 afterAuth。
+ * 登录与注册共用一张表单：注册只是多走一步——第一步定用户名与密码，第二步留三道
+ * 找回题的答案。找回密码在同一层里换另一张表单（recoverForm），谁都不该是第二个弹窗。
  * 全程锁住按钮：手机双击会发出第二个 POST，注册那枪在第二下只会拿回"用户名已被
  * 占用"，把已经成功的人显示成失败，还会两次一起抢 pref.token 与渲染顺序。
  */
 let authMode = "login";
+let regStep = 1;
+
+/* 找回的三道题全站固定，这一份就是前端唯一的那三句：界面自己渲染，不必问服务器要，
+ * 于是"报出问题"那条能回答"这个用户名存在吗"的信道整个不存在了。列表顺序即答案
+ * 顺序——记录里按这个次序存三枚摘要，第一格的答案不该拿去跟第三题比。
+ *
+ * 后端 app/core/auth.py 里有同一条常量。两边各改一版题面是**没有任何运行时报错**的
+ * 坏法（人答的是另一套问题，找回永远只回一句"答案不正确"），所以由
+ * tests/test_web_pwa.py 拿后端那份逐字比一次。别把这三句再抄到 index.html 里去。
+ */
+const RECOVERY_QUESTIONS = ["你小学在哪上？", "你的用户名是什么？", "你的父亲叫什么名字？"];
+
+/** 题面从常量渲染进那六格（注册与找回各三道）。HTML 里没有第二份文字。 */
+function renderRecoveryQuestions() {
+  $("regQ1").textContent = RECOVERY_QUESTIONS[0];
+  $("regQ2").textContent = RECOVERY_QUESTIONS[1];
+  $("regQ3").textContent = RECOVERY_QUESTIONS[2];
+  $("rcQ1").textContent = RECOVERY_QUESTIONS[0];
+  $("rcQ2").textContent = RECOVERY_QUESTIONS[1];
+  $("rcQ3").textContent = RECOVERY_QUESTIONS[2];
+}
+
+/** 三条答案按 RECOVERY_QUESTIONS 的次序交出去，后端按同一个次序比对三枚摘要。 */
+function registerAnswers() {
+  return [$("regAns1").value.trim(), $("regAns2").value.trim(), $("regAns3").value.trim()];
+}
+
+function recoveryAnswers() {
+  return [$("rcAns1").value.trim(), $("rcAns2").value.trim(), $("rcAns3").value.trim()];
+}
 
 function setAuthMode(mode) {
   authMode = mode === "register" ? "register" : "login";
+  // 每次进这一层都从第一步开始：第二步那三格是上一次没提交出去的答案，
+  // 留着它们再进来等于让人对着一屏填过的格子不知道从哪儿改。
+  regStep = 1;
   const reg = authMode === "register";
   $("authSwitch").textContent = reg ? "已有账号？去登录" : "立即注册";
-  $("authGo").textContent = reg ? "注册并登录" : "登录";
-  $("authExtra").classList.toggle("hidden", !reg);
   // 密码管理器要分清"改密/新建"与"登录"，填错一半的话注册那枪会带上旧密码。
   $("authPass").autocomplete = reg ? "new-password" : "current-password";
   // "至少 8 位"这条规则只写在这里（placeholder）：后端改了下限而这里没改，
   // 用户就会在被拒之后对着一个看起来合规的框反复重试。
   $("authPass").placeholder = reg ? "请设置密码，至少 8 位" : "请输入密码";
   $("authSub").textContent = reg
-    ? "用户名自己定，密码至少 8 位。找回问题只有你自己知道答案，答对就能自助改密。"
+    ? "注册分两步：先定用户名和密码，下一步留三道找回题的答案。"
     : "登录后继续；还没有账号就点下面的「立即注册」。";
+  renderRegister();
+}
+
+/** 按模式与步骤决定哪些格子在场、主按钮叫什么——只有这一处在算这两件事。
+ *  用户名那一格两步都留着：撞名（409）那句话就挂在它下面，藏起来那条信道就没落点了。
+ */
+function renderRegister() {
+  const reg = authMode === "register";
+  const step2 = reg && regStep === 2;
+  $("authPassRow").classList.toggle("hidden", step2);
+  $("authPass2Row").classList.toggle("hidden", !reg || step2);
+  $("regStep2").classList.toggle("hidden", !step2);
+  $("regBack").classList.toggle("hidden", !step2);
+  // 还没有账号的人没有可找回的东西，这一步不该给他一条点了只会失败的链接
+  $("authForgot").classList.toggle("hidden", reg);
+  $("authGo").textContent = !reg ? "登录" : step2 ? "注册并登录" : "下一步";
 }
 
 /** 登录/注册那一块与找回那一块在同一层里互换：谁都不该是第二个弹窗。 */
@@ -148,7 +195,11 @@ function showAuthView(which) {
   const recovering = which === "recover";
   $("authForm").classList.toggle("hidden", recovering);
   $("recoverForm").classList.toggle("hidden", !recovering);
-  if (recovering) { rcStep = 1; renderRecovery(); }
+  if (recovering) {
+    rcStep = 1;
+    renderRecovery();
+    rcFail("");
+  }
 }
 
 function showAuth(mode) {
@@ -164,6 +215,12 @@ function toggleAuthPass() {
   $("authEye").setAttribute("aria-label", pass.type === "text" ? "隐藏密码" : "显示密码");
 }
 
+function authFail(text) {
+  const hint = $("authHint");
+  hint.textContent = text || "";
+  hint.classList.toggle("err", !!text);
+}
+
 function setUserError(text) {
   const el = $("authUserErr");
   el.textContent = text || "";
@@ -171,31 +228,48 @@ function setUserError(text) {
   if (text) $("authUser").focus();
 }
 
-async function submitAuth() {
-  if (state.registering) return;
-  const hint = $("authHint");
-  const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
-  const reg = authMode === "register";
+/** 注册第一步的「下一步」：只做本地校验，一个字节都不发出去。
+ *  此刻三道答案还空着，POST /v1/auth/register 必然 422，人看到的只是一句莫名的
+ *  "注册失败"。确认密码本来就是纯前端语义（后端不该多一个 confirm_password 字段），
+ *  不一致就该在这里停下，而不是带着不一致去挨一次服务器的手。
+ */
+function regNext() {
+  authFail("");
+  setUserError("");
   const username = $("authUser").value.trim();
   const password = $("authPass").value;
-  const question = $("authQuestion").value.trim();
-  const answer = $("authAnswer").value.trim();
-  hint.classList.remove("err");
+  if (!username) { authFail("用户名不能空着"); return; }
+  if (!password) { authFail("密码不能空着"); return; }
+  if (password !== $("authPass2").value) { authFail("两次输入的密码不一样"); return; }
+  regStep = 2;
+  renderRegister();
+  $("regAns1").focus();
+}
+
+async function submitAuth() {
+  if (state.registering) return;
+  const reg = authMode === "register";
+  // 步骤闸门贴在发请求这一侧再判一次：注册第一步的那一枪由 regNext() 接走，
+  // 这里不留第二条能绕过它的路。
+  if (reg && regStep === 1) { regNext(); return; }
+  const username = $("authUser").value.trim();
+  const password = $("authPass").value;
+  authFail("");
   setUserError("");
-  if (!username || !password) { fail("用户名和密码都要填"); return; }
+  if (!username || !password) { authFail("用户名和密码都要填"); return; }
+  let answers = null;
   if (reg) {
-    if (!question || !answer) { fail("注册要一并填找回问题与答案，不然忘了密码就没法自救"); return; }
-    // 确认密码只在这里校验：后端多一个 confirm_password 字段只是把客户端语义
-    // 塞进 API 契约，它不会因此变得更正确。
-    if (password !== $("authPass2").value) { fail("两次输入的密码不一样"); return; }
+    answers = registerAnswers();
+    // 少一格是手滑，本地先停下：后端那句"3 题答案都要填"没必要让人挨一次请求才看到
+    if (answers.some((a) => !a)) { authFail("三道题的答案都要填，空一格就没法自救"); return; }
   }
 
   state.registering = true;
   $("authGo").disabled = true;
-  hint.textContent = reg ? "注册中…" : "登录中…";
+  $("authHint").textContent = reg ? "注册中…" : "登录中…";
   try {
     const res = reg
-      ? await API.register(username, password, question, answer)
+      ? await API.register(username, password, answers)
       : await API.login(username, password);
     await afterAuth(res);
   } catch (e) {
@@ -203,11 +277,11 @@ async function submitAuth() {
       // 重名是"改一下就好"的事，所以它写在用户名那一格下面，且不把表单末尾
       // 那句一起染红：两句话同屏时人会先去改密码。
       setUserError(e.message);
-      hint.textContent = "";
+      authFail("");
     } else {
       // 后端已经把原因说成人话（密码太短 / 用户名或密码不正确 / 尝试次数过多），
       // 照实转述。
-      fail((reg ? "注册失败：" : "登录失败：") + e.message);
+      authFail((reg ? "注册失败：" : "登录失败：") + e.message);
     }
   } finally {
     // 失败也得解锁：一次网络抖动不该把登录入口按死到刷新页面为止
@@ -216,68 +290,71 @@ async function submitAuth() {
   }
 }
 
-/* ---------------- 密码找回（三步，同一层里换字段） ----------------
- * 第 2 步收答案、第 3 步收新密码，但两者一次提交：分开验答案就等于给外人一个
- * "这个答案对不对"的 oracle，免凭据端点上不该有这种东西。
+/* ---------------- 密码找回（用户名 → 三道题 + 新密码，同一层里换字段） ----------
+ * 第一步只收用户名，本地校验完就进第二步：服务器上已经没有"把问题念给你听"那个
+ * 端点了，三题是常量、这里自己渲染。答案与新密码**一次**提交——分开验答案就等于
+ * 给外人一个"这个答案对不对"的 oracle，那条免凭据信道上不该有这种东西。
  */
 let rcStep = 1;
 let rcName = "";
 
 function renderRecovery() {
-  const rows = { rcQuestionRow: rcStep >= 2, rcAnswerRow: rcStep >= 2,
-                 rcNewRow: rcStep >= 3, rcNew2Row: rcStep >= 3 };
-  for (const [id, on] of Object.entries(rows)) $(id).classList.toggle("hidden", !on);
-  $("rcUser").disabled = rcStep > 1;
-  $("rcSub").textContent = rcStep === 1
-    ? "输入用户名，我们把它记着的找回问题念给你听。"
-    : rcStep === 2 ? "回答下面这个问题。答案和新密码一起提交。"
-    : "设一个新密码，至少 8 位。改密之后每台设备都要重新登录。";
-  $("rcGo").textContent = rcStep === 3 ? "改密码并去登录" : "下一步";
+  const step2 = rcStep === 2;
+  $("rcStep2").classList.toggle("hidden", !step2);
+  // 第一步之后名字就定死了：改它得回去登录重来，不留"半路换人"的状态
+  $("rcUser").disabled = step2;
+  $("rcSub").textContent = step2
+    ? "第 2 步：三道题的答案和新密码一起提交。"
+    : "第 1 步：先输入你的用户名。";
+  $("rcGo").textContent = step2 ? "改密码并去登录" : "下一步";
 }
 
 function rcFail(text) {
   const hint = $("rcHint");
-  hint.textContent = text;
-  hint.classList.add("err");
+  hint.textContent = text || "";
+  hint.classList.toggle("err", !!text);
+}
+
+/** 找回第一步：只核对用户名填了没有，不发请求（没东西可问服务器）。 */
+function rcNext() {
+  rcFail("");
+  rcName = $("rcUser").value.trim();
+  if (!rcName) { rcFail("先填用户名"); return; }
+  rcStep = 2;
+  renderRecovery();
+  $("rcAns1").focus();
 }
 
 async function submitRecovery() {
   if (state.registering) return;
-  const hint = $("rcHint");
-  hint.classList.remove("err");
+  if (rcStep === 1) { rcNext(); return; }      // 第一步那一枪不发：题面是常量
+  const answers = recoveryAnswers();
+  const pw = $("rcNew").value;
+  rcFail("");
+  if (answers.some((a) => !a)) { rcFail("三道题的答案都要填"); return; }
+  if (!pw) { rcFail("新密码不能空着"); return; }
+  if (pw !== $("rcNew2").value) { rcFail("两次输入的新密码不一样"); return; }
+
   state.registering = true;
   $("rcGo").disabled = true;
+  $("rcHint").textContent = "改密码中…";
   try {
-    if (rcStep === 1) {
-      rcName = $("rcUser").value.trim();
-      if (!rcName) { rcFail("先填用户名"); return; }
-      hint.textContent = "查一下…";
-      const res = await API.recovery(rcName);
-      $("rcQuestion").value = res.question;
-      if (!res.recovery_available) {
-        // 服务端对"没这个人"与"没设找回"说同一句话，这里也只能照实转述那一句
-        rcFail(res.question);
-        return;
-      }
-      rcStep = 2;
-      hint.textContent = "";
-      renderRecovery();
-    } else if (rcStep === 2) {
-      if (!$("rcAnswer").value.trim()) { rcFail("答案不能空着"); return; }
-      rcStep = 3;
-      hint.textContent = "";
-      renderRecovery();
-    } else {
-      const pw = $("rcNew").value;
-      if (pw !== $("rcNew2").value) { rcFail("两次输入的新密码不一样"); return; }
-      hint.textContent = "改密码中…";
-      await API.reset(rcName, $("rcAnswer").value.trim(), pw);
-      // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去
-      $("authUser").value = rcName;
-      $("authPass").value = "";
-      showAuth("login");
-      $("authHint").textContent = "密码已改，用新密码登录即可（之前登录的设备都会掉线）";
-    }
+    await API.resetPassword(rcName, answers, pw);
+    // 答案与新密码同样是凭据，用完就清出输入框：这一层还开着，凑过来就能看见
+    $("rcAns1").value = "";
+    $("rcAns2").value = "";
+    $("rcAns3").value = "";
+    $("rcNew").value = "";
+    $("rcNew2").value = "";
+    rcStep = 1;
+    renderRecovery();
+    // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去。那句提示不许省：
+    // "我改了密码，因为手机丢了"是这条路存在的理由，别的设备掉线是它的**设计后果**，
+    // 藏起来只会让人以为那台设备坏了。
+    $("authUser").value = rcName;
+    $("authPass").value = "";
+    showAuth("login");
+    $("authHint").textContent = "密码已重置，请用新密码登录。其他设备需要重新登录一次。";
   } catch (e) {
     rcFail(e.message);
   } finally {
@@ -295,6 +372,11 @@ async function afterAuth(res) {
   pref.token = res.token;
   pref.userId = res.user_id;
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
+  $("authPass2").value = "";
+  // 找回答案走的是和密码同一个慢哈希，它往往是个能猜的地名——同样清出去
+  $("regAns1").value = "";
+  $("regAns2").value = "";
+  $("regAns3").value = "";
   $("authHint").textContent = "";
   hideAuth();
   syncConnPane();
@@ -1374,10 +1456,14 @@ function bind() {
   $("authEye").onclick = toggleAuthPass;
   $("authForgot").onclick = () => showAuthView("recover");
   $("rcBack").onclick = () => showAuthView("auth");
+  // 填错答案不该逼人重开整张表单：退回第一步，焦点落回他刚填过的那一格
+  $("regBack").onclick = () => { regStep = 1; renderRegister(); $("authPass").focus(); };
   $("recoverForm").onsubmit = (e) => { e.preventDefault(); submitRecovery(); };
   $("authSwitch").onclick = () => setAuthMode(authMode === "register" ? "login" : "register");
   // 提交挂在 form 上而不是某个按钮上：两个框里按回车都该等于点主按钮。
+  // 第一步/第二步的分流在 submitAuth 与 submitRecovery 的最前面，不在这里。
   $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };
+  renderRecoveryQuestions();
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;

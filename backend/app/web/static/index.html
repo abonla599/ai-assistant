@@ -210,9 +210,9 @@
         <!-- 连接 -->
         <section class="pane" data-pane="conn">
           <p class="pane-note">用户名 + 密码自己设，注册完就能用。令牌由服务端签发、只存在本机
-            浏览器；换手机或重装后，用同一个用户名登录即可。忘了密码就答注册时设的找回问题，
-            答对能自助改密（改完之后每台设备都要重新登录）。管理员撤销或轮换之后旧令牌立即失效。
-            各人的会话、附件与记忆互相看不到。</p>
+            浏览器；换手机或重装后，用同一个用户名登录即可。忘了密码就答那三道固定的找回题
+            （答案就是注册第二步留的那三句），答对能自助改密（改完之后每台设备都要重新登录）。
+            管理员撤销或轮换之后旧令牌立即失效。各人的会话、附件与记忆互相看不到。</p>
           <p class="pane-note" id="whoInfo">未登录</p>
           <!-- 注册只留一处：首屏那一层。这里再放一套字段，就等于多一处要各自
                校验、各自挡双击、各自跟后端字段名对齐的地方（找回三格一加，
@@ -257,9 +257,12 @@
   </template>
 
   <!-- 首屏凭据层：没有有效令牌时挡住整个应用。两块视图共用这一层——
-       登录/注册（authForm）与找回密码三步（recoverForm），差别只是显示哪一块。
-       角色一律由服务端 me() 说，前端不猜。注册比登录多三格：找回问题、答案、
-       确认密码；确认密码只在前端校验（后端不该多一个纯客户端语义的字段）。 -->
+       登录/注册（authForm）与找回密码（recoverForm），差别只是显示哪一块。
+       注册分两步、在同一张表单里换字段：第一步用户名 + 密码 + 确认密码，第二步才是
+       那三道固定题的答案。第二步不另开一个弹窗，是因为两块的字段属于同一次提交，
+       分开就会有一个"前一步填的东西还在另一个层里"的收尾问题。
+       题面文字不在这里：三句是全站常量、由 app.js 从 RECOVERY_QUESTIONS 渲染进
+       .auth-q 那几格，HTML 里再抄一份就是第二个事实来源（test_web_pwa 钉着不许有）。 -->
   <div class="auth hidden" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
     <div class="auth-inner">
       <div class="auth-brand"><img src="icon.png" alt=""><span>AI 助手</span></div>
@@ -270,9 +273,10 @@
           <input id="authUser" type="text" placeholder="请输入用户名" autocomplete="username">
         </div>
         <!-- 重名是当事人自己能改好的事，所以写在用户名那一格下面，而不是混进
-             表单末尾那句通用提示：改完就能立刻接着提交，不必回头找红字在哪。 -->
+             表单末尾那句通用提示：改完就能立刻接着提交，不必回头找红字在哪。
+             注册第二步也保留这一格——撞名就发生在那一次提交上。 -->
         <p class="field-err hidden" id="authUserErr"></p>
-        <div class="auth-field">
+        <div class="auth-field" id="authPassRow">
           <input id="authPass" type="password" placeholder="请输入密码" autocomplete="current-password">
           <button class="auth-eye" id="authEye" type="button" aria-label="显示密码" title="显示/隐藏密码">
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
@@ -282,19 +286,38 @@
             </svg>
           </button>
         </div>
-        <div class="auth-extra hidden" id="authExtra">
-          <div class="auth-field">
-            <input id="authQuestion" type="text" placeholder="找回密码问题（例如：我小学的校名？）" autocomplete="off" maxlength="60">
+        <!-- 注册第一步比登录多出来的一格：确认密码只在前端校验（后端不该多一个
+             纯客户端语义的字段），所以不一致时根本不该发请求。 -->
+        <div class="auth-field hidden" id="authPass2Row">
+          <input id="authPass2" type="password" placeholder="再输入一遍密码" autocomplete="new-password">
+        </div>
+        <div class="auth-step hidden" id="regStep2">
+          <p class="auth-sub">最后一步：这三道题将来用于忘记密码时自助找回，答案只有你自己知道才对得上。
+            它们和密码一样只存这台机器上的摘要，管理员也看不到原话。</p>
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns1"><span id="regQ1"></span></label>
+            <div class="auth-field">
+              <input id="regAns1" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
           </div>
-          <div class="auth-field">
-            <input id="authAnswer" type="text" placeholder="答案（只有你自己知道的那个）" autocomplete="off" maxlength="64">
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns2"><span id="regQ2"></span></label>
+            <div class="auth-field">
+              <input id="regAns2" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
           </div>
-          <div class="auth-field">
-            <input id="authPass2" type="password" placeholder="再输入一遍密码" autocomplete="new-password">
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns3"><span id="regQ3"></span></label>
+            <div class="auth-field">
+              <input id="regAns3" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
           </div>
         </div>
         <p class="auth-note">对话与记忆只存在这台机器上，不会上传到别处。</p>
         <div class="auth-links">
+          <!-- 上一步只在注册第二步出现：填错答案不该逼人重开整张表单。
+               「忘记密码」在注册时被收起来：还没有账号就没有可找回的东西。 -->
+          <button class="auth-link" id="regBack" type="button">上一步</button>
           <button class="auth-link" id="authForgot" type="button">忘记密码</button>
           <button class="auth-link" id="authSwitch" type="button">立即注册</button>
         </div>
@@ -303,21 +326,38 @@
       </form>
 
       <form class="auth-form hidden" id="recoverForm">
-        <p class="auth-sub" id="rcSub">输入用户名，我们把它记着的找回问题念给你听。</p>
+        <p class="auth-sub" id="rcSub">先输入你的用户名。</p>
         <div class="auth-field">
           <input id="rcUser" type="text" placeholder="请输入用户名" autocomplete="username">
         </div>
-        <div class="auth-field hidden" id="rcQuestionRow">
-          <input id="rcQuestion" type="text" readonly tabindex="-1">
-        </div>
-        <div class="auth-field hidden" id="rcAnswerRow">
-          <input id="rcAnswer" type="text" placeholder="你的答案" autocomplete="off">
-        </div>
-        <div class="auth-field hidden" id="rcNewRow">
-          <input id="rcNew" type="password" placeholder="新密码，至少 8 位" autocomplete="new-password">
-        </div>
-        <div class="auth-field hidden" id="rcNew2Row">
-          <input id="rcNew2" type="password" placeholder="再输入一遍新密码" autocomplete="new-password">
+        <!-- 第二步一次铺开：三道固定题 + 三个答案 + 新密码 + 确认新密码。
+             答案与新密码必须同一枪提交——分开验答案就等于给外人一个 oracle。 -->
+        <div class="auth-step hidden" id="rcStep2">
+          <p class="auth-sub">回答这三道题，再设一个新密码。三道全对才改得动，题目与答案都是全站固定的那三道。</p>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns1"><span id="rcQ1"></span></label>
+            <div class="auth-field">
+              <input id="rcAns1" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns2"><span id="rcQ2"></span></label>
+            <div class="auth-field">
+              <input id="rcAns2" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns3"><span id="rcQ3"></span></label>
+            <div class="auth-field">
+              <input id="rcAns3" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-field">
+            <input id="rcNew" type="password" placeholder="新密码，至少 8 位" autocomplete="new-password">
+          </div>
+          <div class="auth-field">
+            <input id="rcNew2" type="password" placeholder="再输入一遍新密码" autocomplete="new-password">
+          </div>
         </div>
         <button class="btn btn-primary auth-go" id="rcGo" type="submit">下一步</button>
         <p class="auth-hint" id="rcHint"></p>

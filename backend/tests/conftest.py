@@ -109,21 +109,27 @@ def _isolated_throttle():
     429——那时绿就只是算术运气。放在 conftest 而不是某个测试文件里，是因为它
     保护的是整个套件。
 
-    四本账都要清，一本都不能少：_FAILS 记登录失败与撞名，_RESET_FAILS 记猜找回答案的
-    猜错（修复轮 1 / F2 起的独立一本），_REGISTERS 记注册成功数，_RESETS 记改密成功数。
-    后两本记的都是**成功**，也就是"这条用例明明什么都没做错、只是正常工作了几次"就开始
-    攒账——漏清任何一本，前面某条用例注册满 3 个号或改满 3 次密，后面随便一条断言 200 的
-    用例就会拿到 429。24 小时的两本比 10 分钟那两本更经不起带出用例：它当天根本不会自己
-    松开。而 _RESET_FAILS 漏清更隐蔽：猜错十格的用例会让后面所有走 /v1/auth/reset 的
-    用例当场 429，红的地方离真凶隔着几条。
-    """
-    from app.core.auth_router import _FAILS, _REGISTERS, _RESET_FAILS, _RESETS
+    每一本都要清，一本都不能少：两本记失败（登录/撞名、猜找回答案），两本记**成功**
+    （注册数、改密数）。记成功那两本尤其经不起带出用例——"这条用例明明什么都没做错、
+    只是正常工作了几次"就开始攒账，攒满之后后面随便一条断言 200 的用例会拿到 429；
+    而 24 小时窗口那两本当天根本不会自己松开。
 
-    for ledger in (_FAILS, _REGISTERS, _RESETS, _RESET_FAILS):
+    清单从产品模块的 _LEDGERS 现取，不在这里手抄一遍账本名字：上一轮这里就是抄了四本，
+    auth_router 新加一本时这份清单不会跟着长——漏掉的那本变成只胀不收，红还会红到离
+    真凶很远的用例上。_LEDGERS 本身就是"有哪几本账"的唯一清单（_prune 用的也是它）。
+    判据：把下面那行改成只清 list(_LEDGERS)[:3]（正好漏掉 _RESET_FAILS），
+    tests/test_auth_endpoints.py 立刻红四条——猜错预算那条与数答案条数那条的两个参数各一
+    条，而红的地方离真凶隔着好几条用例。
+
+    只清"进用例"这一次。进出各清一遍等于两处互为备份，于是"漏清一处"这种错误永远测不
+    出来（另一处会替它擦干净），而它恰恰是这条 fixture 存在的理由。出去不清也没有代价：
+    下一条用例进来时还要再清。
+    """
+    from app.core.auth_router import _LEDGERS
+
+    for ledger, _window in _LEDGERS:
         ledger.clear()
     yield
-    for ledger in (_FAILS, _REGISTERS, _RESETS, _RESET_FAILS):
-        ledger.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)

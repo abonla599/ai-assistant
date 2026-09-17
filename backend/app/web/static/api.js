@@ -122,16 +122,24 @@ const API = (() => {
     /* 身份：注册与登录都只回显一次令牌，之后一切请求都靠它。
      * me() 是前端唯一的"我到底是谁"来源——角色不能靠猜，猜错就把 403 按钮留在页面上。
      * 密码只出现在这两个请求的 body 里，绝不进任何其它请求头：运行时凭据是令牌。
+     *
+     * 这里不再有 recovery 封装：找回的三道题是全站固定常量（app.js 里那份
+     * RECOVERY_QUESTIONS，test_web_pwa 会拿后端 auth.RECOVERY_QUESTIONS 逐字比一次），
+     * 界面自己渲染，不必问服务器要。服务器上一次"报出问题"的响应，本质上是一份
+     * "这个用户名存在吗"的名单，所以那条路由连同这个封装一起删了。
      */
     register: (username, password, security_answers) =>
       request("/v1/auth/register", { method: "POST",
         body: { username, password, security_answers } }),
     login: (username, password) =>
       request("/v1/auth/login", { method: "POST", body: { username, password } }),
-    recovery: (username) => request("/v1/auth/recovery", { method: "POST", body: { username } }),
-    reset: (username, answers, new_password, new_answers) =>
+    /* 三条答案 + 新密码一次提交：分开验答案就给外人一个"这个答案对不对"的 oracle。
+     * new_answers（轮换找回答案）是可选的，界面不提供，于是也不该发一个 undefined 出去。
+     * 成功只回 {"status": "password_reset"} 且不发令牌——该人名下所有令牌同时作废。
+     */
+    resetPassword: (username, answers, new_password) =>
       request("/v1/auth/reset", { method: "POST",
-        body: { username, answers, new_password, new_answers } }),
+        body: { username, answers, new_password } }),
     me: () => request("/v1/auth/me"),
 
     models: () => request("/v1/models"),

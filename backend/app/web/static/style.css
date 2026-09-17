@@ -390,15 +390,20 @@ button, input, textarea, select { font: inherit; color: inherit; }
               font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: .5px; }
 .auth-brand img { width: 30px; height: 30px; border-radius: 8px; }
 .auth-form { display: flex; flex-direction: column; gap: 12px; }
-.auth-extra { display: flex; flex-direction: column; gap: 12px; }
+/* 注册第二步与找回第二步那一整块：与表单同宽、内部同样 12px 间距。
+   hidden 由 .hidden{display:none!important} 收，这里只定"露出来时长什么样"。 */
+.auth-step { display: flex; flex-direction: column; gap: 12px; }
 .auth-sub { margin: 0 0 4px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+/* 一道题配一个答案格：题面是问句、不是占位符，所以它得一直在，输入框清空了也看得见。
+   左缩进 18px 与 .auth-field input 的文字起始位置对齐。 */
+.auth-qa { display: flex; flex-direction: column; gap: 6px; }
+.auth-q { margin: 0 0 0 18px; font-size: 13.5px; line-height: 1.4; color: var(--text-2); }
 .auth-field { position: relative; display: flex; }
 .auth-field input { width: 100%; padding: 14px 46px 14px 18px; border: 1px solid var(--line);
                     border-radius: 999px; background: var(--surface); color: var(--text);
                     font-size: 15px; }
 .auth-field input:focus { outline: none; border-color: var(--accent); }
 .auth-field input::placeholder { color: var(--text-3); }
-.auth-field input[readonly] { color: var(--text-2); }
 .auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
             display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
             border: 0; border-radius: 50%; background: transparent; color: var(--text-3);

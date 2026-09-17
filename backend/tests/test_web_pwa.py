@@ -7,6 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient
 from app.main import app
+# 前端契约用例拿它当尺子：界面上该有几道题、题面逐字是什么，都由后端这一条说了算。
+# 在测试里 import 而不是抄一份数字，正是这条锁的全部意义。
+from app.core.auth import RECOVERY_QUESTIONS
 from app.web.web_router import STATIC_DIR
 
 client = TestClient(app)
@@ -251,23 +254,27 @@ def test_registration_ui_elements_wired():
     两个入口（首屏弹层 + 设置页）的元素都要逐个对上：少一个 id 不会报错，
     只会让那个按钮点了没反应。
 
-    首屏这一层现在有三块内容：登录/注册（注册比登录多三格——找回问题、答案、
-    确认密码）、用户名那一格下面的就地红字、以及同层互换的三步找回表单。
-    被删掉的东西也必须真的没了：说明卡（authSide/authHost）与旧的 tab 入口。
+    首屏这一层现在有三块内容：登录/注册（注册第一步比登录多一格确认密码，第二步
+    是三条固定题的答案格）、用户名那一格下面的就地红字、以及同层互换的找回表单。
+    被删掉的东西也必须真的没了：说明卡（authSide/authHost）、旧的 tab 入口、
+    以及"自设一个问题"那一格的形状（authQuestion/authAnswer/rcQuestion/rcAnswer）。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     defined = set(re.findall(r'id="([^"]+)"', html))
     for el in ("openRegister",
                "authModal", "authUser", "authPass", "authGo", "authHint", "authEye",
-               "authSwitch", "authUserErr", "authExtra", "authQuestion", "authAnswer",
-               "authPass2", "recoverForm", "rcUser", "rcQuestion", "rcAnswer",
-               "rcNew", "rcNew2", "rcGo", "rcHint", "rcBack",
-               "whoRow", "userName", "userAvatar"):
-        assert f'$("{el}")' in js, f"app.js 引用了 #{el} 但 HTML 未定义"
+               "authSwitch", "authUserErr", "authPass2", "authPass2Row", "authPassRow",
+               "regStep2", "regBack",
+               "recoverForm", "rcUser", "rcStep2", "rcNew", "rcNew2", "rcGo", "rcHint",
+               "rcBack", "whoRow", "userName", "userAvatar"):
+        assert f'$("{el}")' in js, f"app.js 里没有 $({el})：这个元素要么没接线要么已删"
         assert el in defined, f"HTML 里没有 #{el}"
     for gone in ("authTab", "authSide", "authHost", "navSettings",
-                  "regUsername", "regPass", "registerBtn", "registerFromSettings"):
+                  "regUsername", "regPass", "registerBtn", "registerFromSettings",
+                  "authExtra", "authQuestion", "authAnswer",
+                  "rcQuestion", "rcAnswer", "rcQuestionRow", "rcAnswerRow",
+                  "rcNewRow", "rcNew2Row"):
         assert gone not in html and gone not in js, f"{gone} 还在：删剩的半套比没删更难读"
 
 
@@ -309,7 +316,10 @@ def test_auth_layer_is_one_column_with_no_dead_rules():
     assert re.search(r"\.auth-inner \{[^}]*max-width: 420px", css), "登录层不是单列居中"
     assert ".field-err" in css and "--danger" in css, "就地红字没有自己的规则"
     for dead in (".auth-grid", ".auth-side", ".auth-host", ".auth-tabs", ".auth-tab",
-                 ".conn-text", ".sb-config"):
+                 ".conn-text", ".sb-config",
+                 # 本次换形状留下的两处：一步式注册多出来的那一整块，以及"把题面念给
+                 # 人听"那个只读框——readonly 的元素在整个前端已经一个都不剩了
+                 ".auth-extra", "input[readonly]"):
         assert dead not in css, f"{dead} 还留在样式表里"
 
 
@@ -331,25 +341,142 @@ def test_the_password_eye_reveals_only_that_field():
     assert '$("authEye").onclick = toggleAuthPass' in js
 
 
-def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
-    """「忘记密码」现在真的能改密，所以判据从"别乱发请求"换成"按顺序发、少发一次都不行"。
+def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
+    """第一步的「下一步」只做本地校验：答案还没填，发出去必然 422。
 
-    三件事必须钉住：
-    1. 答案与新密码一次提交。分开验答案 = 给外人一个"这个答案对不对"的 oracle，
-       免凭据端点上不该有这种东西；
+    注册第一步收的是用户名、密码、确认密码；找回第一步收的是用户名。两步之后
+    才有资格谈请求，而 `/v1/auth/recovery` 这个端点**已经不存在了**——旧代码在这
+    一步打的是"问服务器要问题"那一枪，如今三题是常量、前端自己渲染，那条信道整个
+    没了。所以这里断的是"函数体里一个 API. 都不许出现"，而不是"别打错端点"。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    for name, required in (("regNext", ("authUser", "authPass", "authPass2")),
+                           ("rcNext", ("rcUser",))):
+        body = _function_body(js, name)
+        assert "API." not in body and "fetch(" not in body, \
+            f"{name} 在第一步就发了请求：答案还没填，那一枪必然 422"
+        for el in required:
+            assert f'$("{el}")' in body, f"{name} 没校验 #{el}"
+        assert "return" in body, f"{name} 校验不过时没有拦下来的动作"
+
+    # 确认密码只在前端判：后端多一个 confirm_password 字段只是把客户端语义塞进契约
+    reg = _function_body(js, "regNext")
+    assert '$("authPass2").value' in reg and '$("authPass").value' in reg, \
+        "两次密码的一致性不在第一步判，就会带着不一致去挨一次 422"
+
+    # 步骤闸门写在两张表单唯一的提交函数开头（不另设一层包装：多一层就多一处能漏判的地方）
+    for name, go, api_call in (("submitAuth", "regNext", "API.register"),
+                               ("submitRecovery", "rcNext", "API.resetPassword")):
+        body = _function_body(js, name)
+        assert f"{go}();" in body, f"{name} 没把第一步分流到 {go}()：那一格按回车就直接发请求了"
+        assert body.index(f"{go}();") < body.index(api_call), \
+            f"{name} 的步骤闸门晚于发请求：第一步那一枪照样打出去"
+
+
+def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
+    """**唯一的锁**：前端写死的那三条题面必须与后端常量逐字相同。
+
+    三题现在是全站固定常量、由前端自己渲染，服务器不再"报出问题"。于是两边的文字
+    第一次变成两个独立维护的副本：后端改了题面而前端没改，人答的就是另一套问题，
+    找回永远对不上、而界面还会说"答案不正确"——没有任何一处会报错。这条测试是
+    唯一能挡住"两边各改一版题面"的东西，所以它比对了原始字面量，不是个数。
+    """
+    from app.core.auth import ANSWER_COUNT
+
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    m = re.search(r"\bRECOVERY_QUESTIONS\s*=\s*\[([^\]]*)\]", js)
+    assert m, "app.js 里读不到 RECOVERY_QUESTIONS 的数组字面量：题面大概被抄成了两份"
+    front = re.findall(r'"([^"]+)"', m.group(1))
+    assert front == list(RECOVERY_QUESTIONS), \
+        f"前后端题面不一致：前端 {front} ≠ 后端 {list(RECOVERY_QUESTIONS)}"
+    assert len(front) == ANSWER_COUNT, f"题数对不上：前端 {len(front)} 后端 {ANSWER_COUNT}"
+    # 前端只能有一份文字副本：HTML 里再写一遍，改一处漏一处就回来了
+    for question in RECOVERY_QUESTIONS:
+        assert question not in html, f"#{question} 被抄进了 index.html：题面有了第二份事实来源"
+        assert js.count(question) == 1, f"{question} 在 app.js 里出现了 {js.count(question)} 次"
+
+
+def test_the_answer_boxes_follow_the_backends_question_count():
+    """三条答案格的数量与顺序都得跟着后端那一条常量走。
+
+    后端加一句问题，这里就是第一个红的地方——而不是注册满 3 个号之后有人发现
+    第 4 格没地方填。顺序同样钉住：记录里按 RECOVERY_QUESTIONS 的次序存三枚摘要，
+    格子的次序错了就等于把第一题的答案送去比对第三题。
+
+    app.js 一律写死 `$("regAns1")` 这种整串字面量、不用 `$("regAns" + i)`：拼接会
+    绕过 test_all_js_element_ids_exist_in_html 那把锁，引用到不存在的 id 时
+    `$()` 返回 null，而 null.textContent 抛错发生在渲染函数里——整个首屏静默失灵。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    defined = set(re.findall(r'id="([^"]+)"', html))
+    for i in range(1, len(RECOVERY_QUESTIONS) + 1):
+        for prefix in ("regAns", "rcAns", "regQ", "rcQ"):
+            el = f"{prefix}{i}"
+            assert el in defined, f"HTML 里没有 #{el}：第 {i} 题在界面上没地方填或没地方看"
+            assert f'$("{el}")' in js, f"app.js 没引用 #{el}"
+    for name, prefix in (("registerAnswers", "regAns"), ("recoveryAnswers", "rcAns")):
+        body = _function_body(js, name)
+        for i in range(1, len(RECOVERY_QUESTIONS) + 1):
+            assert f'$("{prefix}{i}")' in body, f"{name} 漏了第 {i} 格"
+        assert "return [" in body, f"{name} 没把答案按顺序交出去"
+        positions = [body.index(f'{prefix}{i}') for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
+        assert positions == sorted(positions), f"{name} 的格子顺序与题面顺序不一致"
+
+    # 整行配对来比"第 i 格取的是第 i 题"。用 index() 找子串首次出现的位置是假锁：
+    # 第二组标签一定会比到第一组那一行上去，什么都拦不住。
+    labels = _function_body(js, "renderRecoveryQuestions")
+    pairs = re.findall(r'\$\("(?:reg|rc)Q(\d)"\)\.textContent\s*=\s*RECOVERY_QUESTIONS\[(\d+)\]',
+                       labels)
+    assert len(pairs) == 2 * len(RECOVERY_QUESTIONS), \
+        f"题面渲染配对数不对：{pairs}（应当是注册与找回各 {len(RECOVERY_QUESTIONS)} 道）"
+    for slot, index in pairs:
+        assert int(index) == int(slot) - 1, f"第 {slot} 道标签取的是第 {int(index) + 1} 题"
+
+
+def test_the_deleted_recovery_endpoint_is_gone_from_the_frontend_too():
+    """**反向锁**：`/v1/auth/recovery` 这条信道在前端一个字都不许留。
+
+    上一轮这条测试断的是"前端还在调 API.recovery"，端点被删掉之后它就变成一条
+    过时的绿——留着等于给一个不存在的路由背书。现在断的是反方向：封装、调用点、
+    路径字面量全都不能出现。
+    """
+    js = "".join((STATIC / f).read_text(encoding="utf-8") for f in JS_FILES)
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for gone in ("API.recovery", "/v1/auth/recovery", "recovery:"):
+        assert gone not in js and gone not in html, f"{gone} 还在前端：那个端点已经删了"
+
+
+def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
+    """「忘记密码」现在真的能改密，所以判据是"该发的那一枪按顺序发、不该发的不发"。
+
+    四件事必须钉住：
+    1. 三条答案与新密码**一次**提交。分开验答案 = 给外人一个"这个答案对不对"的
+       oracle，免凭据端点上不该有这种东西；
     2. 新密码两格不一致时根本不该发请求（那是纯前端能判的事）；
     3. 改密成功之后回到登录而不是直接放人进去——服务端此刻已经把这个人名下
-       所有令牌作废了，界面若继续"已登录"就是在撒谎。
+       所有令牌作废了，界面若继续"已登录"就是在撒谎；
+    4. 那句提示必须说出"其他设备需要重新登录一次"。这是令牌全清的**设计后果**，
+       藏起来只会让人以为别的设备坏了。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     body = _function_body(js, "submitRecovery")
-    assert "API.recovery" in body and "API.reset" in body
-    assert body.index('$("rcNew2").value') < body.index("API.reset"), \
+    assert "API.recovery" not in body, "找回第一步不该再问服务器要问题：那个端点已删"
+    assert "API.resetPassword" in body
+    assert "recoveryAnswers()" in body and body.index("recoveryAnswers()") \
+        < body.index("API.resetPassword"), "三条答案没在发请求之前收齐"
+    assert body.index('$("rcNew2").value') < body.index("API.resetPassword"), \
         "确认密码没在发请求之前比对"
     assert "showAuth(\"login\")" in body, "改密成功要回到登录：令牌已全部作废，不能装作还登录着"
-    assert "API.reset" in body.split("showAuth")[0], "登录视图的切换该在改密之后"
+    assert "API.resetPassword" in body.split("showAuth")[0], "登录视图的切换该在改密之后"
+    assert "其他设备需要重新登录一次" in body, "改密的连带后果没告诉人"
+    assert re.search(r"if \(state\.registering\) return", body), "找回没有在途闸门"
+    unlock = body[body.index("finally"):]
+    assert '$("rcGo").disabled = false' in unlock and "state.registering = false" in unlock, \
+        "找回的解锁不在 finally 里：失败一次就再也点不动了"
     assert '$("authForgot").onclick = () => showAuthView("recover")' in js
-    assert '$("recoverForm").onsubmit' in js, "找回表单没有提交入口：三步流程走不动"
+    assert '$("recoverForm").onsubmit' in js, "找回表单没有提交入口：流程走不动"
 
 
 
@@ -359,36 +486,61 @@ def test_memory_calls_no_longer_send_user_id():
     assert "user_id" not in api, "记忆接口已不接受客户端身份"
 
 
+# 浏览器这一侧发出去的三格：register 的三条答案与 reset 的三条答案是同一个东西，
+# new_answers（轮换答案）是可选的，界面不提供，所以它压根不该出现在前端。
+FRONTEND_WRAPPERS = {
+    "register": (["username", "password", "security_answers"], "/v1/auth/register"),
+    "resetPassword": (["username", "answers", "new_password"], "/v1/auth/reset"),
+}
+
+
 def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
     """前后端字段名对不上是静默失败：后端 422，界面只说"注册失败"。
 
     请求形状与 app.js 读的那几个响应键一起断，且响应是真的从 /v1/auth/register
     拿的，不是照抄一份字典——改名（token→access_token 这种）当天就该红。
-    找回不再有"问服务器要问题"这一步：三题是常量，服务器上没有那个端点了。
+
+    找回不再有"问服务器要问题"那一步：三题是常量，服务器上也没有那个端点了。
+    `new_answers` 只在前端缺席，所以这条测试顺手真发一次三格的 reset：可选字段
+    是不是真的可选，得由后端说了算，而不是由前端少写一格"看起来也能过"。
     """
     from app.core.auth_router import RegisterRequest, ResetRequest
 
     api = (STATIC / "api.js").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert set(RegisterRequest.model_fields) == {"username", "password", "security_answers"}
     assert set(ResetRequest.model_fields) == {"username", "answers", "new_password",
                                               "new_answers"}
-    for name, fields in (("register", RegisterRequest), ("reset", ResetRequest)):
-        m = re.search(r"%s:\s*\(([^)]*)\)\s*=>" % name, api)
+    for name, (params, path) in FRONTEND_WRAPPERS.items():
+        m = re.search(r"\b%s:\s*\(([^)]*)\)\s*=>" % name, api)
         assert m, f"api.js 里没有 {name} 封装"
-        assert [p.strip() for p in m.group(1).split(",")] == list(fields.model_fields), \
+        assert [p.strip() for p in m.group(1).split(",")] == params, \
             f"{name} 的参数名与后端请求模型不一致"
+        assert f'request("{path}"' in api, f"{name} 没打向 {path}"
+        calls = _call_args(js, name)
+        assert calls, f"app.js 里没有 API.{name}() 调用点"
+        for args in calls:
+            assert len(args) == len(params), \
+                f"API.{name} 只收 {len(params)} 个参数（{params}），实参却是 {args}"
     assert re.search(r'\bme:\s*\(\)\s*=>\s*request\("/v1/auth/me"\)', api), \
         "前端没有 me 封装：角色就只能靠猜"
 
     enforced("发码的人")
+    answers = ["新市场小学", "hehai2024", "李建国"]
     res = client.post("/v1/auth/register",
                       json={"username": "字段名契约", "password": "correct-horse-battery",
-                            "security_answers": ["新市场小学", "hehai2024", "李建国"]})
+                            "security_answers": answers})
     assert res.status_code == 200, res.text
     body = res.json()
     for key in ("token", "user_id", "username"):
         assert key in body, f"后端没回 {key}：{sorted(body)}"
+
+    reset = client.post("/v1/auth/reset",
+                        json={"username": "字段名契约", "answers": answers,
+                              "new_password": "a-brand-new-horse"})
+    assert reset.status_code == 200, f"前端那三格形状后端不认：{reset.text}"
+    assert reset.json() == {"status": "password_reset"}
 
 
 
@@ -531,3 +683,45 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
     # 唯一一次拿到令牌的机会连同输入一起丢了。
     assert tail.index("pref.token = res.token") < tail.index('$("authPass").value = ""'), \
         "清空必须晚于令牌落库：早一步就是在丢凭据"
+    # 确认密码与三条找回答案同样是凭据（答案走的是同一个慢哈希），落地之后一并清掉
+    assert '$("authPass2").value = ""' in tail, "确认密码那一格还留着明文"
+    for i in range(1, len(RECOVERY_QUESTIONS) + 1):
+        assert f'$("regAns{i}").value = ""' in tail, f"第 {i} 格答案没清出输入框"
+
+
+def test_the_second_step_is_the_only_one_that_registers():
+    """注册第二步才是真提交：三条答案收齐了才发，少一格是本地手滑、不该挨 422。
+
+    后端 `security_answers` 是必填且条数必须正好等于题数（少一条存储层就抛），
+    所以前端少读一格 = 每次注册都稳定失败，而界面只会说"注册失败：<指着题数那句>"。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "submitAuth")
+    assert "registerAnswers()" in body and body.index("registerAnswers()") \
+        < body.index("API.register"), "三条答案没在发请求之前收齐"
+    assert "API.register(username, password, answers)" in body, \
+        "注册那一枪没按三格发：后端会当成缺字段"
+    assert body.index("regStep") < body.index("API.register"), \
+        "第二步之外的状态也能走到发请求：第一步就变成必然的 422"
+    # 到了第二步，用户名那一格仍然在场——撞名的红字要有地方落
+    assert '$("authUser")' in body, "第二步不再读用户名"
+
+
+def test_a_taken_username_still_lands_under_the_username_field():
+    """重名是"改一下就好"的事，所以那句话写在用户名那一格下面，并聚焦过去。
+
+    把它混进表单末尾的通用提示，两句话同屏时人会先去改密码；而注册入口现在分了两步，
+    第二步的屏幕上只剩答案格，红字再挂到末尾就等于让人摸黑回头找那一格。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "submitAuth")
+    assert re.search(r"if \(e\.status === 409\) \{[\s\S]{0,200}setUserError\(e\.message\)", body), \
+        "撞名不再走 setUserError：那句话会被混进表单末尾的通用提示"
+    assert body.index("setUserError(e.message)") < body.index("finally"), \
+        "撞名的处理跑到了 finally 之外？"
+    setter = _function_body(js, "setUserError")
+    assert '$("authUserErr")' in setter and '$("authUser").focus()' in setter, \
+        "红字没写在用户名那一格下面，或没聚焦到那一格"
+    # 第二步不许把用户名那一格藏起来，否则这条信道没有落点
+    renderer = _function_body(js, "renderRegister")
+    assert "authUser" not in renderer, "renderRegister 动了用户名那一格：撞名的红字会没地方看"

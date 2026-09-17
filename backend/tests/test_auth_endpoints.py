@@ -171,6 +171,37 @@ def test_missing_fields_are_422():
         assert res.status_code == 422, body
 
 
+def test_a_malformed_body_says_one_plain_chinese_sentence():
+    """**新增锁（Task 3 裁定 6）**：形状错误那句话由服务端说，不由每个客户端各兜一次。
+
+    撤掉 ResetRequest.answers 的 pydantic 条数闸门之后，"整个字段缺失 / 不是数组"这一类
+    仍然落在 FastAPI 的 RequestValidationError 上，detail 是一个结构化 list；而 api.js 是
+    `new Error(detail)`，数组到浏览器里就显示成 [object Object]——手机是唯一入口，没人会
+    在那上面开控制台查这是什么意思。形状的单一来源因此必须在服务端：curl、桌面壳、浏览器
+    看到的是同一句话。前端各调用点不许再写 `Array.isArray(detail) ? ... : ...` 这种局部兜底。
+
+    顺手钉三件配套的事：状态码仍是 422（别退化成 500 或 400）、回显里不许带上提交的内容
+    （那两格里过的就是密码与找回答案）、以及形状错照旧一格预算都不记。
+    """
+    cases = (
+        ("注册缺整个密码格", "/v1/auth/register",
+         {"username": "形状的人", "security_answers": ["甲答案", "乙答案", "丙答案"]}),
+        ("找回缺 answers 与 new_password", "/v1/auth/reset", {"username": "形状的人"}),
+        ("answers 不是数组", "/v1/auth/reset",
+         {"username": "形状的人", "answers": "甲答案", "new_password": PW}),
+    )
+    for what, path, body in cases:
+        res = client.post(path, json=body)
+        assert res.status_code == 422, f"{what} -> {res.status_code} {res.text}"
+        detail = res.json()["detail"]
+        assert isinstance(detail, str), \
+            f"{what} 吐回了结构化 detail（前端 new Error(detail) 会显示 [object Object]）：{detail!r}"
+        assert "格式不对" in detail and "\n" not in detail, f"{what} 说的不是那一句：{detail!r}"
+        assert "甲答案" not in res.text and PW not in res.text, \
+            f"{what} 把提交的内容回显了出来：{res.text}"
+    assert _budget_used() == 0, "形状错是手滑，不是攻击，不该进限流账本"
+
+
 def test_registration_budget_is_per_real_source_ip():
     """修掉"全网共用一个桶"的那条锁。
 
@@ -441,6 +472,9 @@ def test_no_other_success_pays_off_the_guessing_ledger(success_path):
     for i in range(4):
         assert _reset(victim, WRONG, ip=ip).status_code == 401, f"第 {i} 次猜错"
     assert _guessing_budget_used() == 4, "前提：猜错确实进了找回那本账"
+    # 这句必须在下面那次成功**之前**：register 与 login 成功时都执行 _FAILS.pop(ip)，
+    # 放在成功之后它恒为真，什么也没断。放在这里它才是在说"猜找回的失败没进那本账"。
+    assert _budget_used() == 0, "猜找回答案的失败记在找回自己那本账，不占登录/注册的预算"
 
     if success_path == "login":
         assert _login(victim, PW, ip=ip).status_code == 200
@@ -448,7 +482,6 @@ def test_no_other_success_pays_off_the_guessing_ledger(success_path):
         assert _reg("换个号的人", ip=ip).status_code == 200
     assert _guessing_budget_used() == 4, \
         f"{success_path} 成功替找回清了账：预算又还给猜中者了"
-    assert _budget_used() == 0, "登录/注册那本账按既有契约被清干净了——但找回这本不能跟着清"
 
     for i in range(MAX_FAILURES_PER_WINDOW - 4):
         assert _reset(victim, WRONG, ip=ip).status_code == 401, \

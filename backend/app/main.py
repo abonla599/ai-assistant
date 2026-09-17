@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import uvicorn
 import ssl
@@ -131,6 +131,33 @@ app = FastAPI(
     lifespan=lifespan,  # 注册 lifespan
     **docs_kwargs_for_mode(_auth_mode())
 )
+
+# ---------- 错误形状 ----------
+# 形状错（整个字段缺失、字段类型不对）落在 FastAPI 的 RequestValidationError 上，默认
+# detail 是一个结构化 list，而且 pydantic 会把提交进来的值原样放进 input——注册与找回
+# 那两格里过的就是密码和找回答案。两个客户端因此同时坏：api.js 是 `new Error(detail)`，
+# 数组过去显示成 [object Object]；管理页 admin.js 同一套写法。
+#
+# 这句话只在服务端说一次。找回那道 pydantic 条数闸门撤掉之后，"字段缺失/不是数组"这一类
+# 仍然走结构化 detail，如果让每个客户端各自兜一层（Array.isArray(detail) ? ... : ...），
+# 形状就有了 N 个事实来源，而 curl 与桌面壳这两个没兜的东西照样看不懂。
+# 判据见 tests/test_auth_endpoints.py 的
+# test_a_malformed_body_says_one_plain_chinese_sentence。
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+MALFORMED_BODY_DETAIL = "提交的内容不完整或格式不对：请检查每一栏都填了"
+
+
+@app.exception_handler(RequestValidationError)
+async def on_malformed_body(_: Request, exc: RequestValidationError):
+    """把结构化校验错误压成一句人话，状态码仍是 422。"""
+    # 原始错误只进服务端日志，且只取字段路径：够定位是哪儿没填，
+    # 又不会把密码或答案写进控制台与 EXE 的日志文件里。
+    where = "、".join(".".join(str(part) for part in (err.get("loc") or ()))
+                      for err in exc.errors()[:8])
+    print(f"⚠️ 请求体形状不对（{where or '未知字段'}）")
+    return JSONResponse(status_code=422, content={"detail": MALFORMED_BODY_DETAIL})
 
 # 注册记忆路由（优先使用 Router 中的端点）
 app.include_router(memory_router)
