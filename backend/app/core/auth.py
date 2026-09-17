@@ -94,6 +94,22 @@ class AuthError(Exception):
         self.code_was_spent = code_was_spent
 
 
+def _quarantine(path: str, why: str) -> None:
+    """把读不懂的身份文件先挪走，再允许从空库开始。
+
+    "就地留着、以空库启动"是不够的：下一次 create_invite/register/disable 就会
+    用内存里那份空表把它覆盖掉，被删掉的人连找回的原始材料都没有。先改名成
+    .corrupt，坏数据至少还在磁盘上、也还在人眼里（会话与附件两个兄弟存储同一套
+    做法，见 session_store._load、uploads._load）。
+    """
+    backup = path + ".corrupt"
+    try:
+        os.replace(path, backup)
+        print(f"⚠️ {why}，已备份为 {backup}")
+    except OSError as e:
+        print(f"⚠️ {why}，但备份失败（{e}）：{path} 未被挪走，请先手工备份再重启")
+
+
 def _default_users_path() -> str:
     # env 覆盖是硬需求：conftest 必须把它指向临时目录，否则测试会写进用户
     # 真实的 data/users.json——那是越出本次改动范围的副作用。
@@ -130,15 +146,17 @@ class AuthStore:
         except (ValueError, OSError) as e:
             # 身份库坏了绝不能"静默当空库继续跑"——那会让已发令牌全部失效，
             # 并可能在下一次写入时覆盖掉真实数据。备份后从空开始并显式告警。
-            backup = path + ".corrupt"
-            try:
-                os.replace(path, backup)
-                print(f"⚠️ 身份文件损坏（{e}），已备份为 {backup}")
-            except OSError:
-                print(f"⚠️ 身份文件损坏且无法备份（{e}）")
+            _quarantine(path, f"身份文件损坏（{e}）")
             return
         if isinstance(data, dict):
             target.update(data)
+            return
+        # 同一句话也管这一支：能 parse、但顶层不是对象（整份被写成了一个列表、
+        # 一个字符串、甚至手工写成了 `[]`）。原先这里什么都不做，于是库以空表
+        # 启动、下一次 create_invite/register/disable 把 users.json 整个覆盖掉，
+        # 坏数据连一个字都不剩——上面那条不变量就是这么被绕过去的。
+        _quarantine(path, f"身份文件形状不对（{path} 顶层是 "
+                          f"{type(data).__name__}，应为对象）")
 
     def _flush(self):
         for path, payload in ((self.path, self._users), (self.invites_path, self._invites)):

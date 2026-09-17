@@ -120,12 +120,35 @@ class UploadStore:
         try:
             with open(self.index_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict):
-                self._index = data
         except (ValueError, OSError) as e:
-            print(f"⚠️ 附件索引损坏，忽略历史附件记录: {e}")
+            self._quarantine(f"附件索引损坏（{e}）")
             return
+        if not isinstance(data, dict):
+            # 能 parse、但顶层不是对象（列表/字符串/数字）：上面那行 except 抓不到它。
+            self._quarantine(f"附件索引形状不对（顶层是 {type(data).__name__}，应为对象）")
+            return
+        self._index = data
         self._backfill_owner()
+
+    def _quarantine(self, why: str):
+        """把读不懂的索引先挪开，再允许以空表启动。
+
+        为什么不能只是 print 一句然后继续：`index.json` 是**唯一**的
+        id → 磁盘文件 映射，条目里存着 path、owner、原始文件名。以空表启动后，
+        下一次 save() 就会 _flush() 出一份只有一条记录的索引——所有历史附件的
+        文件还在磁盘上，却再没有任何人认得出该把谁的文件给谁，也没法再找回属主
+        （归属校验会把它们一律当成不存在）。既不备份也不拒绝，等于把"索引坏了"
+        升级成"附件全丢了"。所以这里与 session_store、auth 两个兄弟存储对齐：
+        改名留证 + 显式告警。
+        """
+        backup = self.index_path + ".corrupt"
+        try:
+            os.replace(self.index_path, backup)
+            print(f"⚠️ {why}，已备份为 {backup}，历史附件本次不可见，"
+                  f"请从该备份文件恢复后再重启（数据文件 {self.index_path}）")
+        except OSError as e:
+            print(f"⚠️ {why}，但备份失败（{e}）：{self.index_path} 未被挪走，"
+                  "请先手工复制一份出来再重启，否则下一次上传会覆盖它")
 
     def _backfill_owner(self):
         """身份层之前的附件都是本机管理员自己传的，认给他。

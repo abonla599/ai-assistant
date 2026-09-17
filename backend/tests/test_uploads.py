@@ -1,4 +1,5 @@
 """附件上传与注入测试。"""
+import json
 import re
 import sys
 from pathlib import Path
@@ -195,3 +196,38 @@ def test_file_picker_does_not_offer_images():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
     assert not image_exts & set(_accept_of(html, "fileInput"))
+
+
+# ---------- 坏索引必须先留证再重启：附件索引是唯一那份 id→文件 映射 ----------
+# 这里曾经只 print 一句"忽略历史附件记录"就以空表启动，而下一次 save() 会把只有
+# 一条记录的索引写回 index.json：历史附件的文件还在磁盘上，却再也认不出属主与原
+# 文件名，等于把"索引坏了"升级成"所有人上传过的东西全丢了"。session_store 与
+# auth 两个兄弟存储都是先改名 .corrupt，这条对齐由下面两个用例钉住。
+
+BROKEN_INDEXES = [
+    ('{"abc": {"name": "合同.pdf", "owner": "u_1", "tru', "半截 JSON"),
+    ('[{"id": "abc", "name": "合同.pdf"}]', "读得懂但顶层是列表"),
+]
+
+
+@pytest.mark.parametrize("broken,desc", BROKEN_INDEXES)
+def test_broken_index_is_quarantined_not_overwritten(tmp_path, broken, desc):
+    """两种坏法都必须改名留证；第二例是重点——`json.load` 不抛错，except 抓不到它。"""
+    from app.core.uploads import UploadStore
+
+    d = tmp_path / "uploads"
+    d.mkdir()
+    (d / "index.json").write_text(broken, encoding="utf-8")
+
+    store = UploadStore(directory=str(d))
+    assert (d / "index.json.corrupt").exists(), f"{desc}：必须先备份成 .corrupt"
+    assert not (d / "index.json").exists(), f"{desc}：原件要让位，不能留在原地等着被覆盖"
+    assert store._index == {}, f"{desc}：仍然以空表启动，服务不该因此起不来"
+
+    # 真正的判据在这一行之后：重启后的第一次上传写的是新文件，
+    # 而那份认不出来的历史仍完整可读——运维还有得救。
+    store.save("笔记.txt", "内容".encode("utf-8"), "text/plain", owner="u_new")
+    assert (d / "index.json.corrupt").read_text(encoding="utf-8") == broken, \
+        f"{desc}：备份必须活过一次 save()"
+    fresh = json.loads((d / "index.json").read_text(encoding="utf-8"))
+    assert [r["owner"] for r in fresh.values()] == ["u_new"]

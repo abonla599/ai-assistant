@@ -343,3 +343,32 @@ def test_enable_user_undoes_a_disable_and_reports_unknown_ids(store):
     disk = json.load(open(store.path, encoding="utf-8"))[principal.user_id]
     assert disk["disabled"] is False, "启用要落盘，否则重启后账号又躺回停用堆里"
     assert store.enable_user("u_nobody") is False, "不存在的用户要如实返回 False"
+
+
+# ---------- 坏身份库必须先改名留证：形状不对也算坏 ----------
+# `_load` 上面那条不变量写的是"身份库坏了绝不能静默当空库继续跑"。原先只有
+# parse 失败那一支照做，"读得懂但顶层不是对象"这一支什么都不 print、什么都不备份，
+# 于是库以空表启动，下一次 create_invite/register/disable 就把 users.json 整个覆盖
+# 掉——不变量正好从这一支被绕过去。
+
+
+@pytest.mark.parametrize("broken,desc", [
+    ('{"u_1": {"username": "张三", "token_hash": "sha256:aa', "半截 JSON"),
+    ('[{"user_id": "u_1", "username": "张三"}]', "读得懂但顶层是列表"),
+])
+def test_broken_identity_file_is_kept_and_never_clobbered(tmp_path, broken, desc):
+    from app.core.auth import AuthStore
+
+    users = tmp_path / "users.json"
+    users.write_text(broken, encoding="utf-8")
+
+    store = AuthStore(path=str(users), invites_path=str(tmp_path / "invites.json"))
+    assert (tmp_path / "users.json.corrupt").exists(), f"{desc}：必须先备份成 .corrupt"
+    assert store.list_users() == [], f"{desc}：仍要能以空库启动，别让服务起不来"
+
+    # 判据在这一行之后：把库写回去的那次注册，不能顺手抹掉唯一的原始材料
+    code = store.create_invite("bootstrap")
+    principal, _ = store.register(code=code, username="重建者")
+    assert (tmp_path / "users.json.corrupt").read_text(encoding="utf-8") == broken, \
+        f"{desc}：备份必须活过一次写盘"
+    assert list(json.loads(users.read_text(encoding="utf-8"))) == [principal.user_id]
