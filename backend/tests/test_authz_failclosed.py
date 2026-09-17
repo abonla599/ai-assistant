@@ -311,3 +311,50 @@ def test_require_admin_rejects_a_normal_user_with_403_not_401(probe):
 def test_dependency_without_any_credential_is_401(probe):
     client, _ = probe
     assert client.get("/v1/whoami").status_code == 401
+
+
+# ---------- 随安装包发出去的 .env.example 不能教运维把管理员凭据交出去 ----------
+# installer.nsi 的 `File ".env.example"` 意味着这份注释会被用户当成 .env 抄一遍。
+# 它曾经写着"ACCESS_TOKEN 留空=不鉴权，仅适合本机开发""前端在「设置 → 连接」里填这个
+# 值"——两句话在身份层之后都是假的，而第二句的假法恰好等于给每个用户 role=admin
+# （能改写模型服务与密钥、列出/停用/删除用户、签发邀请码）。代码改对了、说明书还教人
+# 开门，这类事故不会有任何测试变红，所以这里直接对文件本身下断言。
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="module")
+def env_example():
+    return (_REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+
+def test_env_example_no_longer_promise_an_open_door(env_example):
+    """三条假话一句都不许留下：留空不鉴权、只适合本机开发、让用户填这把口令。"""
+    for forbidden in ("留空=不鉴权", "仅适合本机开发", "填这个值"):
+        assert forbidden not in env_example, f".env.example 仍在教运维：{forbidden}"
+
+
+def test_env_example_describes_the_bootstrap_credential_honestly(env_example):
+    """ACCESS_TOKEN 是 bootstrap 管理员凭据；用户拿到的必须是邀请码换出的个人令牌。"""
+    assert "bootstrap" in env_example, "没说清这把口令是什么身份"
+    assert "admin" in env_example
+    assert "邀请码" in env_example, "没指出用户应该怎么拿到自己的令牌"
+    assert "503" in env_example, "没说清留空的真实后果是 fail-closed 而不是敞开"
+
+
+def test_env_example_documents_both_auth_modes(env_example):
+    """两种取值的差别（401/文档路由）必须写在发出去的那份文件里，不只写在指南里。"""
+    assert "AUTH_MODE" in env_example
+    assert "enforced" in env_example and "disabled" in env_example
+
+
+def test_env_example_documents_every_data_placement_var(env_example):
+    """安装部署指南承诺"每一份数据都能用环境变量指走"，那八份都得在这份模板里。
+
+    缺一个名字的后果不是不兼容，而是运维照模板配完才发现那份数据挪不走——
+    而最挪不走的那几份恰好是最敏感的（users.json / invites.json）。
+    """
+    for var in ("SESSION_DB_PATH", "USERS_DB_PATH", "INVITES_DB_PATH",
+                "PROVIDERS_DB_PATH", "UPLOAD_DIR", "CHROMA_DB_PATH",
+                "FEEDBACK_FILE", "PREFERENCE_FILE"):
+        assert var in env_example, f".env.example 漏了 {var}，指南与模板对不上"
