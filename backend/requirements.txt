@@ -6,7 +6,15 @@ bcrypt==5.0.0
 build==1.5.0
 certifi==2024.7.4
 charset-normalizer==3.4.7
-chromadb==0.5.0
+# 钉 1.5.9 不是"挑了个新版"，而是被现有数据逼出来的唯一选择：
+#   - 真实记忆库 chroma_db/ 已是 1.x 落盘格式（collections 表带 config_json、
+#     有 embeddings_queue / maintenance_log）。0.5.0 能列出集合却读不了它，
+#     `col.count()` 直接 TypeError: object of type 'int' has no len()。
+#     也就是说，照本文件从 0.5.0 装出来的环境，是一个"记忆模块永远打不开数据"的环境。
+#   - 桌面版冻结 EXE 里捆绑的同样是 1.5.9（dist/run_backend/_internal/chromadb-1.5.9.dist-info）。
+# 旧写法让 CI(0.5.0) 与本机/EXE(1.5.9) 各跑一套，正是"只在某一边红"的漂移源头。
+# 1.5.9 发的是 cp39-abi3-manylinux wheel，CI 装它不需要编译器。
+chromadb==1.5.9
 click==8.3.3
 colorama==0.4.6
 distro==1.9.0
