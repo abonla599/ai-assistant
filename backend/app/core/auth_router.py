@@ -53,7 +53,8 @@ MAX_TRACKED_SOURCES = 4096
 _FAILS = defaultdict(list)
 _REGISTERS = defaultdict(list)
 _RESETS = defaultdict(list)
-# 猜找回答案的失败单独一册（窗口与上限都沿用上面那两条常量，换的只是账本）。
+# 猜找回答案的失败单独一册（窗口与上限沿用 FAILURE_WINDOW_SECONDS /
+# MAX_FAILURES_PER_WINDOW，换的只是账本）。
 # 理由：_FAILS 在登录与注册成功时会被 _FAILS.pop(ip) 清空——那是这两个端点的既有契约
 # （"密码对了"基本说明来路正当）。但一个正在猜三题答案的人，随手就能拿到一次那样的
 # 成功：猜对自己的口令、或再注册一个小号。共用一本账等于每成功一次就把找回的预算还给他，
