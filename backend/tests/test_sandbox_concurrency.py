@@ -71,7 +71,6 @@ def main():
                 print(f"✗ 任务 {task_id}: 失败 | {result.get('error')}")
 
     print(f"\n总计: {total_tasks} | 成功: {success} | 失败: {error}")
-    print(f"最终统计: {SandboxManager.get_stats()}")
 
 if __name__ == "__main__":
     main()

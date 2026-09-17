@@ -7,33 +7,8 @@ from typing import List, Optional, Dict, Any
 from .task_store import Task, TaskStatus, task_store
 from .planner import Planner
 from .executor import Executor
+from ..core.llm_client import get_llm_response
 
-
-class Orchestrator:
-    """
-    任务编排器
-    负责：
-    1. 接收用户目标，调用Planner生成子任务计划
-    2. 创建或恢复Task对象，管理任务生命周期
-    3. 依次调用Executor执行每个子任务
-    4. 汇总所有子任务结果，生成最终答案
-    5. 支持任务取消（每步执行前检查取消标志）
-    """
-
-    def __init__(self, model: str = "deepseek-chat"):
-        """
-        初始化编排器
-        Args:
-            model: 使用的LLM模型名称，默认使用deepseek-chat
-        """
-"""协调者 - 规划 + 逐个执行 + 汇总"""
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # backend 目录
-
-from app.agents.planner import Planner
-from app.agents.executor import Executor
-from app.core.llm_client import get_llm_response
 
 class Orchestrator:
     def __init__(self, model="deepseek-chat"):
