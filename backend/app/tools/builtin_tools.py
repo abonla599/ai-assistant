@@ -10,9 +10,9 @@ if project_root not in sys.path:
 from app.sandbox.sandbox_manager import SandboxManager
 import math
 import re
-from app.tools.registry import register_tool
-from ddgs import DDGS
+import time
 from app.tools.registry import register_tool, tools_registry
+from ddgs import DDGS
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
 sandbox = SandboxManager()
@@ -115,15 +115,13 @@ def help_tool() -> str:
     }
 )
 def execute_code(code: str, language: str = "python", max_retries=2) -> str:
+    result = {}
     for attempt in range(max_retries + 1):
         result = sandbox.run_code(code, language)
         if not result.get("error"):
             break
         if attempt < max_retries:
-            import time
             time.sleep(0.5)
-  # 调用沙箱管理器的 run_code 方法
-    result = sandbox.run_code(code, language)
 
     # 沙箱返回的是字典，里面有 stdout, stderr, error
     if result.get("error"):

@@ -133,3 +133,25 @@ def test_stats():
     res = client.get("/v1/memory/stats")
     assert res.status_code == 200
     assert "status" in res.json()
+
+
+# ========== 9. /v1/agent/run 背后那个模块真的导入得动 ==========
+def test_react_agent_imports_with_the_signature_the_endpoint_uses():
+    """`/v1/agent/run` 里写着 `except ImportError: return "智能体模块尚未就绪"`，
+    所以这个模块一旦坏掉，端点会以 200 返回一句安慰话而不是让任何东西变红。
+    react_agent.py 就被一次合并切成过两半（`'(' was never closed`），当时三百多条
+    用例全绿——因为它是惰性导入的，没有任何测试从测试侧真正 import 过它。
+    """
+    import inspect
+
+    from app.agents.react_agent import ReActAgent
+
+    agent = ReActAgent(model="fake-model", max_turns=3)
+    assert agent.max_turns == 3
+    assert isinstance(agent.tools_schema, list), "工具清单应由注册表自动装配"
+
+    params = inspect.signature(agent.run).parameters
+    for name in ("task", "max_duration"):
+        assert name in params, (
+            f"ReActAgent.run 不再接受 {name}=，/v1/agent/run 会静默退化成那句安慰话"
+        )
