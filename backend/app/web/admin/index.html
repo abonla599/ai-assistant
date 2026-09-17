@@ -52,7 +52,7 @@
 
   <main id="panel" class="hidden">
     <div class="top">
-      <h1>用户与邀请码</h1>
+      <h1>用户管理</h1>
       <span class="who" id="who"></span>
       <span style="flex:1"></span>
       <button id="btnReload" class="btn btn-ghost btn-small">刷新</button>
@@ -61,23 +61,9 @@
     <div class="err" id="flash"></div>
 
     <section class="sec">
-      <h2>邀请码</h2>
-      <p>一枚码默认只能用一次。发人之后可以再作废；用满或过期都不会再泄露身份，但作废能让它立刻失效。</p>
-      <div class="row">
-        <button id="btnMake" class="btn btn-primary btn-small">生成一枚</button>
-        <label class="who">可用次数
-          <input id="maxUses" class="field num" type="number" min="1" max="50" value="1">
-        </label>
-        <span id="newCode" class="tag hidden"></span>
-      </div>
-      <table><thead><tr><th>邀请码</th><th>已用</th><th>状态</th><th>创建者</th><th class="acts">操作</th></tr></thead>
-      <tbody id="inviteRows"></tbody></table>
-    </section>
-
-    <section class="sec">
       <h2>用户</h2>
-      <p>「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。</p>
-      <table><thead><tr><th>用户名</th><th>身份</th><th>状态</th><th>最后活跃</th><th class="acts">操作</th></tr></thead>
+      <p>「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台）；「换发令牌」会一次全部作废。</p>
+      <table><thead><tr><th>用户名</th><th>身份</th><th>状态</th><th>设备</th><th>最后活跃</th><th class="acts">操作</th></tr></thead>
       <tbody id="userRows"></tbody></table>
     </section>
   </main>

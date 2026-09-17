@@ -119,11 +119,14 @@ const API = (() => {
   }
 
   return {
-    /* 身份：注册拿到的是只此一次回显的个人令牌，之后一切请求都靠它。
+    /* 身份：注册与登录都只回显一次令牌，之后一切请求都靠它。
      * me() 是前端唯一的"我到底是谁"来源——角色不能靠猜，猜错就把 403 按钮留在页面上。
+     * 密码只出现在这两个请求的 body 里，绝不进任何其它请求头：运行时凭据是令牌。
      */
-    register: (code, username) =>
-      request("/v1/auth/register", { method: "POST", body: { code, username } }),
+    register: (username, password) =>
+      request("/v1/auth/register", { method: "POST", body: { username, password } }),
+    login: (username, password) =>
+      request("/v1/auth/login", { method: "POST", body: { username, password } }),
     me: () => request("/v1/auth/me"),
 
     models: () => request("/v1/models"),

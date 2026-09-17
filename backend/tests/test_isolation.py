@@ -31,12 +31,10 @@ import app.memory.memory_router as mr
 
 @pytest.fixture
 def two_users(tmp_path):
-    auth = AuthStore(path=str(tmp_path / "users.json"),
-                     invites_path=str(tmp_path / "invites.json"))
+    auth = AuthStore(path=str(tmp_path / "users.json"))
     out = {}
     for name in ("A", "B"):
-        code = auth.create_invite("admin")
-        principal, token = auth.register(code=code, username=name)
+        principal, token = auth.register(username=name, password="isolation-pw-123")
         out[name] = (principal.user_id, token)
     return out
 
@@ -686,7 +684,7 @@ def _memory_app(tmp_path, monkeypatch, manager):
     if manager is None:
         monkeypatch.setattr(mr, "fake_store", FakeMemoryStore())
 
-    store = AuthStore(path=str(tmp_path / "u.json"), invites_path=str(tmp_path / "i.json"))
+    store = AuthStore(path=str(tmp_path / "u.json"))
     monkeypatch.setattr(authz, "auth_store", store)
     monkeypatch.setenv("AUTH_MODE", "enforced")
     monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
@@ -696,8 +694,7 @@ def _memory_app(tmp_path, monkeypatch, manager):
     probe.include_router(router)
 
     def hdr(username):
-        code = store.create_invite("admin")
-        _, token = store.register(code=code, username=username)
+        _, token = store.register(username=username, password="isolation-pw-123")
         return {"Authorization": "Bearer " + token}
 
     return TestClient(probe), hdr("A"), hdr("B")

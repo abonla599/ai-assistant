@@ -189,17 +189,17 @@
 
         <!-- 连接 -->
         <section class="pane" data-pane="conn">
-          <p class="pane-note">向管理员索取一枚邀请码，在下面注册即可使用。令牌由服务端签发、
-            只存在本机浏览器；管理员撤销或轮换之后旧令牌立即失效，重新注册一次就好。
-            各人的会话、附件与记忆互相看不到。</p>
+          <p class="pane-note">用户名 + 密码自己设，注册完就能用。令牌由服务端签发、只存在本机
+            浏览器；换手机或重装后，用同一个用户名登录即可，不必找管理员。管理员撤销或轮换之后
+            旧令牌立即失效。各人的会话、附件与记忆互相看不到。</p>
           <p class="pane-note" id="whoInfo">未登录</p>
           <div class="row" id="registerRow">
-            <input id="regUsername" type="text" placeholder="用户名" autocomplete="off">
-            <input id="regCode" type="text" placeholder="邀请码，如 AB2C-DEF4" autocomplete="off">
+            <input id="regUsername" type="text" placeholder="用户名" autocomplete="username">
+            <input id="regPass" type="password" placeholder="密码，至少 8 位" autocomplete="new-password">
             <button class="btn btn-primary" id="registerBtn">注册并登录</button>
           </div>
           <p class="pane-note" id="registerHint"></p>
-          <p class="pane-note">已有令牌（管理员手工签发的访问口令）：直接填入并保存。</p>
+          <p class="pane-note">已有令牌（本机直跑服务的管理员入口）：直接填入并保存。</p>
           <div class="row">
             <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
             <button class="btn btn-primary" id="saveTokenBtn">保存</button>
@@ -230,6 +230,24 @@
       </div>
     </article>
   </template>
+
+  <!-- 首屏凭据层：没有有效令牌时挡住整个应用。
+       登录与注册共用两个字段，差别只在打到哪个端点；角色一律由服务端 me() 说，
+       前端不猜。 -->
+  <div class="auth hidden" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
+    <div class="auth-card">
+      <h1 class="auth-title">AI 助手</h1>
+      <p class="auth-sub" id="authSub">登录后继续；还没有账号就选右边那页注册一个。</p>
+      <div class="auth-tabs" role="tablist">
+        <button class="auth-tab" id="authTabLogin" type="button">登录</button>
+        <button class="auth-tab" id="authTabRegister" type="button">注册</button>
+      </div>
+      <input id="authUser" type="text" placeholder="用户名" autocomplete="username">
+      <input id="authPass" type="password" placeholder="密码，至少 8 位" autocomplete="current-password">
+      <button class="btn btn-primary btn-block" id="authGo" type="button">登录</button>
+      <p class="auth-hint" id="authHint"></p>
+    </div>
+  </div>
 
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>

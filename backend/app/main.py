@@ -176,8 +176,8 @@ from app.session.session_store import SessionStore
 # ⚠️ 导入期副作用：这一行会把 $SESSION_DB_PATH 指向的文件读进来并做 owner 回填，
 # 未设置该变量时就是仓库真实的 data/sessions.json —— 也就是说"只是 import 一下
 # app.main"就会改写用户真实数据，并在旁边落下 sessions.json.bak-<时间戳>。
-# 脚本与测试必须先定 SESSION_DB_PATH / UPLOAD_DIR / USERS_DB_PATH /
-# INVITES_DB_PATH，再导入本模块（backend/tests/conftest.py 就是为此存在）。
+# 脚本与测试必须先定 SESSION_DB_PATH / UPLOAD_DIR / USERS_DB_PATH，
+# 再导入本模块（backend/tests/conftest.py 就是为此存在）。
 # fail-fast 是刻意的；改成惰性构造留给 Task 8。
 sessions_store = SessionStore()
 

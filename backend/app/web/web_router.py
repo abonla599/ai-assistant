@@ -46,7 +46,7 @@ def mount_pwa(app: FastAPI) -> None:
 def mount_admin(app: FastAPI) -> None:
     """把管理员页挂到 /admin。
 
-    这个地址是公开的——有意为之：页面是个不含任何数据的空壳，用户与邀请码只能
+    这个地址是公开的——有意为之：页面是个不含任何数据的空壳，用户数据只能
     经 /v1/admin/* 那套 require_admin 接口取到。鉴权中间件的保护前缀只有
     /v1/、/docs 等，所以这里不需要动 PUBLIC_PATHS。
     """

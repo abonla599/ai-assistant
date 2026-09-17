@@ -46,13 +46,13 @@ def test_frozen_exe_with_no_project_falls_back_to_its_own_dir(tmp_path, monkeypa
 def test_all_stores_share_one_root(monkeypatch):
     """每一份可变存储都必须同源，否则桌面版看到的记忆和手机版不是同一份。
 
-    这张表是"少列一个存储 = 少一层保护"的那种清单，所以身份库（users.json /
-    invites.json）尤其不能缺席：它们是本分支最新、也最敏感的两份数据——令牌摘要、
-    用户名、邀请码全在里面。它俩一旦跟着 exe 落在 dist/run_backend/ 下，一次
-    PyInstaller 重建就不只是"丢了几个人的账号"，而是把已发令牌整批清零（所有人
-    立刻 401，只能逐个重发），而那台机器的历史 users.json 同时被抹掉、无从恢复。
+    这张表是"少列一个存储 = 少一层保护"的那种清单，所以身份库（users.json）尤其
+    不能缺席：它是本分支最新、也最敏感的一份数据——密码摘要、令牌摘要、用户名全
+    在里面。它一旦跟着 exe 落在 dist/run_backend/ 下，一次 PyInstaller 重建就不
+    只是"丢了几个人的账号"，而是把已发令牌整批清零（所有人立刻 401，只能逐个
+    重发），而那台机器的历史 users.json 同时被抹掉、无从恢复。
     """
-    from app.core.auth import _default_invites_path, _default_users_path
+    from app.core.auth import _default_users_path
     from app.core.providers import _default_path as providers_path
     from app.core.uploads import _default_dir as uploads_dir
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
@@ -65,7 +65,6 @@ def test_all_stores_share_one_root(monkeypatch):
         ("SESSION_DB_PATH", sessions_path),
         ("CHROMA_DB_PATH", chroma_dir),
         ("USERS_DB_PATH", _default_users_path),
-        ("INVITES_DB_PATH", _default_invites_path),
     ]
     for var, _ in stores:
         monkeypatch.delenv(var, raising=False)
@@ -154,7 +153,7 @@ def test_ensure_parent_creates_the_missing_directory(tmp_path):
 # 的第三档），这件事光读文档猜不准，所以把它打印出来。下面两条钉的是：这张表
 # 必须**全**（漏一份就等于那份永远不出现在日志里），以及它必须说真话。
 
-ALL_STORES = {"会话", "身份库", "邀请码", "模型服务配置", "附件",
+ALL_STORES = {"会话", "身份库", "模型服务配置", "附件",
               "长期记忆向量库", "反馈原文", "偏好摘要"}
 
 
@@ -167,7 +166,6 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
     redirected = {
         "SESSION_DB_PATH": tmp_path / "x" / "sessions.json",
         "USERS_DB_PATH": tmp_path / "x" / "users.json",
-        "INVITES_DB_PATH": tmp_path / "x" / "invites.json",
         "PROVIDERS_DB_PATH": tmp_path / "x" / "providers.json",
         "UPLOAD_DIR": tmp_path / "x" / "uploads",
         "CHROMA_DB_PATH": tmp_path / "x" / "chroma_db",
@@ -178,7 +176,7 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
     got = dict(resolve_all_data_paths())
     assert set(got) == ALL_STORES, f"这张表漏了存储：{ALL_STORES ^ set(got)}"
     label_of = {"SESSION_DB_PATH": "会话", "USERS_DB_PATH": "身份库",
-                "INVITES_DB_PATH": "邀请码", "PROVIDERS_DB_PATH": "模型服务配置",
+                "PROVIDERS_DB_PATH": "模型服务配置",
                 "UPLOAD_DIR": "附件", "CHROMA_DB_PATH": "长期记忆向量库"}
     for var, value in redirected.items():
         assert got[label_of[var]] == os.path.abspath(str(value)), f"{label_of[var]} 没跟着 {var} 走"

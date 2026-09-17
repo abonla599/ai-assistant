@@ -1,12 +1,17 @@
-"""身份存储：用户、邀请码、可撤销令牌。
+"""身份存储：用户、密码校验、可撤销会话令牌。
 
 刻意不 import FastAPI——身份规则必须能离线测，也不该被 web 框架绑住。
+
+2026-09-17 凭据模型换过一次：注册不再需要邀请码，改成用户名 + 自设密码。
+密码**只用来换一枚会话令牌**，运行时鉴权走的仍然是令牌，密码不作为每请求
+凭据——否则它会出现在每一次请求头、代理与访问日志里。
+
 令牌只存 SHA-256：本文件的数据与 sessions.json 同目录，而本仓库有过 .env
 被跟踪导致密钥泄露 5 个月的前科，明文存令牌等于把所有人的访问权一起放在
 一个随时可能被误提交的文件里。令牌本身是 256 位随机值，故 sha256 足够，
-不需要慢哈希。
+不需要慢哈希。密码反过来必须用慢哈希（bcrypt），它是人会自己编的东西。
 """
-import copy
+import base64
 import hashlib
 import hmac
 import json
@@ -17,20 +22,29 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import bcrypt
+
 from app.core.paths import data_root
 
-# 排除易混字符：邀请码要在手机上手输
-ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 RESERVED_NAMES = {"admin", "default_user"}
 USERNAME_MAX = 24
+PASSWORD_MIN = 8
+PASSWORD_MAX = 512          # 上限只为挡"贴进来一本書"，真正的长度问题由预哈希解决
+
+# 一个人同时在几台设备上用是正当需求（手机 + 桌面 + 浏览器），所以登录是"追加
+# 一枚会话令牌"而不是"顶掉旧的"。但令牌表不能只进不出：一个脚本反复登录就能把
+# 这个人的记录撑大，所以设上限，超了就丢最老的那一枚。
+MAX_SESSION_TOKENS = 8
 
 # bootstrap 管理员口令的 env 名：authz 与 main 共用这一个，别再各写一份字面量
 BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
 
-# last_used_at 只是运维参考信息，不值地为每一次鉴权重写两个文件：磁盘满、
+# last_used_at 只是运维参考信息，不值地为每一次鉴权重写文件：磁盘满、
 # 或 Windows 上文件被编辑器/杀软/同步盘锁住时，热路径上的写会把一枚有效令牌
 # 变成 500。内存里照常刷新，落盘按这个阈值降频。
 LAST_USED_FLUSH_AFTER = timedelta(hours=1)
+
+_LOGIN_FAIL = "用户名或密码不正确"
 
 
 def _now_dt() -> datetime:
@@ -43,6 +57,37 @@ def _now() -> str:
 
 def hash_token(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _prehash(password: str) -> bytes:
+    """bcrypt 只吃前 72 字节，长密码会被静默截断成同一个哈希。
+
+    先 SHA-256 再 base64（44 字节，恒小于 72），于是 "正确但很长" 的密码不会
+    在若干年后变成另一个人的密码。
+    """
+    return base64.b64encode(hashlib.sha256(password.encode("utf-8")).digest())
+
+
+def hash_password(password: str) -> str:
+    # 带算法前缀，和令牌那边的 "sha256:" 同一个理由：以后换哈希方案时，
+    # 旧记录还认得自己是用什么散的，校验分支不必靠猜。
+    return "bcrypt:" + bcrypt.hashpw(_prehash(password), bcrypt.gensalt()).decode("ascii")
+
+
+def _check_password(password: str, stored) -> bool:
+    if not isinstance(stored, str) or not stored.startswith("bcrypt:"):
+        return False        # 没有密码的旧记录：一律登不进，而不是抛异常
+    try:
+        return bcrypt.checkpw(_prehash(password), stored[7:].encode("ascii"))
+    except ValueError:
+        # 摘要被人手改坏（非法 base64 等）→ "这枚密码不对"，不是 500
+        return False
+
+
+# "用户名不存在"与"密码错"必须连时间都一样，否则响应快慢本身就是一份用户名名单。
+# 这个固定摘要只在 import 时算一次，让"查无此人"那一支也付一次 bcrypt 的代价。
+_DUMMY_PW_HASH = "bcrypt:" + bcrypt.hashpw(_prehash("timing-equalizer"),
+                                           bcrypt.gensalt()).decode("ascii")
 
 
 def _as_hash_bytes(value) -> bytes:
@@ -66,12 +111,6 @@ def _stale_for_flush(stored, moment: datetime) -> bool:
         return True
 
 
-def _new_code() -> str:
-    left = "".join(secrets.choice(ALPHABET) for _ in range(4))
-    right = "".join(secrets.choice(ALPHABET) for _ in range(4))
-    return f"{left}-{right}"
-
-
 @dataclass(frozen=True)
 class Principal:
     user_id: str
@@ -80,24 +119,24 @@ class Principal:
 
 
 class AuthError(Exception):
-    """注册/鉴权失败。reason 面向用户；用户听到的那句不分"码不存在"与"码已用尽"。
+    """注册/登录失败。
 
-    code_was_spent 是**只在进程内**用的记号，给 HTTP 层分账用（见
-    auth_router.register：重复提交一枚已经花掉的码是正当重试，不是猜码，
-    不该烧限流预算）。它不进任何响应体——对外两句 reason 完全相同这件事由
-    test_auth_endpoints.py 的 ..._look_identical 钉着，别把它写成 detail。
+    reason 是面向用户的那句话。登录失败不分"没这个用户"还是"密码错"——两句
+    必须逐字节相同（test_auth.py 钉着），否则免凭据的登录端点就是用户名探测器。
+    注册端的"该用户名已被占用"是有意保留的实话（改名是用户自己能解决的事），
+    但它现在没有邀请码挡在前面，所以那份预算改由 HTTP 层按 IP 计费——
+    见 auth_router 里 _note_failure 的口径。
     """
 
-    def __init__(self, reason: str, *, code_was_spent: bool = False):
+    def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
-        self.code_was_spent = code_was_spent
 
 
 def _quarantine(path: str, why: str) -> None:
     """把读不懂的身份文件先挪走，再允许从空库开始。
 
-    "就地留着、以空库启动"是不够的：下一次 create_invite/register/disable 就会
+    "就地留着、以空库启动"是不够的：下一次 register/login/disable 就会
     用内存里那份空表把它覆盖掉，被删掉的人连找回的原始材料都没有。先改名成
     .corrupt，坏数据至少还在磁盘上、也还在人眼里（会话与附件两个兄弟存储同一套
     做法，见 session_store._load、uploads._load）。
@@ -119,22 +158,12 @@ def _default_users_path() -> str:
     return os.path.join(data_root(), "data", "users.json")
 
 
-def _default_invites_path() -> str:
-    env_path = os.getenv("INVITES_DB_PATH")
-    if env_path:
-        return os.path.abspath(env_path)
-    return os.path.join(data_root(), "data", "invites.json")
-
-
 class AuthStore:
-    def __init__(self, path: str = None, invites_path: str = None):
+    def __init__(self, path: str = None):
         self.path = os.path.abspath(path or _default_users_path())
-        self.invites_path = os.path.abspath(invites_path or _default_invites_path())
         self._lock = threading.Lock()
         self._users = {}
-        self._invites = {}
         self._load(self._users, self.path)
-        self._load(self._invites, self.invites_path)
 
     @staticmethod
     def _load(target: dict, path: str):
@@ -153,18 +182,17 @@ class AuthStore:
             return
         # 同一句话也管这一支：能 parse、但顶层不是对象（整份被写成了一个列表、
         # 一个字符串、甚至手工写成了 `[]`）。原先这里什么都不做，于是库以空表
-        # 启动、下一次 create_invite/register/disable 把 users.json 整个覆盖掉，
+        # 启动、下一次 register/disable 把 users.json 整个覆盖掉，
         # 坏数据连一个字都不剩——上面那条不变量就是这么被绕过去的。
         _quarantine(path, f"身份文件形状不对（{path} 顶层是 "
                           f"{type(data).__name__}，应为对象）")
 
     def _flush(self):
-        for path, payload in ((self.path, self._users), (self.invites_path, self._invites)):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._users, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
 
     # ---------- 用户 ----------
 
@@ -182,63 +210,90 @@ class AuthStore:
         return cleaned
 
     @staticmethod
-    def _normalize_code(code: str) -> str:
-        # 邀请码要在手机上手输、从聊天里粘贴，大小写和首尾空格不该改变它指向
-        # 哪条记录——register 与 revoke_invite 必须共用这一份规则。
-        return (code or "").strip().upper()
+    def _check_password_shape(password: str) -> str:
+        pw = password or ""
+        if not pw.strip():
+            raise AuthError("密码不能为空")
+        if len(pw) < PASSWORD_MIN:
+            raise AuthError(f"密码至少 {PASSWORD_MIN} 位")
+        if len(pw) > PASSWORD_MAX:
+            raise AuthError(f"密码最长 {PASSWORD_MAX} 位")
+        return pw
 
     def list_users(self) -> list:
         with self._lock:
             return [dict(u) for u in self._users.values()]
 
-    def register(self, code: str, username: str):
-        """邀请码换身份。检查顺序本身是安全属性，不是风格问题：码先、名字后。
+    def _new_user_id(self) -> str:
+        # 取 id 那处必须重取：两个线程撞上同一个 id 时，
+        # `self._users[user_id] = record` 会把已有那个人整条记录覆盖掉——
+        # 他的令牌当场失效，而且没有任何报错。32 bit 撞上的概率极低，
+        # 但"极低"不是"检查只要一行就别省"的理由。
+        user_id = "u_" + secrets.token_hex(4)
+        while user_id in self._users:
+            user_id = "u_" + secrets.token_hex(4)
+        return user_id
 
-        注册端点免凭据。若先查重名，那么一个邀请码都没有的人也能问出
-        "这个名字被占了吗"，而且两个方向都得到真话——端点就成了用户名枚举
-        预言机（用户名可被人拿去撞别的服务）。先验码之后，没码的人无论填什么
-        用户名都只听到同一句"邀请码无效"；只有握着有效未用码的人才配知道
-        "这名字撞了"，而他本来就有注册权限，这句实话不再增加攻击面。
-        """
+    def _issue_token(self, record: dict) -> str:
+        """给这个账号追加一枚会话令牌，超出上限就丢最老的那一枚。"""
+        token = secrets.token_urlsafe(32)
+        tokens = record.setdefault("tokens", [])
+        tokens.append(hash_token(token))
+        if len(tokens) > MAX_SESSION_TOKENS:
+            del tokens[:len(tokens) - MAX_SESSION_TOKENS]
+        return token
+
+    def register(self, username: str, password: str):
+        """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。"""
         with self._lock:
-            invite = self._invites.get(self._normalize_code(code))
-            if invite is None:
-                raise AuthError("邀请码无效或已用完")
-            if self._invite_spent(invite):
-                # 与上面那一句一字不差——差别只在进程内的记号：这枚码真的存在过，
-                # 重复提交它的人就是当初拿到它的人（手机上双击的正是这一支）。
-                raise AuthError("邀请码无效或已用完", code_was_spent=True)
-
-            # 用户名的形状与占用都排在码之后、也排在消耗码之前：打错字或撞名
-            # 都不该烧掉一枚邀请码（否则用户只能回去找管理员重新要码）。
             cleaned = self._normalize_username(username)
+            pw = self._check_password_shape(password)
             lc = cleaned.casefold()
             if any(u.get("username_lc") == lc for u in self._users.values()):
                 raise AuthError("该用户名已被占用")
 
-            # 取码那处（create_invite）有 while 重取，这里原先没有：两个线程/两次
-            # 注册撞上同一个 id 时，`self._users[user_id] = record` 会把已有那个人
-            # 整条记录覆盖掉——他的令牌当场失效，而且没有任何报错。32 bit 撞上的
-            # 概率极低，但"极低"不是"检查只要一行就别省"的理由。
-            user_id = "u_" + secrets.token_hex(4)
-            while user_id in self._users:
-                user_id = "u_" + secrets.token_hex(4)
-            token = secrets.token_urlsafe(32)
+            user_id = self._new_user_id()
             record = {
                 "user_id": user_id,
                 "username": cleaned,
                 "username_lc": lc,
-                "token_hash": hash_token(token),
+                "pw_hash": hash_password(pw),
+                "tokens": [],
                 "role": "user",
                 "disabled": False,
-                "invite_code": invite["code"],
                 "created_at": _now(),
                 "last_used_at": _now(),
             }
             self._users[user_id] = record
-            invite["used_by"] = (invite.get("used_by") or []) + [user_id]
+            token = self._issue_token(record)
             self._flush()
         return Principal(user_id=user_id, username=cleaned, role="user"), token
+
+    def login(self, username: str, password: str):
+        """校验用户名与密码，成功则追加一枚会话令牌。
+
+        查无此人与密码错走的是同一条出口：同一句 reason、同一个状态码，而且
+        查无此人也要跑一次 bcrypt（_DUMMY_PW_HASH），否则"立刻返回"的快慢差
+        就把这个端点变成用户名探测器——时序与文案都得一样。
+        """
+        want = (username or "").strip().casefold()
+        with self._lock:
+            record = next((u for u in self._users.values()
+                           if u.get("username_lc") == want), None)
+            # 旧模型留下的账号没有 pw_hash，也要走同一份假摘要：否则"有这个人但
+            # 没密码"会比"有这个人且密码错"快一截，时序又漏了信息。
+            stored = (record or {}).get("pw_hash") or _DUMMY_PW_HASH
+            if not _check_password(password, stored):
+                raise AuthError(_LOGIN_FAIL)
+            if record.get("disabled"):
+                # 停用与密码错也说同一句话：告诉调用方"这个账号被停用了"等于
+                # 让任何人确认账号存在、并知道该去找谁求情。
+                raise AuthError(_LOGIN_FAIL)
+            token = self._issue_token(record)
+            record["last_used_at"] = _now()
+            self._flush()
+        return Principal(user_id=record["user_id"], username=record["username"],
+                         role=record.get("role", "user")), token
 
     def resolve(self, token: str):
         if not token:
@@ -249,7 +304,8 @@ class AuthStore:
             for record in self._users.values():
                 if record.get("disabled"):
                     continue
-                if not _token_matches(record.get("token_hash"), digest):
+                if not any(_token_matches(stored, digest)
+                           for stored in (record.get("tokens") or [])):
                     continue
                 # 热路径：先判断该不该落盘，再改内存——顺序反了阈值就永远不满。
                 stale = _stale_for_flush(record.get("last_used_at"), moment)
@@ -282,14 +338,18 @@ class AuthStore:
             return True
 
     def rotate_token(self, user_id: str) -> str:
+        """强制全端重登：清掉所有旧会话令牌，只留新发的这一枚。
+
+        有了多设备并存之后，"撤销"必须是清空整张令牌表——只换掉其中一枚等于什么
+        都没撤销，别人手机上的那枚还能继续用。这里刻意不碰 disabled：换令牌是
+        凭证动作，不是重新启用账号。
+        """
         with self._lock:
             record = self._users.get(user_id)
             if record is None:
                 raise AuthError("用户不存在")
-            token = secrets.token_urlsafe(32)
-            record["token_hash"] = hash_token(token)
-            # 这里刻意不碰 disabled：换令牌是凭证动作，不是重新启用账号。
-            # 顺手清掉停用标记会把本任务存在的意义——撤销——抵消掉。
+            record["tokens"] = []
+            token = self._issue_token(record)
             self._flush()
             return token
 
@@ -298,47 +358,6 @@ class AuthStore:
             if user_id not in self._users:
                 return False
             del self._users[user_id]
-            self._flush()
-            return True
-
-    # ---------- 邀请码 ----------
-
-    @staticmethod
-    def _invite_spent(invite: dict) -> bool:
-        if invite.get("expires_at") and invite["expires_at"] < _now():
-            return True
-        return len(invite.get("used_by") or []) >= int(invite.get("max_uses", 1))
-
-    def create_invite(self, created_by: str, max_uses: int = 1) -> str:
-        with self._lock:
-            # 取码与占码必须在同一个临界区内：锁外查重时两个线程可以挑中同一个
-            # 码，后写者把前者的记录覆盖掉——丢的那个邀请码没有任何报错。
-            code = _new_code()
-            while code in self._invites:
-                code = _new_code()
-            self._invites[code] = {
-                "code": code,
-                "max_uses": max(1, int(max_uses)),
-                "used_by": [],
-                "created_at": _now(),
-                "created_by": created_by,
-                "expires_at": None,
-            }
-            self._flush()
-        return code
-
-    def list_invites(self) -> list:
-        with self._lock:
-            # 必须深拷贝：dict(i) 交出去的是 used_by 这个列表的活引用，调用方
-            # append 一下就直接改了库——包括"这个码已经被谁用过"这条审计记录。
-            return [copy.deepcopy(i) for i in self._invites.values()]
-
-    def revoke_invite(self, code: str) -> bool:
-        with self._lock:
-            normalized = self._normalize_code(code)
-            if normalized not in self._invites:
-                return False
-            del self._invites[normalized]
             self._flush()
             return True
 

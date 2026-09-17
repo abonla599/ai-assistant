@@ -103,18 +103,91 @@ function safeFilename(text) {
 }
 
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
- *  - 本机压根没存过令牌：首启，该拿邀请码注册（「设置 → 连接」里就摆着注册框）；
- *  - 存了却被服务端拒：管理员撤销或轮换过。这时叫他"填写口令"，他会反复重试
- *    一枚已经作废的令牌，而真正要做的是重新注册。
- * 403 不走这里：那是"身份是真的、角色不够"，改令牌没有用。
+ *  - 本机压根没存过令牌：首启，该注册一个账号；
+ *  - 存了却被服务端拒：管理员撤销或轮换过，或这台机器换了人。
+ * 两种都直接弹首屏凭据层——它就在眼前，不必再去「设置」里找入口。
+ * 403 不走这里：那是"身份是真的、角色不够"，换凭据没有用。
  */
 function needsAuth(err) {
   if (!err || err.status !== 401) return false;
   setStatus(pref.token
-    ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），请在「设置 → 连接」重新注册"
-    : "还没有登录：请在「设置 → 连接」用邀请码注册", true);
-  openSettings("conn");
+    ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
+    : "还没有登录：用用户名和密码登录，或注册一个", true);
+  showAuth(pref.token ? "login" : "register");
   return true;
+}
+
+/* ---------------- 首屏凭据层 ----------------
+ * 登录与注册共用两个字段，差别只在打到哪个端点；两者返回的是同一份
+ * {token, user_id, username, role}，所以成功之后走同一条 afterAuth。
+ * 全程锁住按钮：手机双击会发出第二个 POST，注册那枪在第二下只会拿回"用户名已被
+ * 占用"，把已经成功的人显示成失败，还会两次一起抢 pref.token 与渲染顺序。
+ */
+let authMode = "login";
+
+function setAuthMode(mode) {
+  authMode = mode === "register" ? "register" : "login";
+  const reg = authMode === "register";
+  $("authTabLogin").classList.toggle("on", !reg);
+  $("authTabRegister").classList.toggle("on", reg);
+  $("authGo").textContent = reg ? "注册并登录" : "登录";
+  // 密码管理器要分清"改密/新建"与"登录"，填错一半的话注册那枪会带上旧密码。
+  $("authPass").autocomplete = reg ? "new-password" : "current-password";
+  $("authSub").textContent = reg
+    ? "用户名自己定，密码至少 8 位。换手机后用这个用户名再登录就行。"
+    : "登录后继续；还没有账号就选右边那页注册一个。";
+}
+
+function showAuth(mode) {
+  setAuthMode(mode || authMode);
+  $("authModal").classList.remove("hidden");
+}
+
+function hideAuth() { $("authModal").classList.add("hidden"); }
+
+async function submitAuth() {
+  if (state.registering) return;
+  const hint = $("authHint");
+  const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
+  const username = $("authUser").value.trim();
+  const password = $("authPass").value;
+  hint.classList.remove("err");
+  if (!username || !password) { fail("用户名和密码都要填"); return; }
+
+  state.registering = true;
+  $("authGo").disabled = true;
+  hint.textContent = authMode === "register" ? "注册中…" : "登录中…";
+  try {
+    const res = authMode === "register"
+      ? await API.register(username, password)
+      : await API.login(username, password);
+    await afterAuth(res);
+  } catch (e) {
+    // 后端已经把原因说成人话（用户名已被占用 / 密码太短 / 用户名或密码不正确），
+    // 照实转述。429 也是人话："尝试次数过多，请稍后再试"。
+    fail((authMode === "register" ? "注册失败：" : "登录失败：") + e.message);
+  } finally {
+    // 失败也得解锁：一次网络抖动不该把登录入口按死到刷新页面为止
+    state.registering = false;
+    $("authGo").disabled = false;
+  }
+}
+
+/** 拿到令牌之后的固定动作：落地凭据、重取身份与数据、收起这层。
+ *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
+ *  叫用户手动刷新一次页面才算登录成功。 */
+async function afterAuth(res) {
+  pref.token = res.token;
+  pref.userId = res.user_id;
+  $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
+  $("authHint").textContent = "";
+  hideAuth();
+  syncConnPane();
+  $("registerHint").textContent = `已登录为 ${res.username}，正在载入…`;
+  await loadWho();
+  await loadServerData();
+  renderMessages();
+  $("registerHint").textContent = `已登录为 ${res.username}`;
 }
 
 /* ---------------- 身份与角色 ----------------
@@ -145,7 +218,7 @@ function applyRole() {
     .forEach((el) => el.classList.toggle("hidden", !admin));
   $("whoInfo").textContent = state.me
     ? `当前身份：${state.me.username}（${admin ? "管理员" : "普通用户"}）`
-    : "未登录：用邀请码注册，或直接把管理员给您的令牌填在下面";
+    : "未登录：用用户名和密码注册一个，或直接把管理员给您的令牌填在下面";
   if (!admin && $("paneProviders").classList.contains("active")) selectTab("conn");
 }
 
@@ -1055,54 +1128,30 @@ function autosize(el) {
   el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + "px";
 }
 
-/* ---------------- 注册 ----------------
- * 邀请码换一枚个人令牌：这一步之后，"我是谁"才由服务端说了算。
- * 成功之后当场重取身份与数据——boot 那一次是在没有凭据的状态下跑的，模型清单
- * 和会话列表全是 401；不重跑就得叫用户手动刷新一次页面才算注册成功。
- * 全程锁住按钮：手机双击会发出第二个 POST /v1/auth/register，那枚码在第一枪里
- * 就花掉了，第二枪只能拿回 403"邀请码无效"——把已经注册成功的人显示成失败，
- * 还要两次一起抢 pref.token 与 loadServerData 的渲染顺序。
+/* ---------------- 注册（设置页那份入口） ----------------
+ * 与首屏弹层打的是同一个端点、共用同一条收尾（afterAuth）：这里只负责读自己的
+ * 两个字段。两条路都保留是因为场景不同——首屏是"刚打开就得先过这道"，设置页是
+ * "已经登录过、想换/再加一个账号"。
  */
-async function registerWithInvite() {
+async function registerFromSettings() {
   if (state.registering) return;
   const hint = $("registerHint");
   const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
-  hint.classList.remove("err");
-  const code = $("regCode").value.trim();
   const username = $("regUsername").value.trim();
-  if (!code || !username) {
-    fail("邀请码和用户名都要填");
-    return;
-  }
+  const password = $("regPass").value;
+  hint.classList.remove("err");
+  if (!username || !password) { fail("用户名和密码都要填"); return; }
+
   state.registering = true;
   $("registerBtn").disabled = true;
   hint.textContent = "注册中…";
   try {
-    let res;
-    try {
-      res = await API.register(code, username);
-    } catch (e) {
-      // 后端已经把原因说成人话了（邀请码无效 / 用户名已被占用），照实转述
-      fail("注册失败：" + e.message);
-      return;
-    }
-    pref.token = res.token;
-    pref.userId = res.user_id;
-    // 令牌已经落地，这枚码从此作废：留在输入框里等于下一次双击的素材
-    $("regCode").value = "";
-    syncConnPane();
-    hint.textContent = `已登录为 ${res.username}，正在载入…`;
-    try {
-      await loadWho();
-      await loadServerData();
-      renderMessages();
-      hint.textContent = `已登录为 ${res.username}`;
-    } catch (e) {
-      fail(`已登录为 ${res.username}，刷新后生效`);
-      if (!needsAuth(e)) setStatus("数据载入失败：" + e.message, true);
-    }
+    const res = await API.register(username, password);
+    $("regPass").value = "";
+    await afterAuth(res);
+  } catch (e) {
+    fail("注册失败：" + e.message);
   } finally {
-    // 失败也得解锁：一次网络抖动不该把注册入口按死到刷新页面为止
     state.registering = false;
     $("registerBtn").disabled = false;
   }
@@ -1221,7 +1270,11 @@ function bind() {
     pref.token = $("tokenInput").value.trim();
     location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
   };
-  $("registerBtn").onclick = registerWithInvite;
+  $("registerBtn").onclick = registerFromSettings;
+  $("authTabLogin").onclick = () => setAuthMode("login");
+  $("authTabRegister").onclick = () => setAuthMode("register");
+  $("authGo").onclick = submitAuth;
+  $("authPass").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
@@ -1301,6 +1354,9 @@ async function boot() {
       setStatus("后端连接失败：" + e.message, true);
     }
   }
+  // 认不出人才挡屏。放在 catch 之后是有意的：后端连不上（503/断网）时弹一个
+  // 只会失败的登录框，等于把"服务没起来"伪装成"你没登录"。
+  if (!state.me) showAuth(pref.token ? "login" : "register");
   renderMessages();
   syncPersonaChip();
 

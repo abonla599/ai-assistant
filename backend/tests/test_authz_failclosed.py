@@ -22,8 +22,7 @@ import app.core.authz as authz
 @pytest.fixture
 def wired(client, tmp_path, monkeypatch):
     """换成临时身份库，并允许逐条测试自行设置 AUTH_MODE / ACCESS_TOKEN。"""
-    store = AuthStore(path=str(tmp_path / "users.json"),
-                      invites_path=str(tmp_path / "invites.json"))
+    store = AuthStore(path=str(tmp_path / "users.json"))
     monkeypatch.setattr(authz, "auth_store", store)
     monkeypatch.setenv("AUTH_MODE", "enforced")
     monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
@@ -49,8 +48,7 @@ def nothing_configured(client, tmp_path, monkeypatch):
     """
     monkeypatch.delenv("AUTH_MODE", raising=False)
     monkeypatch.setenv("ACCESS_TOKEN", "")
-    store = AuthStore(path=str(tmp_path / "users.json"),
-                      invites_path=str(tmp_path / "invites.json"))
+    store = AuthStore(path=str(tmp_path / "users.json"))
     monkeypatch.setattr(authz, "auth_store", store)
     return client, store
 
@@ -75,8 +73,7 @@ def test_absent_auth_mode_also_closes_docs(nothing_configured):
 
 def test_valid_token_is_accepted(wired):
     client, store = wired
-    code = store.create_invite("admin")
-    _, token = store.register(code=code, username="张三")
+    _, token = store.register(username="张三", password="correct-horse-battery")
     res = client.get("/v1/sessions", headers={"Authorization": "Bearer " + token})
     assert res.status_code == 200
 
@@ -110,8 +107,8 @@ def test_register_stays_public(wired, monkeypatch):
     # 焊死了。Task 3 之后端点已存在，所以这里断真 200：只看"没被鉴权挡下"的话，
     # 404（路由没了）和 500（注册逻辑炸了）都算通过。
     monkeypatch.setenv("ACCESS_TOKEN", "")
-    code = store.create_invite("admin")
-    res = client.post("/v1/auth/register", json={"code": code, "username": "公开注册"})
+    res = client.post("/v1/auth/register",
+                         json={"username": "公开注册", "password": "correct-horse-battery"})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["role"] == "user" and body["user_id"].startswith("u_")
@@ -128,13 +125,12 @@ def test_register_stays_public(wired, monkeypatch):
 
 
 def test_identity_store_is_redirected_away_from_real_data():
-    """conftest 里那两行 env 一旦被删，测试就会去碰开发者真实的 data/users.json，
+    """conftest 里那行 env 一旦被删，测试就会去碰开发者真实的 data/users.json，
     而单例遇到它判定为"损坏"的文件是直接改名的——等于一次跑测就搬走别人的身份库，
     且不会有任何一条测试变红。所以把这个前提本身钉成断言。"""
     from app.core.auth import auth_store
 
     assert "ai-assistant-tests-" in auth_store.path
-    assert "ai-assistant-tests-" in auth_store.invites_path
 
 
 # ---------- 凭据解析（自 test_auth.py 的旧中间件测试迁移） ----------
@@ -264,8 +260,7 @@ def probe(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.core.authz import current_principal, install_auth, require_admin
 
-    store = AuthStore(path=str(tmp_path / "users.json"),
-                      invites_path=str(tmp_path / "invites.json"))
+    store = AuthStore(path=str(tmp_path / "users.json"))
     monkeypatch.setattr(authz, "auth_store", store)
     monkeypatch.setenv("AUTH_MODE", "enforced")
     monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
@@ -286,8 +281,7 @@ def probe(tmp_path, monkeypatch):
 
 def test_identity_reaches_the_endpoint_dependency(probe):
     client, store = probe
-    code = store.create_invite("admin")
-    principal, token = store.register(code=code, username="张三")
+    principal, token = store.register(username="张三", password="correct-horse-battery")
     res = client.get("/v1/whoami", headers={"Authorization": "Bearer " + token})
     assert res.status_code == 200
     assert res.json() == {"user_id": principal.user_id, "role": "user"}
@@ -302,8 +296,7 @@ def test_require_admin_lets_the_bootstrap_principal_through(probe):
 def test_require_admin_rejects_a_normal_user_with_403_not_401(probe):
     """身份是有的、权限不够，两者必须分得开——后续所有管理端点都靠这一道。"""
     client, store = probe
-    code = store.create_invite("admin")
-    _, token = store.register(code=code, username="李四")
+    _, token = store.register(username="李四", password="correct-horse-battery")
     assert client.get("/v1/admin-only",
                       headers={"Authorization": "Bearer " + token}).status_code == 403
 
@@ -335,10 +328,10 @@ def test_env_example_no_longer_promise_an_open_door(env_example):
 
 
 def test_env_example_describes_the_bootstrap_credential_honestly(env_example):
-    """ACCESS_TOKEN 是 bootstrap 管理员凭据；用户拿到的必须是邀请码换出的个人令牌。"""
+    """ACCESS_TOKEN 是 bootstrap 管理员凭据；用户拿到的必须是自己注册换出的个人令牌。"""
     assert "bootstrap" in env_example, "没说清这把口令是什么身份"
     assert "admin" in env_example
-    assert "邀请码" in env_example, "没指出用户应该怎么拿到自己的令牌"
+    assert "密码" in env_example, "没指出用户应该怎么拿到自己的令牌"
     assert "503" in env_example, "没说清留空的真实后果是 fail-closed 而不是敞开"
 
 
@@ -349,12 +342,12 @@ def test_env_example_documents_both_auth_modes(env_example):
 
 
 def test_env_example_documents_every_data_placement_var(env_example):
-    """安装部署指南承诺"每一份数据都能用环境变量指走"，那八份都得在这份模板里。
+    """安装部署指南承诺"每一份数据都能用环境变量指走"，那七份都得在这份模板里。
 
     缺一个名字的后果不是不兼容，而是运维照模板配完才发现那份数据挪不走——
-    而最挪不走的那几份恰好是最敏感的（users.json / invites.json）。
+    而最挪不走的那几份恰好是最敏感的（users.json 里是密码摘要与会话令牌摘要）。
     """
-    for var in ("SESSION_DB_PATH", "USERS_DB_PATH", "INVITES_DB_PATH",
+    for var in ("SESSION_DB_PATH", "USERS_DB_PATH",
                 "PROVIDERS_DB_PATH", "UPLOAD_DIR", "CHROMA_DB_PATH",
                 "FEEDBACK_FILE", "PREFERENCE_FILE"):
         assert var in env_example, f".env.example 漏了 {var}，指南与模板对不上"

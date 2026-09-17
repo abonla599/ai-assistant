@@ -41,7 +41,6 @@ def test_admin_pages_data_source_stays_behind_admin(enforced):
     stranger = TestClient(app)
     assert stranger.get("/admin/").status_code == 200
     assert stranger.get("/v1/admin/users").status_code == 401
-    assert stranger.get("/v1/admin/invites").status_code == 401
 
 
 def test_admin_url_is_deliberately_not_an_auth_surface():

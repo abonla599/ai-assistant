@@ -5,7 +5,7 @@
 
 契约只有两句话：
 1. 走 /v1/ 的每条路由，依赖树里必须出现 current_principal 或 require_admin；
-2. 免凭据的面只有 authz.PUBLIC_PATHS 那一处，而它今天只有注册端点。
+2. 免凭据的面只有 authz.PUBLIC_PATHS 那一处，它今天是注册与登录两个端点。
 
 判定看的是**依赖树里的可调用对象本身**，不是参数名：参数名可以随便起，身份也
 能藏在子依赖里（端点只依赖一个"取会话"的辅助函数，那个辅助函数才带 principal）。
@@ -179,8 +179,15 @@ def test_every_v1_route_declares_an_identity_dependency():
     assert not missing, f"以下端点未声明身份依赖：{sorted(missing)}"
 
 
-def test_public_allowlist_is_exactly_registration():
-    assert PUBLIC_PATHS == {"/v1/auth/register"}
+def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
+    """免凭据端点必须逐个点名，多一条就红。
+
+    开放注册之后这里是两条：注册与登录。它们不是"漏了鉴权"——没有身份的人本来
+    就得能进来拿身份。但每一条都是攻击面，所以这条钉的是"不许悄悄多第三条"，
+    而这两条自己的防线在 auth_router（真实 IP 限流）与 auth.login（三种失败同一
+    句话、同样的耗时）里，不在这里。
+    """
+    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login"}
 
 
 # ---------- 这把锁不能是空的 ----------
@@ -400,9 +407,9 @@ def test_register_itself_is_reachable_without_credentials(client, enforced):
     只测斜杠被挡住的话，一扇焊死的门也算通过——而注册是唯一能把人放进这个系统的
     入口，它一旦需要凭据就没人注册得进来。enforced 先造一个身份，顺便排除 503。
     """
-    enforced("发码的人")
-    invite = authz.auth_store.create_invite("default_user")
-    res = client.post("/v1/auth/register", json={"code": invite, "username": "裸请求注册"})
+    enforced("垫底用户")
+    res = client.post("/v1/auth/register",
+                         json={"username": "裸请求注册", "password": "open-reg-pw-123"})
     assert res.status_code == 200, res.text
     assert res.json()["role"] == "user"
     token = res.json()["token"]
@@ -418,7 +425,7 @@ def test_admin_endpoints_are_not_reachable_without_credentials(client, enforced)
     """
     enforced("垫底用户")
     assert client.get("/v1/admin/users").status_code == 401
-    assert client.post("/v1/admin/invites", json={}).status_code == 401
+    assert client.post("/v1/admin/users/u_nobody/disable").status_code == 401
 
 
 def test_no_protected_route_is_reachable_without_credentials(client, enforced):

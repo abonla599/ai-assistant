@@ -45,11 +45,9 @@ generate_docx.py
 
 # 本地工具产物与临时备份（不属于源码，勿提交）
 .qoder/
-# 写成 tools/* 而不是 tools/：被排除的目录 git 根本不会进去，里面的 ! 例外一律失效，
-# 而 tools/make-invite.bat 是运维要用的签发脚本，必须入库（其余仍是本机产物：
-# cloudflared.exe、隧道 yml、启动脚本）。
-tools/*
-!tools/make-invite.bat
+# 本地工具产物：cloudflared.exe、隧道 yml、启动脚本都不属于源码，整目录排除。
+# （这里曾经有一条 !tools/make-invite.bat 例外，随邀请码机制一起删除了。）
+tools/
 server.log
 tunnel.log
 PATH_backup_*.txt

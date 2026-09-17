@@ -43,7 +43,7 @@ def data_file(env_var: str, filename: str) -> str:
 
     反馈（feedback.json）与偏好摘要（preference.txt）此前是硬拼在 `data_root()` 下的
     裸文件名：既没有其它存储都有的环境变量口子（USERS_DB_PATH / SESSION_DB_PATH /
-    UPLOAD_DIR / INVITES_DB_PATH 各自都能指走，唯独这两条指不走），也不在 `data/`
+    UPLOAD_DIR 各自都能指走，唯独这两条指不走），也不在 `data/`
     那棵树下。第二点的后果是版本控制层面的：`.gitignore` 里写的是 `feedback.json`、
     `preference.txt` 这两个**精确文件名**，而按人分账后偏好摘要叫
     `preference-<uid>.txt`——换个名字就漏进仓库。本仓已经因运行数据被跟踪付出过一次
@@ -85,7 +85,6 @@ def ensure_parent(path: str) -> str:
 DATA_PATH_ENV_VARS = {
     "会话": "SESSION_DB_PATH",
     "身份库": "USERS_DB_PATH",
-    "邀请码": "INVITES_DB_PATH",
     "模型服务配置": "PROVIDERS_DB_PATH",
     "附件": "UPLOAD_DIR",
     "长期记忆向量库": "CHROMA_DB_PATH",
@@ -105,7 +104,7 @@ def resolve_all_data_paths() -> list:
 
     兄弟模块一律在函数内导入：paths 被它们每一个人 import，反向依赖会成环。
     """
-    from app.core.auth import _default_invites_path, _default_users_path
+    from app.core.auth import _default_users_path
     from app.core.providers import _default_path as providers_path
     from app.core.uploads import _default_dir as uploads_dir
     from app.feedback_storage import FEEDBACK_FILE
@@ -116,7 +115,6 @@ def resolve_all_data_paths() -> list:
     resolved = {
         "会话": sessions_path(),
         "身份库": _default_users_path(),
-        "邀请码": _default_invites_path(),
         "模型服务配置": providers_path(),
         "附件": uploads_dir(),
         "长期记忆向量库": chroma_dir(),
@@ -133,7 +131,7 @@ def _display_width(text: str) -> int:
 
 
 def log_data_locations() -> None:
-    """启动时把八份数据的绝对路径打一遍；不在 data/ 下的说明它为什么不在。
+    """启动时把七份数据的绝对路径打一遍；不在 data/ 下的说明它为什么不在。
 
     只读不改：这条不建目录、不碰文件，因此对 `import` 没有任何副作用，测试里跑也安全。
     先解析再打印，是因为解析会触发兄弟模块导入（其中 providers 会自己打一行日志），

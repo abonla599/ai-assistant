@@ -1,16 +1,15 @@
-"""注册与管理端点：邀请码换身份，管理员发放与回收邀请码、管理用户。
+"""注册、登录与管理端点。
 
 这里是身份存储（app/core/auth.py）与 HTTP 之间唯一的一层，规则三条：
-1. 对外说话保守。注册失败的原因一律收敛成"邀请码无效"——区分"码不存在"和
-   "码已用尽"，就把这个免凭据端点变成了探测邀请码是否存在的信道。存储层内部
-   当然分得清这两者（AuthError.code_was_spent），但那个记号只用来给限流分账，
-   不写进任何响应。同一条也管用户名："这名字被占了"只对已经握着一枚有效未用
-   码的人说（顺序在 AuthStore.register 里保证：先验码，再谈用户名）。
-2. 响应按字段白名单出。存储层的记录带着 token_hash 和内建的 username_lc，
-   顺手 return record 等于把口令摘要交给前端与日志。
-3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与轮换的响应，邀请码见于
-   发放响应与管理员的码表。任何端点都不许复述调用方自己刚提交的码——多一处出口
-   就多一处被日志/控制台记下来的机会。
+1. 对外说话保守。登录失败只有一句"用户名或密码不正确"——区分"没这个用户"和
+   "密码错"，就把这个免凭据端点变成了用户名探测器；存储层内部也刻意不分开
+   （AuthError 只带那一句，见 auth.login）。注册端的"该用户名已被占用"是有意
+   保留的实话（改名是用户自己能解决的事），但邀请码退役之后它前面再没有闸门，
+   所以这句改由**按真实 IP 计费**来限制——见 _note_failure 的口径。
+2. 响应按字段白名单出。存储层的记录带着 pw_hash、tokens 和内建的 username_lc，
+   顺手 return record 等于把口令摘要与会话令牌摘要交给前端与日志。
+3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与登录的响应，以及管理员
+   轮换的响应。任何端点都不许复述调用方刚提交的密码或令牌。
 """
 import time
 from collections import defaultdict
@@ -24,23 +23,27 @@ from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
 
-# 猜码的代价：同一来源在窗口内"码不对"太多次就拒一拒。进程内计数即可——
-# 重启即清零是可接受的，因为真正的凭据是 40 位随机邀请码。
-# 账本只记猜码，不记撞名/用户名不合格（见 register 里的注释）：来源键在隧道
-# 后面人人相同，把无害的打字错误算进预算，锁住的是唯一的 onboarding 入口。
-# 同样不记"重复提交一枚已花掉的码"——那和撞名一样是正当用户的手滑，不是猜测。
+# 猜密码的代价：同一来源在窗口内失败太多次就拒一拒。进程内计数即可——
+# 重启即清零是可接受的，因为真正的凭据是 bcrypt 校验与长密码。
+# 账本只记失败，不记格式错（用户名打错字、密码太短）：那是当事人自己能改好的事，
+# 把它算进预算只会让唯一的登录入口被自己的手滑锁死。
 FAILURE_WINDOW_SECONDS = 600
 MAX_FAILURES_PER_WINDOW = 10
-# 来源键取自 uvicorn 看到的对端地址：谁都能连接，所以它也可以是攻击者影响的
-# 输入（分布式猜码者一人一个 IP）。字典不能无上限长大，超阈值时顺手丢掉窗口内
-# 已无记录的来源（正常规模部署永远碰不到这个阈值）。
+
+# 注册开放之后，"能建多少个号"是唯一的成本闸门：按真实来源限成功数。
+# 记成功而不是记失败，因为失败（撞名）本来就是零成本，而一个脚本可以无限撞名
+# 却一个号也建不出来；能真正花钱的是"注册成功 + 拿去对话"。
+REGISTER_WINDOW_SECONDS = 86400
+MAX_REGISTRATIONS_PER_SOURCE = 3
+
+# 来源键取自 CF-Connecting-IP：域名必经 Cloudflare，而它会把真实访客 IP 写在
+# 这个头上；后端只监听 127.0.0.1:8000、外部唯一入口就是 cloudflared，没有旁路
+# 可以伪造这个头。取不到该头时退回 uvicorn 看到的对端地址（本机直连与测试）。
+# 以前只用 request.client.host，经过隧道后恒为 127.0.0.1——全网共用一个桶，
+# 一个人手滑就能把所有人挡在门外，所以这既是功能也是修 bug。
 MAX_TRACKED_SOURCES = 4096
 _FAILS = defaultdict(list)
-
-# 存储层用一句面向用户的话表达失败原因，这里按它分类状态码。
-# 耦合点写在明处：改 auth.py 里那几句话时，test_auth_endpoints.py 会红。
-_REASON_CODE_BAD = "邀请码"
-_REASON_NAME_TAKEN = "占用"
+_REGISTERS = defaultdict(list)
 
 
 def _store():
@@ -58,89 +61,116 @@ def _now() -> float:
     return time.monotonic()
 
 
-def _failures_of(ip: str, moment: float) -> list:
-    recent = [t for t in _FAILS[ip] if moment - t < FAILURE_WINDOW_SECONDS]
-    _FAILS[ip] = recent
+def _recent(ledger, ip: str, window: float, moment: float) -> list:
+    recent = [t for t in ledger[ip] if moment - t < window]
+    ledger[ip] = recent
     return recent
 
 
 def _prune(moment: float) -> None:
-    if len(_FAILS) <= MAX_TRACKED_SOURCES:
-        return
-    for key in [k for k, v in _FAILS.items()
-                if not any(moment - t < FAILURE_WINDOW_SECONDS for t in v)]:
-        _FAILS.pop(key, None)
+    for ledger in (_FAILS, _REGISTERS):
+        if len(ledger) <= MAX_TRACKED_SOURCES:
+            continue
+        for key in [k for k, v in ledger.items()
+                    if not any(moment - t < FAILURE_WINDOW_SECONDS for t in v)]:
+            ledger.pop(key, None)
 
 
 def _throttled(ip: str) -> bool:
     moment = _now()
     _prune(moment)
-    return len(_failures_of(ip, moment)) >= MAX_FAILURES_PER_WINDOW
+    return len(_recent(_FAILS, ip, FAILURE_WINDOW_SECONDS, moment)) >= MAX_FAILURES_PER_WINDOW
 
 
 def _note_failure(ip: str) -> None:
     _FAILS[ip].append(_now())
 
 
+def _registrations_full(ip: str) -> bool:
+    moment = _now()
+    _prune(moment)
+    return (len(_recent(_REGISTERS, ip, REGISTER_WINDOW_SECONDS, moment))
+            >= MAX_REGISTRATIONS_PER_SOURCE)
+
+
+def _note_registration(ip: str) -> None:
+    _REGISTERS[ip].append(_now())
+
+
 def _client_ip(request: Request) -> str:
+    # 只信 Cloudflare 那一个头。X-Forwarded-For 是一条可被追加的链，取首项等于
+    # 取攻击者写的第一句假话；cf-connecting-ip 由边缘改写，才是可信来源。
+    real = request.headers.get("cf-connecting-ip", "").strip()
+    if real:
+        return real
     return request.client.host if request.client else "unknown"
 
 
-def _register_error(e: AuthError) -> HTTPException:
-    """把存储层的失败原因翻译成状态码，同时不外泄邀请码与用户名的存在性。
-
-    "占用"这一支要说实话（改名是用户自己能解决的事），但它的前提是存储层先验
-    了邀请码：没有效码的人根本走不到这里，只会拿到 403 那一句。顺序一旦反过来，
-    这个端点就变成用户名枚举预言机——test_a_taken_username_reveals_nothing_…
-    与 test_auth.py 里那条顺序测试一起把这两半钉住。
-    """
-    if _REASON_NAME_TAKEN in e.reason:
-        # 重名必须照实说：用户改名就能解决，让他以为码坏了只会去缠管理员。
-        return HTTPException(status_code=409, detail=e.reason)
-    if _REASON_CODE_BAD in e.reason:
-        return HTTPException(status_code=403, detail="邀请码无效")
-    # 用户名本身不合格（空、超长、保留字、含不可见字符）
-    return HTTPException(status_code=422, detail=e.reason)
+def _too_many(retry_after: int) -> HTTPException:
+    return HTTPException(status_code=429, detail="尝试次数过多，请稍后再试",
+                         headers={"Retry-After": str(retry_after)})
 
 
 class RegisterRequest(BaseModel):
-    code: str
     username: str
+    password: str
 
 
-class InviteRequest(BaseModel):
-    max_uses: int = 1
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 @router.post("/v1/auth/register")
 async def register(req: RegisterRequest, request: Request):
-    """唯一的免凭据端点：拿邀请码换一个可撤销的令牌。
+    """开放注册：用户名 + 自设密码，成功即发一枚会话令牌（注册即登录）。
 
-    路由挂在 /v1/auth/register 精确路径上——authz.PUBLIC_PATHS 也是精确匹配，
-    带斜杠的变体在 enforced 下先被中间件挡在凭据之外，不会成为第二个入口。
+    路由挂在精确路径上——authz.PUBLIC_PATHS 也是精确匹配，带斜杠的变体在
+    enforced 下先被中间件挡在凭据之外，不会成为第二个入口。
     """
     ip = _client_ip(request)
     if _throttled(ip):
-        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试",
-                            headers={"Retry-After": str(FAILURE_WINDOW_SECONDS)})
+        # 与登录共用同一份失败预算。少了这一句，"撞名要计费"就是空话：格子照扣、
+        # 谁也不收，枚举用户名依然是免费的。
+        raise _too_many(FAILURE_WINDOW_SECONDS)
+    if _registrations_full(ip):
+        raise _too_many(REGISTER_WINDOW_SECONDS)
     try:
-        principal, token = _store().register(code=req.code, username=req.username)
+        principal, token = _store().register(username=req.username, password=req.password)
     except AuthError as e:
-        exc = _register_error(e)
-        if exc.status_code == 403 and not e.code_was_spent:
-            # 只有猜码才进账本。409（撞名）与 422（用户名不合格）的前提是这来源
-            # 手里已经有一枚有效码——那是打错字的人，不是攻击者。
-            # 而预算只有 10 格，躲过 cloudflared 之后 request.client.host 恒为
-            # 127.0.0.1，全网络共用同一个桶：把撞名计进去，一个人手滑撞两次名
-            # 就能把唯一的注册入口锁掉 10 分钟，真在瞎猜 40 位随机码的人反倒没被
-            # 多挡住一下（他每一次尝试本来就计一格）。计费的口径必须对准威胁。
-            # 同一枚已花掉的码被重复提交也是这一类：它在第一次那枪里就已经用掉了
-            # （用户此刻已经注册成功），双击的第二下既没在猜码也没在注册，把它算
-            # 进预算等于让手机上的五六次双击锁掉全网唯一的 onboarding 入口 10 分钟。
-            # 压根不存在的码照旧一格一格计——那才是猜。
-            _note_failure(ip)
-        raise exc
-    _FAILS.pop(ip, None)   # 成功即证明这来源是正当用户，别让它之前的手滑继续记账
+        raise _register_error(e, ip)
+    _note_registration(ip)
+    _FAILS.pop(ip, None)
+    return {"token": token, "user_id": principal.user_id,
+            "username": principal.username, "role": principal.role}
+
+
+def _register_error(e: AuthError, ip: str) -> HTTPException:
+    """把存储层的失败原因翻译成状态码，并给唯一那条可被滥用的信道计费。"""
+    if "占用" in e.reason:
+        # 实话保留，但它现在是免凭据的用户名枚举信道：每问一次扣一格登录预算。
+        # 真人改名一次就过了，脚本则要每 10 次换一枚真实访客 IP——而换 IP 意味着
+        # 它背后真有一张分布式网络，那时限流本来也挡不住，只是把成本抬上去。
+        _note_failure(ip)
+        return HTTPException(status_code=409, detail=e.reason)
+    # 用户名或密码本身不合格（空、超长、保留字、含不可见字符、太短）：
+    # 都是当事人自己能改好的，不计费也不该挡别人的路。
+    return HTTPException(status_code=422, detail=e.reason)
+
+
+@router.post("/v1/auth/login")
+async def login(req: LoginRequest, request: Request):
+    """用户名 + 密码换一枚新的会话令牌；旧令牌继续有效（多设备并存）。"""
+    ip = _client_ip(request)
+    if _throttled(ip):
+        raise _too_many(FAILURE_WINDOW_SECONDS)
+    try:
+        principal, token = _store().login(username=req.username, password=req.password)
+    except AuthError as e:
+        _note_failure(ip)
+        # 401 而不是 403：这里没有"身份是真的但角色不够"这一说，只有"没认出来"。
+        raise HTTPException(status_code=401, detail=e.reason)
+    _FAILS.pop(ip, None)
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role}
 
@@ -156,30 +186,8 @@ async def me(principal: Principal = CurrentPrincipal):
 # role 不在任何请求体里：管理员只来自 ACCESS_TOKEN bootstrap，或来自运维手改
 # users.json。给 API 开一个写 role 的口子，等于把整套身份体系作废。
 
-@router.post("/v1/admin/invites")
-async def create_invite(req: InviteRequest, actor: Principal = RequireAdmin):
-    return {"code": _store().create_invite(actor.user_id, max_uses=req.max_uses)}
-
-
-@router.get("/v1/admin/invites")
-async def list_invites(_: Principal = RequireAdmin):
-    keep = ("code", "max_uses", "created_at", "created_by", "expires_at", "used_by")
-    return {"invites": [{k: i.get(k) for k in keep} for i in _store().list_invites()]}
-
-
-@router.delete("/v1/admin/invites/{code}")
-async def revoke_invite(code: str, _: Principal = RequireAdmin):
-    # 码不必先归一化：存储层的 revoke 与 register 共用同一份规则（大写去空格）
-    if not _store().revoke_invite(code):
-        raise HTTPException(status_code=404, detail="邀请码不存在")
-    # 不回显 code：邀请码明文与令牌同级敏感（全局约束：响应与日志都不许出现），
-    # 而客户端本来就知道自己刚删了哪一枚——多写一遍只是凭空加一处泄露出口，
-    # 比如被访问日志或前端把整条响应打进控制台。
-    return {"status": "revoked"}
-
-
 def _public_user(record: dict) -> dict:
-    """用户记录的对外视图。逐字段列出，是为了让 token_hash 无处可藏。"""
+    """用户记录的对外视图。逐字段列出，是为了让 pw_hash 与 tokens 无处可藏。"""
     return {
         "user_id": record.get("user_id"),
         "username": record.get("username"),
@@ -189,6 +197,8 @@ def _public_user(record: dict) -> dict:
         # last_seen 粗粒度是设计使然：存储层为不把鉴权变成热路径写盘，把落盘
         # 节流到一小时以上，所以它读作"上次看见它至少是一小时前"，不是在线状态。
         "last_seen": record.get("last_used_at"),
+        # 有几台设备在线是运维要知道的，但只报数量：令牌摘要本身是凭据。
+        "sessions": len(record.get("tokens") or []),
     }
 
 
@@ -214,7 +224,7 @@ async def enable_user(user_id: str, _: Principal = RequireAdmin):
 
 @router.post("/v1/admin/users/{user_id}/rotate-token")
 async def rotate_user_token(user_id: str, _: Principal = RequireAdmin):
-    """换发新令牌。旧令牌立刻失效，且停用状态原样保留。"""
+    """强制全端重登：旧令牌全部作废，且停用状态原样保留。"""
     try:
         return {"token": _store().rotate_token(user_id)}
     except AuthError:

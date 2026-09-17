@@ -79,39 +79,7 @@
     $("gate").classList.add("hidden");
     $("panel").classList.remove("hidden");
     $("who").textContent = "当前身份：" + me.username + "（" + me.user_id + "）";
-    await Promise.all([loadInvites(), loadUsers()]);
-  }
-
-  async function loadInvites() {
-    const { invites } = await req("/v1/admin/invites");
-    const tbody = $("inviteRows");
-    tbody.textContent = "";
-    if (!invites || !invites.length) {
-      tbody.appendChild(emptyRow("还没有邀请码。点上面「生成一枚」。", 5));
-      return;
-    }
-    const now = Date.now() / 1000;
-    invites.forEach((inv) => {
-      const used = (inv.used_by || []).length;
-      const expired = inv.expires_at && inv.expires_at < now;
-      const tr = document.createElement("tr");
-      tr.appendChild(cell("td", inv.code, "code"));
-      tr.appendChild(cell("td", used + " / " + inv.max_uses));
-      const st = cell("td");
-      st.appendChild(cell("span", expired ? "已过期" : (used >= inv.max_uses ? "已用满" : "可用"),
-                          "tag" + (expired || used >= inv.max_uses ? " off" : "")));
-      tr.appendChild(st);
-      tr.appendChild(cell("td", inv.created_by || "—"));
-      const acts = cell("td", undefined, "acts");
-      acts.appendChild(actionBtn("作废", "btn-ghost", async () => {
-        if (!confirm("作废邀请码 " + inv.code + "？拿到这枚码的人将立刻无法注册。")) return;
-        try { await req("/v1/admin/invites/" + encodeURIComponent(inv.code), { method: "DELETE" });
-              flash("已作废"); await loadInvites(); }
-        catch (e) { flash(e.message, true); }
-      }));
-      tr.appendChild(acts);
-      tbody.appendChild(tr);
-    });
+    await loadUsers();
   }
 
   async function loadUsers() {
@@ -119,7 +87,7 @@
     const tbody = $("userRows");
     tbody.textContent = "";
     if (!users || !users.length) {
-      tbody.appendChild(emptyRow("还没有注册用户。把邀请码发给谁，谁注册后就出现在这里。", 5));
+      tbody.appendChild(emptyRow("还没有注册用户。把上面的地址发给谁，他自己填用户名和密码就能用。", 6));
       return;
     }
     users.forEach((u) => {
@@ -129,6 +97,7 @@
       const st = cell("td");
       st.appendChild(cell("span", u.disabled ? "已停用" : "正常", "tag" + (u.disabled ? " off" : "")));
       tr.appendChild(st);
+      tr.appendChild(cell("td", String(u.sessions ?? "—")));
       tr.appendChild(cell("td", fmtTime(u.last_seen)));
 
       const acts = cell("td", undefined, "acts");
@@ -194,17 +163,6 @@
 
   $("btnReload").addEventListener("click", () => boot().catch(() => {}));
 
-  $("btnMake").addEventListener("click", async () => {
-    const n = Math.max(1, Math.min(50, parseInt($("maxUses").value, 10) || 1));
-    try {
-      const r = await req("/v1/admin/invites", { method: "POST", body: { max_uses: n } });
-      const chip = $("newCode");
-      chip.textContent = "新码：" + r.code;
-      chip.classList.remove("hidden");
-      flash("已生成。把这枚码单独发给一个人，别丢进群聊。");
-      await loadInvites();
-    } catch (e) { flash(e.message, true); }
-  });
 
   $("btnCloseReveal").addEventListener("click", () => {
     $("reveal").classList.add("hidden");

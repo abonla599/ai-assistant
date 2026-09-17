@@ -25,7 +25,6 @@ os.environ["ACCESS_TOKEN"] = ""
 # 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
 # data/users.json —— 那是越出本次改动范围的外部副作用。
 os.environ["USERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "users.json")
-os.environ["INVITES_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "invites.json")
 
 # 测试不得真调付费模型：预置一个假 provider，并把附件目录指向临时路径。
 os.environ["PROVIDERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "providers.json")
@@ -101,18 +100,23 @@ def _stub_llm_calls(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolated_throttle():
-    """限流账本 `_FAILS` 是模块级全局状态，每条用例都必须从空表开始。
+    """限流账本是模块级全局状态，每条用例都必须从空表开始。
 
     不清的话，任何多打几次坏码的用例（注册端点、以及会话/附件归属这类要猜
     令牌的用例）留下的计数会一路累到阈值上，把一个毫不相干的 assert 200 变成
     429——那时绿就只是算术运气。放在 conftest 而不是某个测试文件里，是因为它
     保护的是整个套件。
+
+    两本账都要清：_FAILS 记登录失败与撞名，_REGISTERS 记注册成功数。后者漏清的
+    话，前面某条用例注册满 3 个号，就会让后面随便一条注册断言变成 429。
     """
-    from app.core.auth_router import _FAILS
+    from app.core.auth_router import _FAILS, _REGISTERS
 
     _FAILS.clear()
+    _REGISTERS.clear()
     yield
     _FAILS.clear()
+    _REGISTERS.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -168,16 +172,18 @@ def enforced(monkeypatch, tmp_path):
     from app.core.auth import AuthStore
     import app.core.authz as authz
 
-    store = AuthStore(path=str(tmp_path / "users.json"),
-                      invites_path=str(tmp_path / "invites.json"))
+    store = AuthStore(path=str(tmp_path / "users.json"))
     monkeypatch.setattr(authz, "auth_store", store)
     monkeypatch.setenv("AUTH_MODE", "enforced")
     monkeypatch.setenv("ACCESS_TOKEN", "boot-token")
 
     def as_user(username):
-        """注册一个普通用户，返回携带其令牌的请求头。"""
-        code = store.create_invite("admin")
-        _, token = store.register(code=code, username=username)
+        """建一个普通用户，返回携带其令牌的请求头。
+
+        走存储层而不是 HTTP：注册端点按来源限成功数，夹具若从那儿过，
+        同一条用例里第 4 个用户就会莫名其妙拿到 429。
+        """
+        _, token = store.register(username=username, password="correct-horse-battery")
         return {"Authorization": "Bearer " + token}
 
     return as_user

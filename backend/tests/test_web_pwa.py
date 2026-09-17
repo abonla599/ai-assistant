@@ -227,13 +227,19 @@ def _function_body(src: str, name: str) -> str:
 
 
 def test_registration_ui_elements_wired():
-    """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。"""
+    """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。
+
+    现在有两个入口（首屏弹层 + 设置页），所以两边的元素都要逐个对上：
+    少一个 id 不会报错，只会让那个按钮点了没反应。
+    """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     defined = set(re.findall(r'id="([^"]+)"', html))
-    for el in ("regCode", "regUsername", "registerBtn"):
+    for el in ("regUsername", "regPass", "registerBtn",
+               "authModal", "authUser", "authPass", "authGo", "authHint",
+               "authTabLogin", "authTabRegister"):
         assert f'$("{el}")' in js, f"app.js 引用了 #{el} 但 HTML 未定义"
-        assert el in defined
+        assert el in defined, f"HTML 里没有 #{el}"
 
 
 def test_memory_calls_no_longer_send_user_id():
@@ -248,21 +254,25 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
     拿的，不是照抄一份字典——改名（token→access_token 这种）当天就该红。
     """
     from app.core import authz as authz_mod
-    from app.core.auth_router import RegisterRequest
+    from app.core.auth_router import LoginRequest, RegisterRequest
 
     api = (STATIC / "api.js").read_text(encoding="utf-8")
     js = (STATIC / "app.js").read_text(encoding="utf-8")
 
-    assert set(RegisterRequest.model_fields) == {"code", "username"}
+    assert set(RegisterRequest.model_fields) == {"username", "password"}
+    assert set(LoginRequest.model_fields) == {"username", "password"}
     m = re.search(r"register:\s*\(([^)]*)\)\s*=>\s*request\(\"/v1/auth/register\"", api)
     assert m, "api.js 的 register 封装形状变了，这条契约要重看"
-    assert [p.strip() for p in m.group(1).split(",")] == ["code", "username"]
+    assert [p.strip() for p in m.group(1).split(",")] == ["username", "password"]
+    lg = re.search(r"login:\s*\(([^)]*)\)\s*=>\s*request\(\"/v1/auth/login\"", api)
+    assert lg, "api.js 没有 login 封装：注册之后就没有第二条回到系统里的路"
+    assert [p.strip() for p in lg.group(1).split(",")] == ["username", "password"]
     assert re.search(r'\bme:\s*\(\)\s*=>\s*request\("/v1/auth/me"\)', api), \
         "前端没有 me 封装：角色就只能靠猜"
 
-    enforced("发码的人")
-    code = authz_mod.auth_store.create_invite("admin")
-    res = client.post("/v1/auth/register", json={"code": code, "username": "字段名契约"})
+    enforced("垫底用户")
+    res = client.post("/v1/auth/register",
+                         json={"username": "字段名契约", "password": "correct-horse-battery"})
     assert res.status_code == 200, res.text
     body = res.json()
     for key in ("token", "user_id", "username"):
@@ -376,27 +386,41 @@ def test_a_stale_token_does_not_read_like_a_first_run():
 
 
 def test_registration_locks_its_button_while_the_request_is_in_flight():
-    """注册没有在途闸门 = 手机双击发出第二个 POST /v1/auth/register。
+    """登录/注册没有在途闸门 = 手机双击发出第二个 POST。
 
-    第二下用的正是第一枪已经花掉的那枚码，只能拿回 403"邀请码无效"：界面于是把
-    一个已经注册成功的人标成红色失败，两次调用还一起抢 pref.token 的写入与
+    第二下拿回的是"用户名已被占用"或一次多余的 401：界面于是把一个已经成功的
+    人标成红色失败，两次调用还一起抢 pref.token 的写入与
     loadWho→loadServerData→renderMessages 的顺序。约定跟 send() 守 state.streaming
     一模一样——进门先挡、解锁放在 finally（失败也必须解，否则一次网络抖动就把唯一
-    的注册入口按死到刷新页面为止），并且令牌一落地就把那枚废码清出输入框。
+    的入口按死到刷新页面为止），并且凭据一落地就把它清出输入框。
+
+    入口现在有两处（首屏弹层与设置页），所以两处各验一遍：多一条路就多一处能双击。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert re.search(r"streaming: false,\s*\n\s*registering: false", js), \
         "state 里没有了 registering：在途闸门大概退回了只靠 disabled 一处"
 
-    body = _function_body(js, "registerWithInvite")
-    assert re.search(r"if \(state\.registering\) return", body), "双击不再被挡下"
-    assert body.index("if (state.registering) return") < body.index("API.register"), \
-        "闸门得在发请求之前"
-    assert "state.registering = true" in body and '$("registerBtn").disabled = true' in body, \
-        "请求在途时按钮还亮着"
-    unlock = body[body.index("finally"):]
-    assert '$("registerBtn").disabled = false' in unlock and "state.registering = false" in unlock, \
-        "解锁不在 finally 里：注册失败一次就再也点不动了"
-    assert '$("regCode").value = ""' in body, "花掉的邀请码还留在输入框里，等着下一次双击"
-    assert body.index("pref.token = res.token") < body.index('$("regCode").value = ""'), \
+    for name, btn, api_call in (
+            ("submitAuth", "authGo", "API.register"),
+            ("registerFromSettings", "registerBtn", "API.register")):
+        body = _function_body(js, name)
+        assert re.search(r"if \(state\.registering\) return", body), f"{name} 不再挡双击"
+        assert body.index("if (state.registering) return") < body.index(api_call), \
+            f"{name} 的闸门得在发请求之前"
+        assert "state.registering = true" in body and f'$("{btn}").disabled = true' in body, \
+            f"{name} 请求在途时按钮还亮着"
+        unlock = body[body.index("finally"):]
+        assert f'$("{btn}").disabled = false' in unlock and "state.registering = false" in unlock, \
+            f"{name} 的解锁不在 finally 里：失败一次就再也点不动了"
+
+    # 成功之后两个密码输入框都不许留下密码：首屏那个由共用的 afterAuth 清，设置页
+    # 那个有自己的字段、必须自己清。失败时故意留着——逼人重敲一遍密码只会把人赶去
+    # 用 "12345678"，安全上是净损失。
+    tail = _function_body(js, "afterAuth")
+    assert '$("authPass").value = ""' in tail, "首屏那格的密码没人清"
+    assert '$("regPass").value = ""' in _function_body(js, "registerFromSettings"), \
+        "设置页那格的密码没人清"
+    # 收尾动作的先后是硬约束：先清输入框再写 pref.token 的话，中途抛异常就把
+    # 唯一一次拿到令牌的机会连同输入一起丢了。
+    assert tail.index("pref.token = res.token") < tail.index('$("authPass").value = ""'), \
         "清空必须晚于令牌落库：早一步就是在丢凭据"

@@ -14,8 +14,11 @@ from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
 
 BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
-# 唯一无需凭据的端点。新增公开端点必须同时改这里，否则路由契约测试会红。
-PUBLIC_PATHS = frozenset({"/v1/auth/register"})
+# 无需凭据即可到达的端点，精确匹配。注册与登录本来就是给"还没有身份的人"用的，
+# 所以它们必然公开——代价是这两个端点自己变成攻击面，防线全部落在 auth_router
+# 的真实 IP 限流与 auth.login 的"三种失败同一句话"上。
+# 新增公开端点必须同时改这里，否则路由契约测试会红。
+PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login"})
 _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 
 # 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺
