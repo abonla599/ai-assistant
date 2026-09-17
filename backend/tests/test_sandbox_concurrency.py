@@ -24,6 +24,10 @@ def test_run(task_id, sandbox_language):
     sandbox_language("python")
     result = SandboxManager().run_code(_code_for(task_id), "python")
     assert result.get("error") is None, f"任务 {task_id} 执行失败: {result.get('error')}"
+    # 只断 error is None 是假绿：容器"连代码文件都读不到"时 error 也是 None，
+    # 失败文本躺在 stdout 里。所以必须断那段 print 真的发生了。
+    assert result.get("exit_code") == 0, f"容器非零退出: {result}"
+    assert "1+1= 2" in result["stdout"], f"代码没有真的执行，stdout={result['stdout']!r}"
 
 
 def main():

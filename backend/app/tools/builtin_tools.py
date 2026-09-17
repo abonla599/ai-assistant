@@ -131,5 +131,10 @@ def execute_code(code: str, language: str = "python", max_retries=2) -> str:
     # 正常情况拼接标准输出和标准错误输出
     out = result.get("stdout", "")
     err = result.get("stderr", "")
+    # 非零退出码必须让模型看见：否则"python 连文件都没打开"也会被包成 ✓ 成功。
+    # 不写进 error 字段——那是沙箱基础设施的重试判据，用户代码自己的报错重试三次
+    # 既不会变对，又白烧三个容器。
+    exit_code = result.get("exit_code")
+    tail = f"\n退出码: {exit_code}" if exit_code else ""
     # 返回给模型的文本（模型会看到这个字符串）
-    return f"输出:\n{out}\n错误:\n{err}"
+    return f"输出:\n{out}\n错误:\n{err}{tail}"

@@ -56,6 +56,11 @@ class SandboxManager:
         with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False, encoding='utf-8') as tmp:
             tmp.write(code)
             tmp_path = tmp.name
+        # NamedTemporaryFile 默认 0600、属主是宿主进程 uid；容器里跑的是非 root 的
+        # sandbox 用户，两边 uid 不同，Linux 上这个只读挂载就是"读不到"。而 python
+        # 打不开文件时退出码是 2、错误写到 stdout，如果只看 error 字段就会把
+        # "一行代码都没执行"当成执行成功（CI 上正是这样绿了很久）。
+        os.chmod(tmp_path, 0o644)
 
         start_time = time.time()
         container = None
@@ -76,7 +81,8 @@ class SandboxManager:
             container.start()
 
             # 3. 等待容器结束，设置超时
-            container.wait(timeout=timeout)
+            status = container.wait(timeout=timeout)
+            exit_code = status.get("StatusCode") if isinstance(status, dict) else None
 
             # 4. 获取输出
             logs = container.logs(stdout=True, stderr=True)
@@ -84,12 +90,14 @@ class SandboxManager:
             execution_time = time.time() - start_time
 
             # 5. 资源使用统计
-            print(f"[Sandbox] 语言: {language}, 耗时: {execution_time:.2f}s, 代码长度: {len(code)}")
+            print(f"[Sandbox] 语言: {language}, 耗时: {execution_time:.2f}s, "
+                  f"退出码: {exit_code}, 代码长度: {len(code)}")
 
             return {
                 "stdout": stdout,
                 "stderr": "",
                 "error": None,
+                "exit_code": exit_code,
                 "execution_time": execution_time
             }
 

@@ -121,8 +121,39 @@ def test_code_tool_syntax_error(sandbox_language):
     assert "NameError" in result or "错误" in result or "error" in result
 
 
-def test_code_tool_timeout(sandbox_language):
-    """死循环必须被超时掐断——这是沙箱的 DoS 兜底，不是可选行为。"""
-    sandbox_language("python")
-    result = execute_tool("execute_code", {"code": "while True: pass", "language": "python"})
-    assert "超时" in result or "timeout" in result or "错误" in result
+def test_code_tool_timeout_reports_timeout_to_the_model(monkeypatch):
+    """只验"超时有没有用人话交出去"；真沙箱掐死循环由 test_sandbox.py 锁。
+
+    这里走真容器的话，execute_code 的 max_retries=2 会把它拖成三次 10 秒超时。
+    """
+    from app.tools import builtin_tools
+
+    fake = _RecordingSandbox([{"error": "代码执行超时（3秒）"}] * 3)
+    monkeypatch.setattr(builtin_tools, "sandbox", fake)
+    result = builtin_tools.execute_code("while True: pass", "python")
+    assert "超时" in result
+
+
+def test_nonzero_exit_code_is_surfaced_not_wrapped_as_success(monkeypatch):
+    """CI 上的真实事故形状：容器读不到代码文件，python 打印 Errno 13 后非零退出，
+    而 error 字段是 None——旧实现会把它包成 "✓ 输出:" 交给模型，等于谎报成功。
+    """
+    from app.tools import builtin_tools
+
+    fake = _RecordingSandbox([{
+        "stdout": "python: can't open file '/tmp/code.py': [Errno 13] Permission denied\n",
+        "stderr": "", "error": None, "exit_code": 2,
+    }])
+    monkeypatch.setattr(builtin_tools, "sandbox", fake)
+    result = builtin_tools.execute_code("print(1)", "python")
+    assert "退出码: 2" in result, "非零退出码被吞掉了，模型会以为代码跑成功了"
+
+
+def test_zero_exit_code_adds_no_noise(monkeypatch):
+    from app.tools import builtin_tools
+
+    fake = _RecordingSandbox([{"stdout": "hi\n", "stderr": "", "error": None, "exit_code": 0}])
+    monkeypatch.setattr(builtin_tools, "sandbox", fake)
+    result = builtin_tools.execute_code("print('hi')", "python")
+    assert "退出码" not in result
+    assert "hi" in result
