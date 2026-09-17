@@ -275,8 +275,13 @@ def test_auth_layer_keeps_the_two_column_layout_and_no_dead_rules():
     """
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".auth-grid" in css and ".auth-side" in css, "两列版式不在了"
-    assert re.search(r"@media\s*\(max-width:\s*860px\)[\s\S]{0,200}\.auth-grid", css), \
-        "窄屏没有把两列塌成单列"
+    # 样式表里有多段 @media (max-width: 860px)（侧栏一段、首屏一段），
+    # 只取"管首屏的那一段"来判，否则断言会打在毫不相干的块上。
+    narrow = [b for b in re.findall(r"@media\s*\(max-width:\s*860px\)([\s\S]*?)\n\}", css)
+              if ".auth-grid" in b]
+    assert narrow, "窄屏没有把两列塌成单列"
+    assert not re.search(r"\.auth-side[^{]*\{[^}]*display:\s*none", narrow[0]), \
+        "窄屏又把说明卡藏了：手机上是决定要显示在表单下方的"
     assert ".auth-tabs" not in css and ".auth-tab" not in css, "tab 的死规则还留在样式表里"
 
 

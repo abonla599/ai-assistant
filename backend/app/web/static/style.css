@@ -412,6 +412,5 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 @media (max-width: 860px) {
   .auth-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  /* 手机上说明卡是次要信息：表单必须第一眼完整可见，不然键盘一弹就把它顶没了 */
-  .auth-side { display: none; }
+  /* 说明卡跟着塌到表单下方，不隐藏：手机上"数据不出这台机器"这句话最值得被看到 */
 }
