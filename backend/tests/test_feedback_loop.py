@@ -187,3 +187,62 @@ def test_feedback_endpoint_reports_no_memories_under_fake_store():
     assert body["status"] == "success"
     assert body["used_memories"] is False
     assert body["memory_weight_adjusted"] == 0
+
+
+# ---------- 反馈写盘：加锁的整份替换，缺一半都不算写完 ----------
+# save_feedback 是"整份列表读出来、append 一条、再整份写回去"，所以它需要两件
+# 本分支每个存储都有、唯独它没有的东西：一把锁（否则两个人同时点 👍/👎，后写者
+# 手里的旧全表不含先写者那条）与一次原子替换（否则截断发生在 open 的那一刻，
+# 中途出事丢掉的是**全部**历史反馈，不是那一条）。
+
+
+@pytest.fixture
+def feedback_file(tmp_path, monkeypatch):
+    import app.feedback_storage as fs
+
+    path = tmp_path / "feedback.json"
+    monkeypatch.setattr(fs, "FEEDBACK_FILE", str(path))
+    return path, fs
+
+
+def test_a_write_that_dies_halfway_keeps_every_existing_row(feedback_file):
+    """炸在半路也要保住原有那 68 条。
+
+    不 monkeypatch 任何东西：rating 传一个不可 JSON 序列化的对象，`json.dump`
+    就会在写完前面所有行、写到这条时才抛错——正好是"进程被杀/磁盘写满"的等价
+    情形。裸 `open(path, "w")` 在 dump 之前就已经把文件截断了，所以这一条
+    正是用来否掉那种写法的。
+    """
+    path, fs = feedback_file
+    seed = [{"message_id": f"m{i}", "rating": 1, "comment": "", "user_id": "u_a"}
+            for i in range(68)]
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        fs.save_feedback("m-new", object(), "写不下去的那条", "u_b")
+
+    assert json.loads(path.read_text(encoding="utf-8")) == seed, \
+        "一次失败的写入不能动到已有反馈：那 68 条是用户多年点出来的"
+    assert not (path.parent / (path.name + ".tmp")).exists(), "失败不能留下半截临时文件"
+
+
+def test_concurrent_ratings_all_survive_the_read_modify_write(feedback_file):
+    """16 个线程 × 4 条：没有锁时后写者会拿旧全表覆盖掉别人刚追加的那几条。"""
+    import threading
+
+    path, fs = feedback_file
+
+    def worker(n):
+        for i in range(4):
+            fs.save_feedback(f"m{n}-{i}", 1, "", f"u_{n}")
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    assert len(rows) == 64, f"丢了 {64 - len(rows)} 条反馈：读-改-写没有整体加锁"
+    assert sorted(r["message_id"] for r in rows) == sorted(
+        f"m{n}-{i}" for n in range(16) for i in range(4))
