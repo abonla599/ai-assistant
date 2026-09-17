@@ -265,6 +265,12 @@ def test_registration_ui_elements_wired():
         assert el in defined, f"HTML 里没有 #{el}"
     assert "authTab" not in html and "authTab" not in js, "旧的 tab 还在：两套入口并存"
 
+    side = re.search(r'<aside class="auth-side"[\s\S]*?</aside>', html)
+    assert side, "说明卡不在了"
+    assert "/admin" not in side.group(0), \
+        "卡里又写出管理员重置的位置了：那件事归「忘记密码」链接说，首屏不该指运维入口"
+    assert "用户名自己定" not in side.group(0), "卡里重复了表单上方那句副标题"
+
 
 def test_auth_layer_keeps_the_two_column_layout_and_no_dead_rules():
     """版式的两条硬约束写在 CSS 里，只能在这里钉：没有浏览器测试跑得到它。

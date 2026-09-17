@@ -406,11 +406,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
              padding: 20px 22px; color: var(--text-2); font-size: 13.5px; line-height: 1.7; }
 .auth-side h2 { margin: 0 0 10px; font-size: 15px; color: var(--text); font-weight: 600; }
 .auth-side p { margin: 0 0 10px; }
-.auth-side code { padding: 1px 5px; border-radius: 5px; background: var(--bg-hover);
-                  font-size: 12.5px; }
 .auth-host { margin: 4px 0 0 !important; color: var(--text-3); font-size: 12.5px; }
 
 @media (max-width: 860px) {
   .auth-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  /* 说明卡跟着塌到表单下方，不隐藏：手机上"数据不出这台机器"这句话最值得被看到 */
+  /* 说明卡跟着塌到表单下方，不隐藏：朋友第一次打开就是在手机上，
+     这一眼决定他敢不敢把话打进来 */
 }
