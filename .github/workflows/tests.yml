@@ -7,7 +7,11 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          # 与本地开发/验证以及 PyInstaller 冻结时所用的解释器对齐。
+          # 此前钉在 3.10，而这批代码全是在 3.12 上写、在 3.12 上验、并按 3.12 打成 EXE
+          # 的——CI 因此一直是"唯一没被对齐过的那一环"。requirements.txt 钉死
+          # chromadb==0.5.0，其对 Python 的支持上限也是 3.12，再往上同样会引入新问题。
+          python-version: '3.12'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
