@@ -433,7 +433,10 @@ async def list_models(_: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
 
     身份在这里刻意不用取名（catalog() 是全站视图），挂它也不是为了挡住匿名读取
-    ——那道门是 install_auth 的中间件在路由之前守着的。要的理由就两条：路由契约
+    ——那道门由 install_auth 的中间件在路由之前守着，但只在 **enforced 模式下、
+    且只在 authz._PROTECTED_PREFIXES 那几个前缀（含 /v1/）之下**成立：disabled 模式
+    人人都是本机管理员，websocket 握手更是压根不经过这个 HTTP 中间件（实测见
+    tests/test_route_auth_contract.py）。要的理由就两条：路由契约
     （tests/test_route_auth_contract.py）不接受没有身份的 /v1 端点，且这是中间件
     之外多出来的一把锁。完整理由见下面 providers 段那段注释。
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。

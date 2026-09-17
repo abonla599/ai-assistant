@@ -14,14 +14,22 @@
 
 范围还有两句话（3、4 条）：
 3. "每条路由"里的**路由**指的是带依赖树的可路由对象，HTTP（APIRoute）与
-   websocket（APIWebSocketRoute）两类都算。websocket 必须在范围内，而且它是
-   唯一只能靠这里守住的形状：Starlette 的 `@app.middleware("http")` 只处理
-   http scope，握手根本不经过 install_auth，实测见
+   websocket（APIWebSocketRoute）两类都算。websocket 必须在范围内，因为
+   Starlette 的 `@app.middleware("http")` 只处理 http scope，握手根本不经过
+   install_auth，实测见
    `test_the_http_middleware_does_not_protect_a_websocket_handshake`。
-   今天全仓没有一条 websocket 路由（`grep -rn "websocket(" backend/app/` 无命中），
-   所以这是潜伏而非现行漏洞——也正因为还没人踩，现在放宽最便宜。
-   所以这一半范围**只许放宽、不许收窄**——把它写回 `isinstance(route, APIRoute)`
-   的后果不是漏掉一个无人用的边角，而是给一条正确挂好身份依赖的
+   但要把话说准：**这条契约对 websocket 保证的是"声明了身份依赖"，不是一条
+   能用的守卫。** 实测本仓 FastAPI 0.136.1 不会把 `Request` 注进 websocket 的
+   依赖：在 `@app.websocket` 上挂 `Depends(current_principal)` 会在连接时抛
+   `TypeError: current_principal() missing 1 required positional argument:
+   'request'`（依赖解析先于端点体，所以 accept() 都执行不到）。也就是说那一格
+   既不是鉴权、也不是放行，而是**连管理员一起挡在门外的崩**——fail-closed 的
+   形状，所以没有现行泄露，但绝不是"挂上依赖就完事"。今天全仓没有一条
+   websocket 路由（`grep -rn "websocket(" backend/app/` 无命中），所以这是潜伏
+   而非现行问题；将来真要加 /v1 长连接，凭据必须在端点体里自己解（握手前读
+   `ws.headers` 的 authorization，解不出就 `close(code=1008)`），路由级依赖只是
+   给契约看的。这一半范围因此**只许放宽、不许收窄**——把它写回
+   `isinstance(route, APIRoute)` 的后果不是漏掉一个无人用的边角，而是给一条正确挂好身份依赖的
    `@app.websocket("/v1/...")` 判红，并叫作者"别用这个路由类"；那种消息只会把人
    推向删断言或加例外名单——就是上面说的拆锁方式。
 4. 契约只管 /v1，所以"每条可路由路径至少被一把锁认领"必须由另一条测试钉住
@@ -35,9 +43,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute, APIWebSocketRoute, get_dependant
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from starlette.websockets import WebSocket
 
 from app.core import authz
@@ -100,6 +109,12 @@ def _v1_routes(app_obj=None):
     websocket 握手不经过 HTTP 中间件，路由级依赖是它唯一的锁。用 isinstance 收窄
     就是把这一类整体推到契约之外，还给"守卫挂对了"的人判红。
     `_callables_of` 早就两种形状都走，所以这里不需要额外分支。
+
+    但"扫到了"不等于"护住了"，这一点必须写在函数自己的 docstring 里而不是只写在
+    模块开头：同一版 FastAPI 实测**不向 websocket 依赖注入 `Request`**，所以一条挂了
+    `Depends(current_principal)` 的 `@app.websocket` 会顺利通过这里，却在客户端连接时
+    抛 `TypeError: current_principal() missing 1 required positional argument:
+    'request'`。这里保证的是**声明**，端点体里自己解凭据才是守卫。
 
     这里刻意用 assert 而不是 continue：/v1 下一条 Mount 同样能被请求命中，对本契约
     却是隐形的（它连 .dependant 都没有）。静默跳过等于把"看不见"当成"合规"，而那
@@ -423,8 +438,8 @@ def test_no_protected_route_is_reachable_without_credentials(client, enforced):
       test_no_public_path_shadows_another_route。
     - 不会红（实测）：把 current_principal 改成"取不到身份就发一个默认 principal"。
       中间件先于路由 401，请求走不到依赖那一层（test_authz_failclosed 的依赖探针也
-      挂了 install_auth，同样被短路）。全仓没有测试覆盖这一格，要暴露得直接调依赖
-      函数——本文件不冒充覆盖了它，这一洞交给 Task 8（报告"已知残留"第 6 条）。
+      挂了 install_auth，同样被短路）。这一格过去无人覆盖，现在由
+      `test_current_principal_refuses_to_invent_an_identity` 直接调依赖函数钉住。
 
     也就是说：这条是**中间件/响应形状**的锁，静态契约是**端点声明**的锁，各测各的。
     路由级依赖之所以仍然必要（而不是"有中间件就够了"），就是上面第二条那个实测：
@@ -439,6 +454,37 @@ def test_no_protected_route_is_reachable_without_credentials(client, enforced):
         res = client.get(path)
         assert res.status_code == 401, f"{path} -> {res.status_code} {res.text[:150]}"
         assert res.json()["detail"] == UNAUTHORIZED_DETAIL, path
+
+
+# ---------- 依赖函数本体（中间件短路之外的最后一格） ----------
+
+
+def test_current_principal_refuses_to_invent_an_identity():
+    """没有 request.state.principal 时只能抛 401，不许凭空发一个身份。
+
+    这一格只能**直调**才测得到：真 app 上中间件先于路由就把匿名请求挡成 401，请求
+    走不到依赖那一层，于是"把 current_principal 改成取不到身份就返回
+    BOOTSTRAP_PRINCIPAL"这个变异（MUT-E）在整套用例下全绿。而它一旦落地，任何绕过
+    中间件的形状都会白送一个本机管理员身份——websocket 握手今天就绕（见模块
+    docstring 第 3 条），受保护前缀哪天收窄、挂载顺序哪天被动过也一样。
+    "身份只能由中间件写入"这条承诺要有人守，就不能只在中间件之后才被检查。
+
+    反向对照（设了身份就原样交出）是这条不成为空锁的证明：只断"抛 401"的话，
+    一个无条件抛异常的函数也能通过，而那种实现会把所有请求挡在门外——绿灯不代表
+    有鉴别力。
+    """
+    def bare_request():
+        return Request({"type": "http", "method": "GET", "path": "/v1/sessions",
+                        "headers": [], "query_string": b""})
+
+    with pytest.raises(HTTPException) as exc:
+        current_principal(bare_request())
+    assert exc.value.status_code == 401
+    assert exc.value.detail == UNAUTHORIZED_DETAIL
+
+    owned = bare_request()
+    owned.state.principal = Principal("u_someone", "张三", "user")
+    assert current_principal(owned) is owned.state.principal
 
 
 # ---------- 扫描逻辑的自测 ----------
