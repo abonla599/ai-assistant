@@ -189,3 +189,18 @@ APK 壳不需要改动。
 - 第 2 步：后端常驻托管，`ai.fenever.xyz` 直连，弃用隧道与开机自启
 - 第 3 步：provider 归属（per-user BYOK）与配额/限流。本设计的 `principal.role` 已留缝，届时不改鉴权结构
 - 邀请码分配 UI 目前只走管理端点，不做界面
+
+## 8. 上线后补记（2026-09-17，合并入 develop 时）
+
+- **记忆库投毒审计**（Task 5 复审升级为硬门槛，结果此前只活在 gitignore 的账本里）：
+  对上线前的真实 `chroma_db` 做只读扫描，62 条向量中 **4 条 `user_id` 与其作者不符**——
+  成因是修复前 `add_memory` 接受客户端自报 `user_id`。这 4 条今天对**所有**人不可见
+  （`search_memory`/`get_user_memories` 均已按 `where` 过滤），因此不是泄露，而是管理员
+  本人丢了 4 条记忆；找回需要一次写操作（把 `user_id` 改回 `default_user`），未执行。
+  审计全程只读，事后核对库文件字节数与 mtime 未变、无 `.wal/.shm/.tmp/.corrupt`。
+- 合并后已按"停服务 → 重建 → 搬文件 → 启动"把 `feedback.json`(68 条) 与 `preference.txt`
+  从项目根迁入 `data/`，md5 搬运前后一致；启动日志逐行打印各数据落点，公网复核新界面与
+  401/403 行为均已生效。
+- 已知非阻塞遗留（账本归档）：启动日志把向量库标成"读历史数据"（其实那是它的设计默认位置）；
+  `.env.example` 中"一份用户数据都不例外"与同文件 `CHROMA_DB_PATH` 相矛盾；
+  `session_store._load` 仍缺形状分支的 `else`；`.corrupt` 用固定名，二次损坏会吃掉上一份留证。
