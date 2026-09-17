@@ -97,6 +97,11 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时执行
+    # 先把"这八份可变数据此刻到底写在哪儿"打出来：它原先只是文档里的一段散文，
+    # 而 data_file() 会在 data/ 下没有同名文件时退回项目根那份历史文件——于是
+    # "所有数据都在 data/ 下吗"取决于本机有没有一个老 preference.txt，光看文档猜不出来。
+    from app.core.paths import log_data_locations
+    log_data_locations()
     start_background_scheduler()
     yield
     # 关闭时执行（如果需要清理资源）

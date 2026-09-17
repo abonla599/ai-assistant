@@ -7,6 +7,7 @@
    的裸文件名靠 `.gitignore` 里逐个记名兜底，改个名字（preference-<uid>.txt）就会
    被提交进公开仓库。规则收在 paths.data_file，这里按优先级逐档钉住。
 """
+import os
 import sys
 from pathlib import Path
 
@@ -146,6 +147,82 @@ def test_ensure_parent_creates_the_missing_directory(tmp_path):
     assert ensure_parent(target) == target        # 返回值就是入参，能直接串进调用点
     assert (tmp_path / "data").is_dir()
     ensure_parent("bare-name.txt")                # 没有父目录的裸名不该炸
+
+
+# ---------- 启动时把"可变数据到底在哪"打出来（散文换成可观测） ----------
+# 一份数据是不是在 data/ 底下，取决于本机有没有一份同名的历史文件（见 data_file
+# 的第三档），这件事光读文档猜不准，所以把它打印出来。下面两条钉的是：这张表
+# 必须**全**（漏一份就等于那份永远不出现在日志里），以及它必须说真话。
+
+ALL_STORES = {"会话", "身份库", "邀请码", "模型服务配置", "附件",
+              "长期记忆向量库", "反馈原文", "偏好摘要"}
+
+
+def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
+    from app.core.paths import DATA_PATH_ENV_VARS, resolve_all_data_paths
+
+    assert set(DATA_PATH_ENV_VARS) == ALL_STORES, \
+        "启动日志的目录与测试覆盖面各有一份清单，加存储时会漏一个"
+
+    redirected = {
+        "SESSION_DB_PATH": tmp_path / "x" / "sessions.json",
+        "USERS_DB_PATH": tmp_path / "x" / "users.json",
+        "INVITES_DB_PATH": tmp_path / "x" / "invites.json",
+        "PROVIDERS_DB_PATH": tmp_path / "x" / "providers.json",
+        "UPLOAD_DIR": tmp_path / "x" / "uploads",
+        "CHROMA_DB_PATH": tmp_path / "x" / "chroma_db",
+    }
+    for var, value in redirected.items():
+        monkeypatch.setenv(var, str(value))
+
+    got = dict(resolve_all_data_paths())
+    assert set(got) == ALL_STORES, f"这张表漏了存储：{ALL_STORES ^ set(got)}"
+    label_of = {"SESSION_DB_PATH": "会话", "USERS_DB_PATH": "身份库",
+                "INVITES_DB_PATH": "邀请码", "PROVIDERS_DB_PATH": "模型服务配置",
+                "UPLOAD_DIR": "附件", "CHROMA_DB_PATH": "长期记忆向量库"}
+    for var, value in redirected.items():
+        assert got[label_of[var]] == os.path.abspath(str(value)), f"{label_of[var]} 没跟着 {var} 走"
+    # 反馈与偏好是导入期算好的模块常量（conftest 会把它们指到临时目录），
+    # 这里只要求它们出现在表里并且是绝对路径——它们进的是同一份日志。
+    for label in ("反馈原文", "偏好摘要"):
+        assert os.path.isabs(str(got[label])), f"{label} 不是绝对路径"
+
+
+def test_log_data_locations_tells_the_two_reasons_apart(capsys, tmp_path, monkeypatch):
+    """这条日志的价值全在"说清为什么"：被指走 ≠ 读的是历史数据。
+
+    两者对运维的意思完全相反——前者是"我故意的"，后者是"你以为在 data/ 底下，
+    其实这台机器上还躺着一份项目根的老文件"。混成一句 ⚠️ 就等于没说。
+    """
+    from app.core.paths import log_data_locations
+
+    log_data_locations()
+    out = capsys.readouterr().out
+    for label in ALL_STORES:
+        assert label in out, f"启动日志里没有 {label}"
+    assert "只允许一个服务进程" in out, "单写者规则必须跟日志一起说，否则没人知道它在防什么"
+    assert "项目根" in out
+    # conftest 把会话库用 SESSION_DB_PATH 指到了临时目录：必须说是"被指走"
+    assert "由环境变量 SESSION_DB_PATH 指走" in out, "被环境变量指走的存储不该被报成历史兼容位"
+
+    # 没有任何 env 变量、却又落在 data/ 之外——这才是历史兼容位那种情况
+    import app.feedback_storage as fs
+    import app.preference_analyzer as pa
+    was_fs, was_pa = fs.FEEDBACK_FILE, pa.FEEDBACK_FILE
+    monkeypatch.delenv("FEEDBACK_FILE", raising=False)
+    elsewhere = str(tmp_path / "legacy" / "feedback.json")
+    fs.FEEDBACK_FILE = pa.FEEDBACK_FILE = elsewhere
+    try:
+        log_data_locations()
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if "反馈原文" in l]
+        assert len(lines) == 1
+        assert elsewhere in lines[0]
+        assert "不在 data/ 之下" in lines[0], "读历史兼容位必须点名"
+        assert "FEEDBACK_FILE" in lines[0], "还要说出用哪个变量能把它收进 data/"
+        assert "由环境变量 FEEDBACK_FILE 指走" not in lines[0]
+    finally:
+        fs.FEEDBACK_FILE, pa.FEEDBACK_FILE = was_fs, was_pa
 
 # 刻意**没有**"再断言 feedback_storage.FEEDBACK_FILE / preference_analyzer.PREFERENCE_FILE
 # 必须等于上面这条规则"的那一条：conftest 的 autouse 夹具会把这两个常量 patch 到临时
