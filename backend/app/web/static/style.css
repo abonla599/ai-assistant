@@ -80,7 +80,6 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .ni-ico { width: 18px; text-align: center; color: var(--text-2); font-size: 15px; }
 .ni-ico svg { display: block; margin: 0 auto; }
 /* 设置入口与会话列表之间要有分隔：不画的话它看起来像会话列表的最后一项 */
-.sb-config { border-top: 1px solid var(--line); padding-top: 8px; }
 
 .sb-label { font-size: 11px; color: var(--text-3); padding: 12px 10px 2px; letter-spacing: .05em; }
 .sb-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
@@ -95,14 +94,22 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 .sb-item .ops { display: flex; opacity: 0; }
 .sb-item:hover .ops, .sb-item.active .ops { opacity: 1; }
-.sb-foot {
-  display: flex; align-items: center; gap: 8px;
-  padding-top: 4px; font-size: 12px; color: var(--text-2);
-}
+/* 侧栏底部这一行同时是"我是谁"与"进设置"：整行可点，所以它是个 button。
+   主题按钮是低频动作，已经挪进设置弹层，不占这里。 */
+.sb-foot { padding-top: 10px; border-top: 1px solid var(--line); }
+.who-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 4px;
+           border: 0; border-radius: 10px; background: transparent; color: var(--text-2);
+           font-size: 13px; cursor: pointer; text-align: left; }
+.who-row:hover { background: var(--bg-hover); color: var(--text); }
+.avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px;
+          border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+          font-size: 13px; font-weight: 600; text-transform: uppercase; }
+.who-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; color: var(--text); }
+.who-gear { display: flex; flex: none; color: var(--text-3); }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
 .conn-dot.ok { background: var(--accent); }
 .conn-dot.bad { background: var(--danger); }
-.conn-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 
@@ -373,18 +380,17 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 
 /* ---------------- 首屏凭据层 ----------------
- * 版式照参考图：顶部居中品牌行，宽屏两列（表单 + 一张说明卡），窄屏塌回单列。
+ * 单列居中：品牌行 + 一块表单（登录/注册）或一块找回表单，同一层里换视图。
  * z-index 必须高于 .backdrop/.modal，否则从设置页里掉线时会被设置层压住。
  */
 .auth { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center;
         justify-content: center; padding: 20px; background: var(--bg); overflow: auto; }
-.auth-inner { width: 100%; max-width: 760px; display: flex; flex-direction: column; gap: 26px; }
+.auth-inner { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 22px; }
 .auth-brand { display: flex; align-items: center; justify-content: center; gap: 10px;
               font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: .5px; }
 .auth-brand img { width: 30px; height: 30px; border-radius: 8px; }
-.auth-grid { display: grid; grid-template-columns: minmax(0, 380px) 1fr; gap: 40px;
-             align-items: start; justify-content: center; }
 .auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-extra { display: flex; flex-direction: column; gap: 12px; }
 .auth-sub { margin: 0 0 4px; color: var(--text-2); font-size: 13px; line-height: 1.5; }
 .auth-field { position: relative; display: flex; }
 .auth-field input { width: 100%; padding: 14px 46px 14px 18px; border: 1px solid var(--line);
@@ -392,11 +398,15 @@ button, input, textarea, select { font: inherit; color: inherit; }
                     font-size: 15px; }
 .auth-field input:focus { outline: none; border-color: var(--accent); }
 .auth-field input::placeholder { color: var(--text-3); }
+.auth-field input[readonly] { color: var(--text-2); }
 .auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
             display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
             border: 0; border-radius: 50%; background: transparent; color: var(--text-3);
             cursor: pointer; }
 .auth-eye:hover { color: var(--text-2); background: var(--bg-hover); }
+/* 就地错误：写在它说的那一格下面，而不是表单末尾那句通用提示里——改完名字就能
+   立刻接着提交，不必回头找红字在哪。 */
+.field-err { margin: -6px 0 0 18px; font-size: 12.5px; color: var(--danger); }
 .auth-note { margin: 2px 0 0; font-size: 12.5px; color: var(--text-3); }
 .auth-links { display: flex; justify-content: space-between; margin-top: 2px; }
 .auth-link { border: 0; background: transparent; padding: 4px 0; color: var(--accent);
@@ -405,14 +415,3 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .auth-go { height: 48px; border-radius: 999px; font-size: 16px; margin-top: 4px; }
 .auth-hint { min-height: 18px; margin: 0; font-size: 12.5px; color: var(--text-3); }
 .auth-hint.err { color: var(--danger); }
-.auth-side { border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft);
-             padding: 20px 22px; color: var(--text-2); font-size: 13.5px; line-height: 1.7; }
-.auth-side h2 { margin: 0 0 10px; font-size: 15px; color: var(--text); font-weight: 600; }
-.auth-side p { margin: 0 0 10px; }
-.auth-host { margin: 4px 0 0 !important; color: var(--text-3); font-size: 12.5px; }
-
-@media (max-width: 860px) {
-  .auth-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  /* 说明卡跟着塌到表单下方，不隐藏：朋友第一次打开就是在手机上，
-     这一眼决定他敢不敢把话打进来 */
-}

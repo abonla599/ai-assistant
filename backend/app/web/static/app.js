@@ -56,8 +56,10 @@ function setStatus(text, isErr) {
 }
 
 function setConn(ok, text) {
-  $("connDot").className = "conn-dot " + (ok === null ? "" : ok ? "ok" : "bad");
-  $("connText").textContent = text;
+  const dot = $("connDot");
+  dot.className = "conn-dot " + (ok === null ? "" : ok ? "ok" : "bad");
+  /* 侧栏底部这一行现在只放得下一个点：状态文字改挂到 title 上，悬停或长按看详情 */
+  dot.title = text || "服务状态";
 }
 
 function applyTheme() {
@@ -130,19 +132,28 @@ function setAuthMode(mode) {
   const reg = authMode === "register";
   $("authSwitch").textContent = reg ? "已有账号？去登录" : "立即注册";
   $("authGo").textContent = reg ? "注册并登录" : "登录";
+  $("authExtra").classList.toggle("hidden", !reg);
   // 密码管理器要分清"改密/新建"与"登录"，填错一半的话注册那枪会带上旧密码。
   $("authPass").autocomplete = reg ? "new-password" : "current-password";
   // "至少 8 位"这条规则只写在这里（placeholder）：后端改了下限而这里没改，
   // 用户就会在被拒之后对着一个看起来合规的框反复重试。
   $("authPass").placeholder = reg ? "请设置密码，至少 8 位" : "请输入密码";
   $("authSub").textContent = reg
-    ? "用户名自己定，密码至少 8 位。换手机后用这个用户名再登录就行。"
+    ? "用户名自己定，密码至少 8 位。找回问题只有你自己知道答案，答对就能自助改密。"
     : "登录后继续；还没有账号就点下面的「立即注册」。";
+}
+
+/** 登录/注册那一块与找回那一块在同一层里互换：谁都不该是第二个弹窗。 */
+function showAuthView(which) {
+  const recovering = which === "recover";
+  $("authForm").classList.toggle("hidden", recovering);
+  $("recoverForm").classList.toggle("hidden", !recovering);
+  if (recovering) { rcStep = 1; renderRecovery(); }
 }
 
 function showAuth(mode) {
   setAuthMode(mode || authMode);
-  $("authSide").querySelector("#authHost").textContent = `当前地址：${location.host}`;
+  showAuthView("auth");
   $("authModal").classList.remove("hidden");
 }
 
@@ -153,42 +164,129 @@ function toggleAuthPass() {
   $("authEye").setAttribute("aria-label", pass.type === "text" ? "隐藏密码" : "显示密码");
 }
 
-/** 自助改密没做（本机部署的取舍，写在安装文档里），所以这一句只指一条真走得通的路。 */
-function showForgotHint() {
-  const hint = $("authHint");
-  hint.classList.remove("err");
-  hint.textContent = "这里没有自助改密：忘了密码请让管理员在 /admin 里重置（本机部署的取舍）";
+function setUserError(text) {
+  const el = $("authUserErr");
+  el.textContent = text || "";
+  el.classList.toggle("hidden", !text);
+  if (text) $("authUser").focus();
 }
-
-function hideAuth() { $("authModal").classList.add("hidden"); }
 
 async function submitAuth() {
   if (state.registering) return;
   const hint = $("authHint");
   const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
+  const reg = authMode === "register";
   const username = $("authUser").value.trim();
   const password = $("authPass").value;
+  const question = $("authQuestion").value.trim();
+  const answer = $("authAnswer").value.trim();
   hint.classList.remove("err");
+  setUserError("");
   if (!username || !password) { fail("用户名和密码都要填"); return; }
+  if (reg) {
+    if (!question || !answer) { fail("注册要一并填找回问题与答案，不然忘了密码就没法自救"); return; }
+    // 确认密码只在这里校验：后端多一个 confirm_password 字段只是把客户端语义
+    // 塞进 API 契约，它不会因此变得更正确。
+    if (password !== $("authPass2").value) { fail("两次输入的密码不一样"); return; }
+  }
 
   state.registering = true;
   $("authGo").disabled = true;
-  hint.textContent = authMode === "register" ? "注册中…" : "登录中…";
+  hint.textContent = reg ? "注册中…" : "登录中…";
   try {
-    const res = authMode === "register"
-      ? await API.register(username, password)
+    const res = reg
+      ? await API.register(username, password, question, answer)
       : await API.login(username, password);
     await afterAuth(res);
   } catch (e) {
-    // 后端已经把原因说成人话（用户名已被占用 / 密码太短 / 用户名或密码不正确），
-    // 照实转述。429 也是人话："尝试次数过多，请稍后再试"。
-    fail((authMode === "register" ? "注册失败：" : "登录失败：") + e.message);
+    if (e.status === 409) {
+      // 重名是"改一下就好"的事，所以它写在用户名那一格下面，且不把表单末尾
+      // 那句一起染红：两句话同屏时人会先去改密码。
+      setUserError(e.message);
+      hint.textContent = "";
+    } else {
+      // 后端已经把原因说成人话（密码太短 / 用户名或密码不正确 / 尝试次数过多），
+      // 照实转述。
+      fail((reg ? "注册失败：" : "登录失败：") + e.message);
+    }
   } finally {
     // 失败也得解锁：一次网络抖动不该把登录入口按死到刷新页面为止
     state.registering = false;
     $("authGo").disabled = false;
   }
 }
+
+/* ---------------- 密码找回（三步，同一层里换字段） ----------------
+ * 第 2 步收答案、第 3 步收新密码，但两者一次提交：分开验答案就等于给外人一个
+ * "这个答案对不对"的 oracle，免凭据端点上不该有这种东西。
+ */
+let rcStep = 1;
+let rcName = "";
+
+function renderRecovery() {
+  const rows = { rcQuestionRow: rcStep >= 2, rcAnswerRow: rcStep >= 2,
+                 rcNewRow: rcStep >= 3, rcNew2Row: rcStep >= 3 };
+  for (const [id, on] of Object.entries(rows)) $(id).classList.toggle("hidden", !on);
+  $("rcUser").disabled = rcStep > 1;
+  $("rcSub").textContent = rcStep === 1
+    ? "输入用户名，我们把它记着的找回问题念给你听。"
+    : rcStep === 2 ? "回答下面这个问题。答案和新密码一起提交。"
+    : "设一个新密码，至少 8 位。改密之后每台设备都要重新登录。";
+  $("rcGo").textContent = rcStep === 3 ? "改密码并去登录" : "下一步";
+}
+
+function rcFail(text) {
+  const hint = $("rcHint");
+  hint.textContent = text;
+  hint.classList.add("err");
+}
+
+async function submitRecovery() {
+  if (state.registering) return;
+  const hint = $("rcHint");
+  hint.classList.remove("err");
+  state.registering = true;
+  $("rcGo").disabled = true;
+  try {
+    if (rcStep === 1) {
+      rcName = $("rcUser").value.trim();
+      if (!rcName) { rcFail("先填用户名"); return; }
+      hint.textContent = "查一下…";
+      const res = await API.recovery(rcName);
+      $("rcQuestion").value = res.question;
+      if (!res.recovery_available) {
+        // 服务端对"没这个人"与"没设找回"说同一句话，这里也只能照实转述那一句
+        rcFail(res.question);
+        return;
+      }
+      rcStep = 2;
+      hint.textContent = "";
+      renderRecovery();
+    } else if (rcStep === 2) {
+      if (!$("rcAnswer").value.trim()) { rcFail("答案不能空着"); return; }
+      rcStep = 3;
+      hint.textContent = "";
+      renderRecovery();
+    } else {
+      const pw = $("rcNew").value;
+      if (pw !== $("rcNew2").value) { rcFail("两次输入的新密码不一样"); return; }
+      hint.textContent = "改密码中…";
+      await API.reset(rcName, $("rcAnswer").value.trim(), pw);
+      // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去
+      $("authUser").value = rcName;
+      $("authPass").value = "";
+      showAuth("login");
+      $("authHint").textContent = "密码已改，用新密码登录即可（之前登录的设备都会掉线）";
+    }
+  } catch (e) {
+    rcFail(e.message);
+  } finally {
+    state.registering = false;
+    $("rcGo").disabled = false;
+  }
+}
+
+function hideAuth() { $("authModal").classList.add("hidden"); }
 
 /** 拿到令牌之后的固定动作：落地凭据、重取身份与数据、收起这层。
  *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
@@ -233,6 +331,11 @@ function applyRole() {
   const admin = isAdmin();
   document.querySelectorAll("[data-admin-only]")
     .forEach((el) => el.classList.toggle("hidden", !admin));
+  const name = (state.me || {}).username || "";
+  $("userName").textContent = name || "未登录";
+  /* 头像只取首字母：真实头像要么上传照片（多一处可写文件），要么引外部服务，
+     都不值这一行的信息量 */
+  $("userAvatar").textContent = name ? name[0] : "·";
   $("whoInfo").textContent = state.me
     ? `当前身份：${state.me.username}（${admin ? "管理员" : "普通用户"}）`
     : "未登录：用用户名和密码注册一个，或直接把管理员给您的令牌填在下面";
@@ -1150,29 +1253,6 @@ function autosize(el) {
  * 两个字段。两条路都保留是因为场景不同——首屏是"刚打开就得先过这道"，设置页是
  * "已经登录过、想换/再加一个账号"。
  */
-async function registerFromSettings() {
-  if (state.registering) return;
-  const hint = $("registerHint");
-  const fail = (text) => { hint.textContent = text; hint.classList.add("err"); };
-  const username = $("regUsername").value.trim();
-  const password = $("regPass").value;
-  hint.classList.remove("err");
-  if (!username || !password) { fail("用户名和密码都要填"); return; }
-
-  state.registering = true;
-  $("registerBtn").disabled = true;
-  hint.textContent = "注册中…";
-  try {
-    const res = await API.register(username, password);
-    $("regPass").value = "";
-    await afterAuth(res);
-  } catch (e) {
-    fail("注册失败：" + e.message);
-  } finally {
-    state.registering = false;
-    $("registerBtn").disabled = false;
-  }
-}
 
 /* ---------------- 事件绑定 ---------------- */
 function bind() {
@@ -1184,7 +1264,7 @@ function bind() {
   $("navMemory").onclick = () => { openSettings("memory"); closeSidebar(); };
   // 不传 tab：落在哪一页由 openSettings 按角色决定（管理员=模型服务，其他人=连接）。
   // 收起侧栏是必须的：手机上它是抽屉，不收就是一片遮罩挡在面板前面。
-  $("navSettings").onclick = () => { openSettings(); closeSidebar(); };
+  $("whoRow").onclick = () => { openSettings(); closeSidebar(); };
   $("themeBtn").onclick = () => { pref.theme = pref.theme === "dark" ? "light" : "dark"; applyTheme(); };
   $("sessionSearch").oninput = (e) => { state.filter = e.target.value; renderSessions(); };
 
@@ -1290,9 +1370,11 @@ function bind() {
     pref.token = $("tokenInput").value.trim();
     location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
   };
-  $("registerBtn").onclick = registerFromSettings;
+  $("openRegister").onclick = () => { closeSettings(); showAuth("register"); };
   $("authEye").onclick = toggleAuthPass;
-  $("authForgot").onclick = showForgotHint;
+  $("authForgot").onclick = () => showAuthView("recover");
+  $("rcBack").onclick = () => showAuthView("auth");
+  $("recoverForm").onsubmit = (e) => { e.preventDefault(); submitRecovery(); };
   $("authSwitch").onclick = () => setAuthMode(authMode === "register" ? "login" : "register");
   // 提交挂在 form 上而不是某个按钮上：两个框里按回车都该等于点主按钮。
   $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };

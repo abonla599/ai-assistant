@@ -42,9 +42,11 @@ def _budget_used() -> int:
     return sum(len(v) for v in _FAILS.values())
 
 
-def _reg(username, password=PW, ip=HOME):
+from tests.conftest import RECOVERY_FIELDS as RECOVERY
+
+def _reg(username, password=PW, ip=HOME, **extra):
     return client.post("/v1/auth/register",
-                       json={"username": username, "password": password},
+                       json={"username": username, "password": password, **RECOVERY, **extra},
                        headers={"CF-Connecting-IP": ip})
 
 
@@ -158,12 +160,12 @@ def test_x_forwarded_for_cannot_buy_a_fresh_budget():
 
     # 不带 CF 头时来源退回对端地址（TestClient 里是一个固定值），先把那个桶灌满
     for i in range(CAP):
-        res = client.post("/v1/auth/register", json={"username": f"丙屋{i}", "password": PW})
+        res = client.post("/v1/auth/register", json={"username": f"丙屋{i}", "password": PW, **RECOVERY})
         assert res.status_code == 200, res.text
     assert client.post("/v1/auth/register",
-                       json={"username": "丙屋超额", "password": PW}).status_code == 429
+                       json={"username": "丙屋超额", "password": PW, **RECOVERY}).status_code == 429
     spoofed = client.post("/v1/auth/register",
-                          json={"username": "伪造来源", "password": PW},
+                          json={"username": "伪造来源", "password": PW, **RECOVERY},
                           headers={"X-Forwarded-For": "198.51.100.77"})
     assert spoofed.status_code == 429, "伪造 XFF 换不来一个新桶"
 
@@ -211,7 +213,7 @@ def test_trailing_slash_cannot_dodge_the_throttle():
     # 斜杠会经 307 归一化到真实端点，TestClient 跟随重定向，失败照常计数
     for i in range(MAX_FAILURES_PER_WINDOW):
         res = client.post("/v1/auth/register/",
-                          json={"username": "被斜杠撞的人", "password": PW},
+                          json={"username": "被斜杠撞的人", "password": PW, **RECOVERY},
                           headers={"CF-Connecting-IP": HOME})
         assert res.status_code == 409, f"第 {i} 次斜杠尝试 -> {res.status_code}"
     assert _reg("斜杠后来者").status_code == 429, "斜杠攒下的失败必须作用到无斜杠路径上"
@@ -222,7 +224,7 @@ def test_trailing_slash_cannot_dodge_the_throttle():
     for i in range(MAX_FAILURES_PER_WINDOW):
         assert _reg("被斜杠撞的人").status_code == 409
     slashed = client.post("/v1/auth/register/",
-                          json={"username": "斜杠正当用户", "password": PW},
+                          json={"username": "斜杠正当用户", "password": PW, **RECOVERY},
                           headers={"CF-Connecting-IP": HOME})
     assert slashed.status_code == 429, "斜杠变体必须与真实端点共用同一个限流窗口"
 
@@ -233,10 +235,10 @@ def test_trailing_slash_cannot_dodge_the_throttle():
 def test_login_issues_a_working_token(client, enforced):
     """必须在 enforced 下验：disabled 模式中间件不解析凭据，me 只会回本机管理员。"""
     res = client.post("/v1/auth/register",
-                      json={"username": "登录的人", "password": PW},
+                      json={"username": "登录的人", "password": PW, **RECOVERY},
                       headers={"CF-Connecting-IP": "192.0.2.50"})
     assert res.status_code == 200, res.text
-    login = client.post("/v1/auth/login", json={"username": "登录的人", "password": PW},
+    login = client.post("/v1/auth/login", json={"username": "登录的人", "password": PW, **RECOVERY},
                         headers={"CF-Connecting-IP": "192.0.2.50"})
     assert login.status_code == 200, login.text
     hdrs = {"Authorization": "Bearer " + login.json()["token"]}
@@ -303,7 +305,7 @@ def test_registered_token_works_on_every_protected_route(client, enforced):
     这条是这层接线唯一的端到端证据。
     """
     res = client.post("/v1/auth/register",
-                      json={"username": "自助注册", "password": PW},
+                      json={"username": "自助注册", "password": PW, **RECOVERY},
                       headers={"CF-Connecting-IP": "192.0.2.20"})
     assert res.status_code == 200, res.text
     hdrs = {"Authorization": "Bearer " + res.json()["token"]}
@@ -486,7 +488,7 @@ def test_no_endpoint_can_grant_the_admin_role():
     assert "role" not in fields, "请求体模型里出现 role 字段，就是提权入口"
 
     res = client.post("/v1/auth/register",
-                      json={"username": "想当管理员", "password": PW, "role": "admin"},
+                      json={"username": "想当管理员", "password": PW, "role": "admin", **RECOVERY},
                       headers={"CF-Connecting-IP": "192.0.2.30"})
     assert res.status_code == 200, res.text
     assert res.json()["role"] == "user", "多塞的 role 必须被忽略，不能被采纳"

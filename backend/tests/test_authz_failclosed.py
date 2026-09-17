@@ -17,6 +17,7 @@ import pytest
 
 from app.core.auth import AuthStore, Principal
 import app.core.authz as authz
+from tests.conftest import RECOVERY_FIELDS
 
 
 @pytest.fixture
@@ -108,7 +109,8 @@ def test_register_stays_public(wired, monkeypatch):
     # 404（路由没了）和 500（注册逻辑炸了）都算通过。
     monkeypatch.setenv("ACCESS_TOKEN", "")
     res = client.post("/v1/auth/register",
-                         json={"username": "公开注册", "password": "correct-horse-battery"})
+                         json={"username": "公开注册", "password": "correct-horse-battery",
+            **RECOVERY_FIELDS})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["role"] == "user" and body["user_id"].startswith("u_")

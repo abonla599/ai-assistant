@@ -164,6 +164,12 @@ def sample_messages():
     return [{"role": "user", "content": "你好"}]
 
 
+# 注册请求体现在要四格齐全：用户名、密码、找回问题、答案。每个测试文件各抄一份
+# 迟早会有一份抄漏，于是"少一格也算过"的假绿就回来了。
+RECOVERY_FIELDS = {"security_question": "我小学的校名？",
+                   "security_answer": "河海大学附属小学"}
+
+
 @pytest.fixture
 def enforced(monkeypatch, tmp_path):
     """真实鉴权路径。

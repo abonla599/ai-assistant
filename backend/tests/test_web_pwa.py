@@ -248,70 +248,71 @@ def _function_body(src: str, name: str) -> str:
 def test_registration_ui_elements_wired():
     """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。
 
-    现在有两个入口（首屏弹层 + 设置页），所以两边的元素都要逐个对上：
-    少一个 id 不会报错，只会让那个按钮点了没反应。
+    两个入口（首屏弹层 + 设置页）的元素都要逐个对上：少一个 id 不会报错，
+    只会让那个按钮点了没反应。
 
-    首屏这层按参考图重排过：登录/注册不再是两个 tab，而是表单下面那对
-    「忘记密码 / 立即注册」文字链接（切换模式的是后者）；密码框里多了一个眼睛，
-    右侧多一张说明卡。旧的 authTab* 必须一起消失——留着就分不清哪套在用。
+    首屏这一层现在有三块内容：登录/注册（注册比登录多三格——找回问题、答案、
+    确认密码）、用户名那一格下面的就地红字、以及同层互换的三步找回表单。
+    被删掉的东西也必须真的没了：说明卡（authSide/authHost）与旧的 tab 入口。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     defined = set(re.findall(r'id="([^"]+)"', html))
-    for el in ("regUsername", "regPass", "registerBtn",
-               "authModal", "authUser", "authPass", "authGo", "authHint",
-               "authSwitch", "authForgot", "authEye", "authSide"):
+    for el in ("openRegister",
+               "authModal", "authUser", "authPass", "authGo", "authHint", "authEye",
+               "authSwitch", "authUserErr", "authExtra", "authQuestion", "authAnswer",
+               "authPass2", "recoverForm", "rcUser", "rcQuestion", "rcAnswer",
+               "rcNew", "rcNew2", "rcGo", "rcHint", "rcBack",
+               "whoRow", "userName", "userAvatar"):
         assert f'$("{el}")' in js, f"app.js 引用了 #{el} 但 HTML 未定义"
         assert el in defined, f"HTML 里没有 #{el}"
-    assert "authTab" not in html and "authTab" not in js, "旧的 tab 还在：两套入口并存"
-
-    side = re.search(r'<aside class="auth-side"[\s\S]*?</aside>', html)
-    assert side, "说明卡不在了"
-    assert "/admin" not in side.group(0), \
-        "卡里又写出管理员重置的位置了：那件事归「忘记密码」链接说，首屏不该指运维入口"
-    assert "用户名自己定" not in side.group(0), "卡里重复了表单上方那句副标题"
+    for gone in ("authTab", "authSide", "authHost", "navSettings",
+                  "regUsername", "regPass", "registerBtn", "registerFromSettings"):
+        assert gone not in html and gone not in js, f"{gone} 还在：删剩的半套比没删更难读"
 
 
-def test_settings_has_one_obvious_entry_pinned_to_the_sidebar_foot():
-    """设置面板有五个页签，原先却没有一个叫「设置」的入口——只能从「模型服务」
-    「长期记忆」和顶栏那个角色 chip 分别钻进去，「连接」与「关于」在手机上几乎
-    点不到（只有报错时程序自己弹）。所以补一个明确的入口，并钉住三件事：
 
-    1. 图标是内联 SVG。`⚙` 这个字符在部分字体里渲染成彩色 emoji、在部分里直接
-       是方块，而这一层图标（＋ ◈ ◐）全是文字字形——齿轮偏偏不能跟着这么写。
-    2. 位置在会话列表之后、sb-foot 之前。会话列表是 flex:1 会长高，放这里等于
-       焊在底部；放到顶部那三条里就跟「新对话」抢视线，也不解决问题。
-    3. 点了要收起侧栏：手机上它是抽屉，不收就是一片遮罩挡住面板。
+def test_the_sidebar_foot_is_one_row_that_opens_settings():
+    """侧栏底部那一行同时是"我是谁"和"进设置"，两件事不必再占两个位置。
+
+    原先"设置"是导航里单独一条（#navSettings），身份只在弹层里看得见；而
+    "这台机器上是谁在用"恰恰是最常被问的事。合成一行之后要钉住四件事：
+
+    1. 齿轮是内联 SVG。`⚙` 在部分字体里渲染成彩色 emoji、在部分里是方块。
+    2. 整行是个 button 且真的开设置、收侧栏（手机上侧栏是抽屉，不收就是一片遮罩）。
+    3. 头像取用户名首字母，未登录时不能留空格子。
+    4. 「◐ 主题」从这一行搬走了，它得还在设置弹层里，别搬丢了。
     """
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    row = re.search(r'<button[^>]*id="navSettings"[\s\S]*?</button>', html)
-    assert row, "侧栏里没有 #navSettings 这个入口"
-    assert "<svg" in row.group(0), "设置入口没有自己的图标"
+    row = re.search(r'<button class="who-row" id="whoRow"[\s\S]*?</button>', html)
+    assert row, "侧栏底部没有 #whoRow 这一行"
+    assert "<svg" in row.group(0), "齿轮没有自己的图标"
     assert "⚙" not in html and "⚙" not in js, "用了 ⚙ 字形：它会渲染成 emoji 或方块"
-    assert html.find('id="sessionGroups"') < row.start() < html.find('class="sb-foot"'), \
-        "入口没钉在侧栏底部"
-    assert re.search(r'\$\("navSettings"\)\.onclick\s*=\s*\(\)\s*=>\s*\{\s*openSettings\(\);\s*closeSidebar\(\);', js), \
+    assert html.find('id="sessionGroups"') < row.start(), "用户行没钉在会话列表之后"
+    assert re.search(r'\$\("whoRow"\)\.onclick\s*=\s*\(\)\s*=>\s*\{\s*openSettings\(\);\s*closeSidebar\(\);', js), \
         "点击没有同时打开设置并收起侧栏"
+    assert '$("userAvatar").textContent = name ? name[0]' in js, "头像没取首字母"
+    about = re.search(r'data-pane="about"[\s\S]*?</section>', html).group(0)
+    assert 'id="themeBtn"' in about, "主题按钮从侧栏搬走之后没落到设置弹层里"
 
 
-def test_auth_layer_keeps_the_two_column_layout_and_no_dead_rules():
-    """版式的两条硬约束写在 CSS 里，只能在这里钉：没有浏览器测试跑得到它。
 
-    宽屏两列、窄屏（<=860px）必须塌回单列——手机是这产品的主要入口，两列不塌陷
-    就等于把表单挤成一条缝。旧的 .auth-tabs 规则一并删掉：留着的那条不是样式，
-    是"下一次改版不知道哪套还在用"的起点。
+
+def test_auth_layer_is_one_column_with_no_dead_rules():
+    """说明卡整块删掉之后，这一层就是单列居中；被删的东西不许在样式表里留尸。
+
+    留着的那几条不是样式，是"下一次改版不知道哪套还在用"的起点。就地错误
+    （.field-err）是这次新加的信道，所以它得真有一条规则，不能靠默认颜色。
     """
     css = (STATIC / "style.css").read_text(encoding="utf-8")
-    assert ".auth-grid" in css and ".auth-side" in css, "两列版式不在了"
-    # 样式表里有多段 @media (max-width: 860px)（侧栏一段、首屏一段），
-    # 只取"管首屏的那一段"来判，否则断言会打在毫不相干的块上。
-    narrow = [b for b in re.findall(r"@media\s*\(max-width:\s*860px\)([\s\S]*?)\n\}", css)
-              if ".auth-grid" in b]
-    assert narrow, "窄屏没有把两列塌成单列"
-    assert not re.search(r"\.auth-side[^{]*\{[^}]*display:\s*none", narrow[0]), \
-        "窄屏又把说明卡藏了：手机上是决定要显示在表单下方的"
-    assert ".auth-tabs" not in css and ".auth-tab" not in css, "tab 的死规则还留在样式表里"
+    assert re.search(r"\.auth-inner \{[^}]*max-width: 420px", css), "登录层不是单列居中"
+    assert ".field-err" in css and "--danger" in css, "就地红字没有自己的规则"
+    for dead in (".auth-grid", ".auth-side", ".auth-host", ".auth-tabs", ".auth-tab",
+                 ".conn-text", ".sb-config"):
+        assert dead not in css, f"{dead} 还留在样式表里"
+
+
 
 
 def test_the_password_eye_reveals_only_that_field():
@@ -330,18 +331,27 @@ def test_the_password_eye_reveals_only_that_field():
     assert '$("authEye").onclick = toggleAuthPass' in js
 
 
-def test_forgot_password_says_so_instead_of_calling_a_missing_endpoint():
-    """没有自助改密（这是当初写进部署文档的取舍），所以这个链接只许说人话。
+def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
+    """「忘记密码」现在真的能改密，所以判据从"别乱发请求"换成"按顺序发、少发一次都不行"。
 
-    它一旦发出任何请求，就是把"我们其实做不到"伪装成"正在处理"；正确的一句话
-    是让人去找管理员，因为 /admin 里确实有重置令牌/停用/删除这些能办事的按钮。
+    三件事必须钉住：
+    1. 答案与新密码一次提交。分开验答案 = 给外人一个"这个答案对不对"的 oracle，
+       免凭据端点上不该有这种东西；
+    2. 新密码两格不一致时根本不该发请求（那是纯前端能判的事）；
+    3. 改密成功之后回到登录而不是直接放人进去——服务端此刻已经把这个人名下
+       所有令牌作废了，界面若继续"已登录"就是在撒谎。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    body = _function_body(js, "showForgotHint")
-    assert "API." not in body and "fetch(" not in body, "忘记密码不该发出任何请求"
-    assert "admin" in body.lower() and "重置" in body, f"没指路到管理员：{body}"
-    assert '$("authHint")' in body
-    assert '$("authForgot").onclick = showForgotHint' in js
+    body = _function_body(js, "submitRecovery")
+    assert "API.recovery" in body and "API.reset" in body
+    assert body.index('$("rcNew2").value') < body.index("API.reset"), \
+        "确认密码没在发请求之前比对"
+    assert "showAuth(\"login\")" in body, "改密成功要回到登录：令牌已全部作废，不能装作还登录着"
+    assert "API.reset" in body.split("showAuth")[0], "登录视图的切换该在改密之后"
+    assert '$("authForgot").onclick = () => showAuthView("recover")' in js
+    assert '$("recoverForm").onsubmit' in js, "找回表单没有提交入口：三步流程走不动"
+
+
 
 
 def test_memory_calls_no_longer_send_user_id():
@@ -355,31 +365,37 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
     请求形状与 app.js 读的那几个响应键一起断，且响应是真的从 /v1/auth/register
     拿的，不是照抄一份字典——改名（token→access_token 这种）当天就该红。
     """
-    from app.core import authz as authz_mod
-    from app.core.auth_router import LoginRequest, RegisterRequest
+    from app.core.auth_router import RecoveryRequest, RegisterRequest, ResetRequest
 
     api = (STATIC / "api.js").read_text(encoding="utf-8")
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
 
-    assert set(RegisterRequest.model_fields) == {"username", "password"}
-    assert set(LoginRequest.model_fields) == {"username", "password"}
-    m = re.search(r"register:\s*\(([^)]*)\)\s*=>\s*request\(\"/v1/auth/register\"", api)
-    assert m, "api.js 的 register 封装形状变了，这条契约要重看"
-    assert [p.strip() for p in m.group(1).split(",")] == ["username", "password"]
-    lg = re.search(r"login:\s*\(([^)]*)\)\s*=>\s*request\(\"/v1/auth/login\"", api)
-    assert lg, "api.js 没有 login 封装：注册之后就没有第二条回到系统里的路"
-    assert [p.strip() for p in lg.group(1).split(",")] == ["username", "password"]
+    assert set(RegisterRequest.model_fields) == {"username", "password",
+                                                 "security_question", "security_answer"}
+    assert set(RecoveryRequest.model_fields) == {"username"}
+    assert set(ResetRequest.model_fields) == {"username", "answer", "new_password"}
+    for name, fields in (("register", RegisterRequest), ("recovery", RecoveryRequest),
+                         ("reset", ResetRequest)):
+        m = re.search(r"%s:\s*\(([^)]*)\)\s*=>" % name, api)
+        assert m, f"api.js 里没有 {name} 封装"
+        assert [p.strip() for p in m.group(1).split(",")] == list(fields.model_fields), \
+            f"{name} 的参数名与后端请求模型不一致"
     assert re.search(r'\bme:\s*\(\)\s*=>\s*request\("/v1/auth/me"\)', api), \
         "前端没有 me 封装：角色就只能靠猜"
 
-    enforced("垫底用户")
+    enforced("发码的人")
     res = client.post("/v1/auth/register",
-                         json={"username": "字段名契约", "password": "correct-horse-battery"})
+                      json={"username": "字段名契约", "password": "correct-horse-battery",
+                            "security_question": "我小学的校名？",
+                            "security_answer": "河海大学附属小学"})
     assert res.status_code == 200, res.text
     body = res.json()
     for key in ("token", "user_id", "username"):
         assert key in body, f"后端没回 {key}：{sorted(body)}"
-        assert f"res.{key}" in js, f"后端回的是 {key}，前端读的却是别的名字"
+
+    rec = client.post("/v1/auth/recovery", json={"username": "字段名契约"})
+    assert rec.status_code == 200 and rec.json()["recovery_available"] is True
+    assert rec.json()["question"] == "我小学的校名？"
+
 
 
 def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
@@ -502,9 +518,7 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
     assert re.search(r"streaming: false,\s*\n\s*registering: false", js), \
         "state 里没有了 registering：在途闸门大概退回了只靠 disabled 一处"
 
-    for name, btn, api_call in (
-            ("submitAuth", "authGo", "API.register"),
-            ("registerFromSettings", "registerBtn", "API.register")):
+    for name, btn, api_call in (("submitAuth", "authGo", "API.register"),):
         body = _function_body(js, name)
         assert re.search(r"if \(state\.registering\) return", body), f"{name} 不再挡双击"
         assert body.index("if (state.registering) return") < body.index(api_call), \
@@ -515,13 +529,10 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
         assert f'$("{btn}").disabled = false' in unlock and "state.registering = false" in unlock, \
             f"{name} 的解锁不在 finally 里：失败一次就再也点不动了"
 
-    # 成功之后两个密码输入框都不许留下密码：首屏那个由共用的 afterAuth 清，设置页
-    # 那个有自己的字段、必须自己清。失败时故意留着——逼人重敲一遍密码只会把人赶去
+    # 成功之后密码框不许留下内容。失败时故意留着——逼人重敲一遍密码只会把人赶去
     # 用 "12345678"，安全上是净损失。
     tail = _function_body(js, "afterAuth")
     assert '$("authPass").value = ""' in tail, "首屏那格的密码没人清"
-    assert '$("regPass").value = ""' in _function_body(js, "registerFromSettings"), \
-        "设置页那格的密码没人清"
     # 收尾动作的先后是硬约束：先清输入框再写 pref.token 的话，中途抛异常就把
     # 唯一一次拿到令牌的机会连同输入一起丢了。
     assert tail.index("pref.token = res.token") < tail.index('$("authPass").value = ""'), \

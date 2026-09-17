@@ -45,6 +45,16 @@ BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
 LAST_USED_FLUSH_AFTER = timedelta(hours=1)
 
 _LOGIN_FAIL = "用户名或密码不正确"
+# 找回流程的两句话是安全边界，不是文案：
+#   NO_RECOVERY 同时用于"查无此人"与"这个人没开找回"——两者同形，这个免凭据
+#     端点才不会顺手报出"哪些用户名真实存在"；
+#   RESET_FAIL 同时用于"答案错"、"没开找回"、"查无此人"与"账号被停用"。
+NO_RECOVERY = "这个用户名没有设置密码找回"
+RESET_FAIL = "答案不正确"
+
+QUESTION_MAX = 60
+ANSWER_MIN = 2
+ANSWER_MAX = 64
 
 
 def _now_dt() -> datetime:
@@ -86,8 +96,38 @@ def _check_password(password: str, stored) -> bool:
 
 # "用户名不存在"与"密码错"必须连时间都一样，否则响应快慢本身就是一份用户名名单。
 # 这个固定摘要只在 import 时算一次，让"查无此人"那一支也付一次 bcrypt 的代价。
+# 找回密码用的答案走同一枚摘要：答案错、没开找回、查无此人三件事同样不许有快慢差。
 _DUMMY_PW_HASH = "bcrypt:" + bcrypt.hashpw(_prehash("timing-equalizer"),
                                            bcrypt.gensalt()).decode("ascii")
+
+
+def _answer_key(answer: str) -> str:
+    """比对用的宽松归一化：人会输入 "Hehai University " 而不是精确串。
+
+    这里刻意**不**做长度校验——"答案太短"这种话一旦出现在找回流程里，
+    它就成了一条新的、可区分的失败措辞。严格校验只属于注册（_check_answer_shape）。
+    """
+    return (answer or "").strip().casefold()
+
+
+def _check_answer_shape(answer: str) -> str:
+    key = _answer_key(answer)
+    if len(key) < ANSWER_MIN:
+        raise AuthError(f"答案至少 {ANSWER_MIN} 个字符")
+    if len(key) > ANSWER_MAX:
+        raise AuthError(f"答案最长 {ANSWER_MAX} 个字符")
+    return key
+
+
+def _check_question_shape(question: str) -> str:
+    cleaned = (question or "").strip()
+    if not cleaned:
+        raise AuthError("找回问题不能为空")
+    if len(cleaned) > QUESTION_MAX:
+        raise AuthError(f"找回问题最长 {QUESTION_MAX} 个字符")
+    if re.search(r"[\x00-\x1f\x7f]", cleaned):
+        raise AuthError("找回问题含不可见字符")
+    return cleaned
 
 
 def _as_hash_bytes(value) -> bytes:
@@ -119,18 +159,21 @@ class Principal:
 
 
 class AuthError(Exception):
-    """注册/登录失败。
+    """注册/登录/找回失败。
 
     reason 是面向用户的那句话。登录失败不分"没这个用户"还是"密码错"——两句
     必须逐字节相同（test_auth.py 钉着），否则免凭据的登录端点就是用户名探测器。
-    注册端的"该用户名已被占用"是有意保留的实话（改名是用户自己能解决的事），
-    但它现在没有邀请码挡在前面，所以那份预算改由 HTTP 层按 IP 计费——
-    见 auth_router 里 _note_failure 的口径。
+    注册端的"该用户名已存在"是有意保留的实话（改名是用户自己能解决的事），
+    但它前面没有闸门，所以那份预算改由 HTTP 层按真实 IP 计费（AuthError.taken）。
+
+    taken 必须显式带着：HTTP 层拿它决定"这句要不要进限流账本"。靠 reason 里
+    有没有某个字来判，等于把一条安全预算挂在文案上——改文案的那天计费静默失效。
     """
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, taken: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.taken = taken
 
 
 def _quarantine(path: str, why: str) -> None:
@@ -243,14 +286,27 @@ class AuthStore:
             del tokens[:len(tokens) - MAX_SESSION_TOKENS]
         return token
 
-    def register(self, username: str, password: str):
-        """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。"""
+    def register(self, username: str, password: str, security_question: str = None,
+                 security_answer: str = None):
+        """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。
+
+        找回问题与答案在这里是**可选**的，因为真实库里就有它们之前注册的账号；
+        强制"新注册必须填"的是 HTTP 层的 RegisterRequest（见 auth_router），
+        那里少一个字段就是 422。半套凭据在存储层同样被拒：界面会以为能自助，
+        走到第二步才发现答不上来。
+        """
         with self._lock:
             cleaned = self._normalize_username(username)
             pw = self._check_password_shape(password)
+            carrying = [security_question is not None, security_answer is not None]
+            if any(carrying) and not all(carrying):
+                raise AuthError("找回问题与答案要一起填")
+            question = _check_question_shape(security_question) if all(carrying) else None
+            answer = _check_answer_shape(security_answer) if all(carrying) else None
+
             lc = cleaned.casefold()
             if any(u.get("username_lc") == lc for u in self._users.values()):
-                raise AuthError("该用户名已被占用")
+                raise AuthError("该用户名已存在", taken=True)
 
             user_id = self._new_user_id()
             record = {
@@ -264,6 +320,10 @@ class AuthStore:
                 "created_at": _now(),
                 "last_used_at": _now(),
             }
+            if question is not None:
+                record["security_question"] = question
+                # 答案与密码同一个慢哈希：它往往是个能猜的地名，熵比密码还低。
+                record["answer_hash"] = hash_password(answer)
             self._users[user_id] = record
             token = self._issue_token(record)
             self._flush()
@@ -294,6 +354,47 @@ class AuthStore:
             self._flush()
         return Principal(user_id=record["user_id"], username=record["username"],
                          role=record.get("role", "user")), token
+
+    def recovery_question(self, username: str) -> str:
+        """报出这个人的找回问题；没得报的两种情况说同一句话。
+
+        返回问题文本本身就是泄露面（"这个用户名开了找回"），所以这里只保留那一
+        比特：查无此人与开了账号但没设找回问题的人，拿到逐字节相同的 NO_RECOVERY。
+        HTTP 层再按真实 IP 给这个端点计失败预算（见 auth_router）。
+        """
+        want = (username or "").strip().casefold()
+        with self._lock:
+            record = next((u for u in self._users.values()
+                           if u.get("username_lc") == want), None) or {}
+            if record.get("disabled"):
+                # 停用的人不该在这里被认出来：那等于告诉别人"这个号存在且被停了"。
+                return NO_RECOVERY
+            return record.get("security_question") or NO_RECOVERY
+
+    def reset_password(self, username: str, answer: str, new_password: str):
+        """答对找回问题就换密码，并把这个人名下所有会话令牌一起作废。
+
+        两处顺序是安全属性，不是风格：
+        1. 新密码的形状先查，答案后验。反过来时"密码太短"会变成"答案猜对了"的
+           确认信号，一个免凭据端点就多了一比特可问的东西；
+        2. 改密必须清令牌。"我改了密码，因为手机丢了"是这条路径存在的理由，
+           旧令牌还活着的话它就是个假动作。
+        """
+        pw = self._check_password_shape(new_password)
+        want = (username or "").strip().casefold()
+        with self._lock:
+            record = next((u for u in self._users.values()
+                           if u.get("username_lc") == want), None)
+            stored = (record or {}).get("answer_hash") or _DUMMY_PW_HASH
+            if not _check_password(_answer_key(answer), stored):
+                # 答案错、没开找回、查无此人：三条走同一句、同一份 bcrypt 代价
+                raise AuthError(RESET_FAIL)
+            if record.get("disabled"):
+                raise AuthError(RESET_FAIL)
+            record["pw_hash"] = hash_password(pw)
+            record["tokens"] = []
+            record["last_used_at"] = _now()
+            self._flush()
 
     def resolve(self, token: str):
         if not token:

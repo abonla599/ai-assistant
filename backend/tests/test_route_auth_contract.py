@@ -47,6 +47,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.routing import APIRoute, APIWebSocketRoute, get_dependant
 from fastapi.testclient import TestClient
 from starlette.requests import Request
+
+from tests.conftest import RECOVERY_FIELDS
 from starlette.websockets import WebSocket
 
 from app.core import authz
@@ -182,12 +184,36 @@ def test_every_v1_route_declares_an_identity_dependency():
 def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     """免凭据端点必须逐个点名，多一条就红。
 
-    开放注册之后这里是两条：注册与登录。它们不是"漏了鉴权"——没有身份的人本来
-    就得能进来拿身份。但每一条都是攻击面，所以这条钉的是"不许悄悄多第三条"，
-    而这两条自己的防线在 auth_router（真实 IP 限流）与 auth.login（三种失败同一
-    句话、同样的耗时）里，不在这里。
+    现在是四条：注册、登录，以及密码找回的两步（报出问题、验答案改密）。它们不是
+    "漏了鉴权"——没有身份的人本来就得能进来拿身份、也得能在忘了密码时自救。但每
+    一条都是攻击面，所以这条钉的是"不许悄悄多第五条"；这四条自己的防线不在这里，
+    在 auth_router（真实 IP 限流、几种失败同一句话）与 auth 存储层（同形措辞与
+    同形耗时）里。
     """
-    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login"}
+    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login",
+                            "/v1/auth/recovery", "/v1/auth/reset"}
+
+
+def test_the_two_recovery_steps_are_reachable_without_credentials(client, enforced):
+    """忘了密码的人手里没有任何凭据——这两步要凭据就是自救路径不存在。
+
+    与注册那条对称：先证明真路径免凭据可达，再证明"免凭据"没有滑成前缀放行。
+    """
+    enforced("垫底用户")
+    res = client.post("/v1/auth/recovery", json={"username": "没开找回的"})
+    assert res.status_code == 200, res.text
+    assert res.json()["question"]
+
+    res = client.post("/v1/auth/reset",
+                      json={"username": "没开找回的", "answer": "猜一个",
+                            "new_password": "correct-horse-battery"})
+    assert res.status_code == 401, f"答案不对必须 401，而不是被鉴权层挡成 401 之外的话：{res.text}"
+    assert res.json()["detail"] == "答案不正确"
+
+    # 前缀化就漏：带斜杠与多一段子路径都不许免凭据
+    for path in ("/v1/auth/recovery/", "/v1/auth/reset/anything"):
+        res = client.post(path, json={"username": "没开找回的"})
+        assert res.status_code == 401, f"{path} 白拿到了免凭据通道 -> {res.status_code}"
 
 
 # ---------- 这把锁不能是空的 ----------
@@ -409,7 +435,8 @@ def test_register_itself_is_reachable_without_credentials(client, enforced):
     """
     enforced("垫底用户")
     res = client.post("/v1/auth/register",
-                         json={"username": "裸请求注册", "password": "open-reg-pw-123"})
+                         json={"username": "裸请求注册", "password": "open-reg-pw-123",
+                      **RECOVERY_FIELDS})
     assert res.status_code == 200, res.text
     assert res.json()["role"] == "user"
     token = res.json()["token"]

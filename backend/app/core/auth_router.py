@@ -3,7 +3,7 @@
 这里是身份存储（app/core/auth.py）与 HTTP 之间唯一的一层，规则三条：
 1. 对外说话保守。登录失败只有一句"用户名或密码不正确"——区分"没这个用户"和
    "密码错"，就把这个免凭据端点变成了用户名探测器；存储层内部也刻意不分开
-   （AuthError 只带那一句，见 auth.login）。注册端的"该用户名已被占用"是有意
+   （AuthError 只带那一句，见 auth.login）。注册端的"该用户名已存在"是有意
    保留的实话（改名是用户自己能解决的事），但邀请码退役之后它前面再没有闸门，
    所以这句改由**按真实 IP 计费**来限制——见 _note_failure 的口径。
 2. 响应按字段白名单出。存储层的记录带着 pw_hash、tokens 和内建的 username_lc，
@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core import authz
-from app.core.auth import AuthError
+from app.core.auth import NO_RECOVERY, RESET_FAIL, AuthError
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -114,11 +114,25 @@ def _too_many(retry_after: int) -> HTTPException:
 class RegisterRequest(BaseModel):
     username: str
     password: str
+    # 必填：存储层允许记录没有找回凭据（真实库里就有那之前的老账号），但经
+    # API 新注册的人必须留下它，否则"忘记密码"这条路对新人永远走不通。
+    security_question: str
+    security_answer: str
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class RecoveryRequest(BaseModel):
+    username: str
+
+
+class ResetRequest(BaseModel):
+    username: str
+    answer: str
+    new_password: str
 
 
 @router.post("/v1/auth/register")
@@ -136,7 +150,9 @@ async def register(req: RegisterRequest, request: Request):
     if _registrations_full(ip):
         raise _too_many(REGISTER_WINDOW_SECONDS)
     try:
-        principal, token = _store().register(username=req.username, password=req.password)
+        principal, token = _store().register(
+            username=req.username, password=req.password,
+            security_question=req.security_question, security_answer=req.security_answer)
     except AuthError as e:
         raise _register_error(e, ip)
     _note_registration(ip)
@@ -147,14 +163,13 @@ async def register(req: RegisterRequest, request: Request):
 
 def _register_error(e: AuthError, ip: str) -> HTTPException:
     """把存储层的失败原因翻译成状态码，并给唯一那条可被滥用的信道计费。"""
-    if "占用" in e.reason:
+    if e.taken:
         # 实话保留，但它现在是免凭据的用户名枚举信道：每问一次扣一格登录预算。
         # 真人改名一次就过了，脚本则要每 10 次换一枚真实访客 IP——而换 IP 意味着
         # 它背后真有一张分布式网络，那时限流本来也挡不住，只是把成本抬上去。
         _note_failure(ip)
         return HTTPException(status_code=409, detail=e.reason)
-    # 用户名或密码本身不合格（空、超长、保留字、含不可见字符、太短）：
-    # 都是当事人自己能改好的，不计费也不该挡别人的路。
+    # 用户名、密码、找回问题本身不合格：都是当事人自己能改好的，不计费也不该挡别人的路。
     return HTTPException(status_code=422, detail=e.reason)
 
 
@@ -173,6 +188,45 @@ async def login(req: LoginRequest, request: Request):
     _FAILS.pop(ip, None)
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role}
+
+
+@router.post("/v1/auth/recovery")
+async def recovery(req: RecoveryRequest, request: Request):
+    """报出这个用户名的找回问题；答对才能进下一步改密。
+
+    它免凭据，所以两件事一起做：先过登录那份按真实 IP 的失败预算，问到"没有
+    设置密码找回"就记一格——查无此人与没开找回的人在响应里同形（见存储层
+    recovery_question），这一格是那条信道唯一还剩下的代价。
+    """
+    ip = _client_ip(request)
+    if _throttled(ip):
+        raise _too_many(FAILURE_WINDOW_SECONDS)
+    question = _store().recovery_question(req.username)
+    available = question != NO_RECOVERY
+    if not available:
+        _note_failure(ip)
+    # recovery_available 是这一格唯一的额外信息：false 同时覆盖"没这个人"与
+    # "有这个人但没设找回"，所以它没有把用户名存在性多说出去一个字。
+    return {"question": question, "recovery_available": available}
+
+
+@router.post("/v1/auth/reset")
+async def reset(req: ResetRequest, request: Request):
+    """答案正确就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。"""
+    ip = _client_ip(request)
+    if _throttled(ip):
+        raise _too_many(FAILURE_WINDOW_SECONDS)
+    try:
+        _store().reset_password(req.username, req.answer, req.new_password)
+    except AuthError as e:
+        if e.reason == RESET_FAIL:
+            # 答案错、没开找回、查无此人、已停用：同一句、同一格预算、同一个 401
+            _note_failure(ip)
+            raise HTTPException(status_code=401, detail=e.reason)
+        # 新密码本身不合格（太短、太长、空）：那是当事人自己能改好的，不计费
+        raise HTTPException(status_code=422, detail=e.reason)
+    _FAILS.pop(ip, None)
+    return {"status": "password_reset"}
 
 
 @router.get("/v1/auth/me")

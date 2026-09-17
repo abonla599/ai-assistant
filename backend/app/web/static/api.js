@@ -123,10 +123,14 @@ const API = (() => {
      * me() 是前端唯一的"我到底是谁"来源——角色不能靠猜，猜错就把 403 按钮留在页面上。
      * 密码只出现在这两个请求的 body 里，绝不进任何其它请求头：运行时凭据是令牌。
      */
-    register: (username, password) =>
-      request("/v1/auth/register", { method: "POST", body: { username, password } }),
+    register: (username, password, security_question, security_answer) =>
+      request("/v1/auth/register", { method: "POST",
+        body: { username, password, security_question, security_answer } }),
     login: (username, password) =>
       request("/v1/auth/login", { method: "POST", body: { username, password } }),
+    recovery: (username) => request("/v1/auth/recovery", { method: "POST", body: { username } }),
+    reset: (username, answer, new_password) =>
+      request("/v1/auth/reset", { method: "POST", body: { username, answer, new_password } }),
     me: () => request("/v1/auth/me"),
 
     models: () => request("/v1/models"),
