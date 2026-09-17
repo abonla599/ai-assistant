@@ -10,14 +10,18 @@ from backend.app.main import app
 client = TestClient(app)
 
 
-def test_full_chat_feedback_memory_cycle():
+def test_full_chat_feedback_memory_cycle(enforced):
     """
     全链路集成测试：
     创建会话 → 发送带个人信息的消息 → 提交反馈 → 搜索记忆
+
+    身份一律来自令牌：记忆体不再收 user_id，所以这里注册一个专属用户，
+    他的记忆池从空开始，断言与测试顺序无关。
     """
-    
+    me = enforced("集成测试用户")
+
     # 1. 创建会话
-    session_res = client.post("/v1/sessions", params={"model": "deepseek-chat"})
+    session_res = client.post("/v1/sessions", params={"model": "deepseek-chat"}, headers=me)
     assert session_res.status_code == 200
     session_data = session_res.json()
     assert "session_id" in session_data
@@ -28,7 +32,7 @@ def test_full_chat_feedback_memory_cycle():
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": "我叫王五，今年25岁"}],
         "session_id": sid
-    })
+    }, headers=me)
     assert chat_res.status_code == 200
     chat_data = chat_res.json()
     assert "reply" in chat_data
@@ -40,25 +44,23 @@ def test_full_chat_feedback_memory_cycle():
         "message_id": msg_id,
         "rating": 5,
         "comment": "回答准确，记住了我的信息"
-    })
+    }, headers=me)
     assert fb_res.status_code == 200
     fb_data = fb_res.json()
     assert fb_data.get("status") in ["success", "received"]
 
     # 4. 验证记忆模块可用（先手动添加一条记忆用于测试）
     add_mem_res = client.post("/v1/memory/add", json={
-        "user_id": "test_user",
         "content": "用户叫王五，今年25岁",
         "metadata": {"source": "chat", "importance": 5}
-    })
+    }, headers=me)
     assert add_mem_res.status_code == 200
 
     # 5. 搜索记忆
     search_res = client.post("/v1/memory/search", json={
-        "user_id": "test_user",
-        "query": "用户叫什么名字",
+        "query": "王五",
         "top_k": 3
-    })
+    }, headers=me)
     assert search_res.status_code == 200
     search_data = search_res.json()
     assert "results" in search_data
@@ -66,41 +68,51 @@ def test_full_chat_feedback_memory_cycle():
     assert any("王五" in r.get("content", "") for r in search_data["results"])
 
 
-def test_memory_full_crud():
+def test_memory_full_crud(enforced):
     """记忆模块完整CRUD测试"""
-    
-    user_id = "integration_test_user"
+    me = enforced("CRUD 用户")
     content = "测试记忆内容：喜欢猫"
-    
+
     # 添加记忆
     add_res = client.post("/v1/memory/add", json={
-        "user_id": user_id,
         "content": content,
         "metadata": {"importance": 4}
-    })
+    }, headers=me)
     assert add_res.status_code == 200
-    
+
     # 搜索记忆
     search_res = client.post("/v1/memory/search", json={
-        "user_id": user_id,
-        "query": "喜欢什么动物",
+        "query": "猫",
         "top_k": 5
-    })
+    }, headers=me)
     assert search_res.status_code == 200
     results = search_res.json().get("results", [])
     assert any("猫" in r.get("content", "") for r in results)
 
 
-def test_feedback_endpoint_exists():
-    """验证反馈端点可用"""
-    res = client.post("/v1/feedback", json={
+def test_feedback_only_answers_for_the_callers_own_message(client, enforced):
+    """反馈端点必须存在，但它只认调用者自己消息里的 message_id。
+
+    编造的 id 与别人的 id 得到同一个 404：原先它无条件写盘并回 200，
+    任何人都能往反馈文件里加行。
+    """
+    stranger = enforced("反馈的旁观者")
+    foreign = client.post("/v1/feedback", json={
         "message_id": "test_msg_999",
         "rating": 3,
         "comment": "一般般"
-    })
+    }, headers=stranger)
+    assert foreign.status_code == 404, foreign.text
+
+    me = enforced("反馈的作者")
+    sid = client.post("/v1/sessions", headers=me).json()["session_id"]
+    msg_id = client.post("/v1/chat", json={
+        "model": "fake-model", "session_id": sid,
+        "messages": [{"role": "user", "content": "讲个笑话"}]}, headers=me).json()["message_id"]
+    res = client.post("/v1/feedback", json={
+        "message_id": msg_id, "rating": 3, "comment": "一般般"}, headers=me)
     assert res.status_code == 200
-    data = res.json()
-    assert data.get("status") in ["success", "received"]
+    assert res.json().get("status") in ["success", "received"]
 
 
 def test_health_check():

@@ -6,6 +6,8 @@ from watchdog.events import FileSystemEventHandler
 import threading
 import time
 
+from app.core.paths import ensure_parent
+
 class FeedbackHandler(FileSystemEventHandler):
     """
     继承自 watchdog 的 FileSystemEventHandler，用于处理文件变化事件。
@@ -43,7 +45,11 @@ def start_feedback_watcher(feedback_file_path='feedback.json', callback=None):
 
     # 创建观察者
     observer = Observer()
-    observer.schedule(event_handler, path=os.path.dirname(feedback_file_path) or '.', recursive=False)
+    # 被监听的是**目录**，而 feedback.json 现在默认落在 <项目根>/data/ 下——全新检出
+    # 时那个目录还不存在，watchdog 会对不存在的路径抛错；抛在守护线程里就等于监听器
+    # 没起来却只留下一行"监听器已启动"的假日志（这个坑本仓踩过一次）。
+    watched_dir = os.path.dirname(ensure_parent(feedback_file_path)) or '.'
+    observer.schedule(event_handler, path=watched_dir, recursive=False)
 
     # 开始监听
     observer.start()

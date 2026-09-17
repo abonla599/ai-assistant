@@ -287,6 +287,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .pane { display: none; }
 .pane.active { display: block; }
 .pane-note { font-size: 13px; color: var(--text-2); margin: 0 0 14px; }
+.pane-note.err { color: var(--danger); }
 .row { display: flex; gap: 8px; margin-bottom: 10px; }
 .row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 10px; padding: 9px 12px; outline: none; }
 .row input:focus { border-color: var(--accent); }
@@ -362,4 +363,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .modal-card { width: 100%; max-height: 92vh; border-radius: 18px 18px 0 0; border-bottom: 0; }
   .about { grid-template-columns: 96px 1fr; }
   .att-chip .nm { max-width: 110px; }
+  /* 注册那一行是"两个输入框 + 一个按钮"：手机上并排会把邀请码挤成三个字宽，
+     三个可点区也小到点不准，改成各占整行。 */
+  #registerRow { flex-wrap: wrap; }
+  #registerRow input, #registerRow .btn { flex: 1 1 100%; }
 }
