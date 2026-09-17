@@ -632,6 +632,47 @@ def _fixed_vector(text: str) -> list:
     return [digest[i] / 255.0 for i in range(3)]
 
 
+class _FailingCollection:
+    """包一层真集合，只让 fail() 点名的那几个方法抛异常，其余原样转发。
+
+    这里为什么不能 `monkeypatch.setattr(collection, "delete", boom)` 直接往集合
+    对象上塞方法：requirements.txt 钉的是 chromadb==0.5.0，那一版的
+    `chromadb.models.Collection` 是个 pydantic 模型，实例上塞不进未声明的字段，
+    setattr 当场 `ValueError: "Collection" object has no field "delete"`。
+    本地装了 1.x 的人看不见这一行——而这正是 CI 与本机唯一的分歧点。
+
+    更贵的一层在收尾：pytest 的 `MonkeyPatch.undo()` 先回滚 `_setattr` 再回滚
+    `_setitem`（环境变量在后者），回滚途中一抛，后面的 environ 就再也不还原了。
+    于是本文件 enforced 用例留下的 `AUTH_MODE=enforced` + `ACCESS_TOKEN=boot-token`
+    会一路带到进程结束，把 test_memory / test_providers / test_session_api /
+    test_stream_api / test_uploads / test_web_pwa 里三十来条本与 chroma 无关的
+    用例全变成 401。所以"换个对象塞"不是洁癖，是止损。
+    """
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "errors", {})
+
+    def fail(self, name: str, message: str) -> None:
+        self.errors[name] = RuntimeError(message)
+
+    def heal(self, name: str) -> None:
+        self.errors.pop(name, None)
+
+    def __getattr__(self, name):
+        # 走 __dict__ 而不是 self.errors：万一在 __init__ 之前就有属性查找
+        # （copy/pickle 都会），读 self.errors 会再进一次 __getattr__，变成死递归。
+        errors = vars(self).get("errors", {})
+        if name in errors:
+            error = errors[name]
+
+            def boom(*args, **kwargs):
+                raise error
+
+            return boom
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
 def _memory_app(tmp_path, monkeypatch, manager):
     """只挂记忆路由 + 真鉴权中间件，用干净的存储后端验身份推导。
 
@@ -822,18 +863,15 @@ def test_delete_and_update_surface_a_real_store_failure(mem_api_real, monkeypatc
     client, ha, _ = mem_api_real
     mid = client.post("/v1/memory/add", json={"content": "A的记忆"},
                       headers=ha).json()["memory_id"]
-    collection = mr.memory_manager.collection
-    real_delete = collection.delete
+    failing = _FailingCollection(mr.memory_manager.collection)
+    monkeypatch.setattr(mr.memory_manager, "collection", failing)
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("chroma 写入失败")
-
-    monkeypatch.setattr(collection, "delete", boom)
+    failing.fail("delete", "chroma 写入失败")
     res = client.request("DELETE", "/v1/memory/delete", json={"memory_ids": [mid]}, headers=ha)
     assert res.status_code == 503 and "chroma 写入失败" in res.text, res.text
 
-    monkeypatch.setattr(collection, "delete", real_delete)
-    monkeypatch.setattr(collection, "update", boom)
+    failing.heal("delete")
+    failing.fail("update", "chroma 写入失败")
     upd = client.put("/v1/memory/update", json={"memory_id": mid, "new_content": "改一下"},
                      headers=ha)
     assert upd.status_code == 503 and "记忆不存在" not in upd.text, upd.text
@@ -1005,10 +1043,9 @@ def test_list_surfaces_a_real_store_failure_instead_of_answering_empty(mem_api_r
     """
     client, ha, _ = mem_api_real
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("chroma 打不开")
-
-    monkeypatch.setattr(mr.memory_manager.collection, "get", boom)
+    failing = _FailingCollection(mr.memory_manager.collection)
+    failing.fail("get", "chroma 打不开")
+    monkeypatch.setattr(mr.memory_manager, "collection", failing)
     res = client.get("/v1/memory/list?limit=50", headers=ha)
     assert res.status_code == 503, res.text
     assert "chroma 打不开" in res.text, "要把原因说出来，不能只给一个空列表"
