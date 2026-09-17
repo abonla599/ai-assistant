@@ -216,7 +216,13 @@ class AuthStore:
             if any(u.get("username_lc") == lc for u in self._users.values()):
                 raise AuthError("该用户名已被占用")
 
+            # 取码那处（create_invite）有 while 重取，这里原先没有：两个线程/两次
+            # 注册撞上同一个 id 时，`self._users[user_id] = record` 会把已有那个人
+            # 整条记录覆盖掉——他的令牌当场失效，而且没有任何报错。32 bit 撞上的
+            # 概率极低，但"极低"不是"检查只要一行就别省"的理由。
             user_id = "u_" + secrets.token_hex(4)
+            while user_id in self._users:
+                user_id = "u_" + secrets.token_hex(4)
             token = secrets.token_urlsafe(32)
             record = {
                 "user_id": user_id,

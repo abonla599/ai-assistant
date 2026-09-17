@@ -362,8 +362,14 @@ async def list_my_memories(limit: int = Query(20, ge=1, le=100),
 
     路径原先是 /list/{user_id}：把身份写在 URL 上，等于谁都可以在地址栏里换
     别人的名字枚举他的记忆（也正因为如此，前端根本没法用它查自己）。
-    limit 是调用方给的数，原先不设上限——真实后端会把整个库取回内存再逐条过滤，
-    一次 ?limit=99999999 就是一个免费的 DoS 面；现在越界直接 422。
+
+    limit 上限那句得说准：`le=100` 本身**关不掉**任何 DoS 面，它只封顶"回给
+    调用方多少条"。真正让 ?limit=99999999 变成一个免费 DoS 面的，是读取侧原先
+    `collection.get()` 把整个库搬进内存再在 Python 里逐条按 user_id 挑——那时
+    这个参数写多大都无所谓，代价早就由别人的记忆总量决定。现在
+    `memory_manager.get_user_memories` 把 `where` 与 `limit` 一起下推给 chroma
+    （与 search_memory、owned_ids 同一套口径），取回的条数由存储封顶；`le=100`
+    是叠在它之上的响应上限，越界直接 422。两件事各自成立，别再把它说成一条。
     """
     def real_list():
         try:

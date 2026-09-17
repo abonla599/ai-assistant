@@ -6,6 +6,12 @@ from datetime import datetime
 
 from app.core.paths import data_file, ensure_parent
 from app.feedback_storage import FEEDBACK_FILE
+# 只借常量，不依赖 SessionStore 的任何行为——理由与 uploads.py 开头那段一样：
+# "身份层之前建的东西认给谁"这个决定只能有一份，两处各写一个字符串迟早对不上。
+# 这里以前自己也写着 "default_user" 字面量，却在下文注释里声称与
+# authz.BOOTSTRAP_PRINCIPAL、session_store.LEGACY_OWNER 是同一个身份：那正是
+# 一个字面量改了两处、第三处没跟上时的样子。
+from app.session.session_store import SessionStore
 
 # --- 配置文件 ---
 # 反馈路径只有一个定义处（feedback_storage），避免两边写到不同文件
@@ -14,11 +20,12 @@ from app.feedback_storage import FEEDBACK_FILE
 # 用的就是这个路径所在的那棵目录，所以指走这一个常量等于把所有人的摘要一起指走。
 PREFERENCE_FILE = data_file("PREFERENCE_FILE", "preference.txt")
 
-# 与 authz.BOOTSTRAP_PRINCIPAL、session_store.LEGACY_OWNER 同一个身份。
+# 与 authz.BOOTSTRAP_PRINCIPAL、session_store.LEGACY_OWNER 同一个身份——现在是真的
+# 同一个**对象**，不再是"两处各自写着同一个字符串、注释说它们应该一样"。
 # 按人分账之前的反馈行没有 user_id，那时人人都是本机管理员，所以这些历史行
 # 仍算在他名下，他的摘要也继续用老文件名 preference.txt —— 改名等于把他多年
 # 点出来的那份汇总白扔掉。
-LEGACY_USER_ID = "default_user"
+LEGACY_USER_ID = SessionStore.LEGACY_OWNER
 
 # 用户名要进文件名，就必须先剥掉路径语义：分隔符、".."、绝对路径都只可能是
 # 别人递进来的 user_id（注册名不受控），不能让它把文件写到 data 目录之外。

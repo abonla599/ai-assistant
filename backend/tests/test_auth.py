@@ -372,3 +372,32 @@ def test_broken_identity_file_is_kept_and_never_clobbered(tmp_path, broken, desc
     assert (tmp_path / "users.json.corrupt").read_text(encoding="utf-8") == broken, \
         f"{desc}：备份必须活过一次写盘"
     assert list(json.loads(users.read_text(encoding="utf-8"))) == [principal.user_id]
+
+
+# ---------- 撞了号要重取，不能把已有那个人覆盖掉 ----------
+
+
+def test_a_colliding_user_id_is_redrawn_not_overwritten(tmp_path, monkeypatch):
+    """create_invite 一边有 while 重取，register 一边原先没有。
+
+    `"u_" + token_hex(4)` 是 32 bit，撞上的概率低，但撞上的后果不是报错而是
+    `self._users[user_id] = record` 把已有那条整行换掉：前一个人的 token_hash
+    当场消失，他的令牌立刻解不出来，日志里一个字都没有。检查只要一行。
+    """
+    from app.core.auth import AuthStore
+
+    # token_urlsafe 内部就是调 token_hex，所以只截 4 字节那一次（用户 id），
+    # 别把令牌随机值也一起喂进脚本序列。
+    real_hex = auth_module.secrets.token_hex
+    seq = iter(["aaaa1111", "aaaa1111", "bbbb2222"])   # 第二次注册先撞回同一个号
+    monkeypatch.setattr(auth_module.secrets, "token_hex",
+                        lambda n: next(seq) if n == 4 else real_hex(n))
+    store = AuthStore(path=str(tmp_path / "users.json"),
+                      invites_path=str(tmp_path / "invites.json"))
+
+    first, _ = store.register(code=store.create_invite("b"), username="甲")
+    second, _ = store.register(code=store.create_invite("b"), username="乙")
+
+    assert (first.user_id, second.user_id) == ("u_aaaa1111", "u_bbbb2222")
+    assert len(store.list_users()) == 2, "撞号必须让第二个人换一枚，而不是把甲整条覆盖"
+    assert {u["username"] for u in store.list_users()} == {"甲", "乙"}

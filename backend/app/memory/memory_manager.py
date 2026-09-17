@@ -379,19 +379,21 @@ class MemoryManager:
         GET /v1/memory/list 就回 200 + 空列表，用户以为自己的记忆全没了，
         运维则看到一个"一切正常"的接口。故障必须抛出来说明白，删除与更新已经
         这么改了（路由侧统一转 503），读取不能留最后一条把故障藏进正常回复的路。
+
+        归属判定下推给 chroma（`where=`），与 search_memory、owned_ids 同一套口径：
+        旧写法是 `collection.get()` 取回**整个库**再在 Python 里逐条挑，于是这个人
+        翻一次列表的代价随所有人的记忆总量增长，`limit` 只截得了返回给它的条数、
+        截不了已经搬进内存的那份。下推之后条数与体积都由 where + limit 一起封顶。
         """
-        all_data = self.collection.get()
-        user_memories = []
-        if all_data['ids']:
-            for i, mem_id in enumerate(all_data['ids']):
-                meta = all_data['metadatas'][i] if all_data['metadatas'] else {}
-                if (meta or {}).get("user_id") == user_id:
-                    user_memories.append({
-                        "id": mem_id,
-                        "content": all_data['documents'][i],
-                        "metadata": meta or {}
-                    })
-        return user_memories[:limit]
+        data = self.collection.get(where={"user_id": user_id}, limit=max(0, int(limit)))
+        ids = data.get("ids") or []
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+        return [{
+            "id": mem_id,
+            "content": documents[i] if i < len(documents) else "",
+            "metadata": metadatas[i] if i < len(metadatas) else {},
+        } for i, mem_id in enumerate(ids)]
 
     def get_collection_stats(self) -> dict:
         count = self.collection.count()

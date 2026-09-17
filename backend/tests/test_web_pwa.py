@@ -287,6 +287,29 @@ def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
     assert "isAdmin()" in sweep
 
 
+def test_admin_only_surfaces_start_hidden_in_the_html_itself():
+    """隐藏必须是 HTML 里的默认值，而不是等 JS 去收。
+
+    applyRole() 只有在 /v1/auth/me 回来之后才跑得到，所以"默认可见 + JS 收起"
+    这个组合等于每次冷启动都先给普通用户画出一个「模型服务」入口、再在他眼前
+    收掉——闪烁之外，那一刻它是可点的，点进去就是一句必然的 403。默认写 hidden
+    之后，特权入口只在**确认**是管理员时才出现，方向也从"漏出来再收"变成"收起
+    再放"。这条断言只看 HTML，因此与 app.js 什么时候跑无关。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    naked = []
+    # 只扫真正的起始标签：注释里也会提到 data-admin-only 这个词，`<[^>]+>` 会把它
+    # 当成一个元素读进来（`<!` 不匹配 `[a-zA-Z]`，正好被排除）
+    for tag in re.findall(r"<[a-zA-Z][^>]*>", html):
+        if "data-admin-only" not in tag:
+            continue
+        m = re.search(r'class="([^"]*)"', tag)
+        classes = (m.group(1) if m else "").split()
+        if "hidden" not in classes:
+            naked.append(re.search(r'id="([^"]+)"', tag).group(1) if 'id="' in tag else tag[:48])
+    assert not naked, f"这些管理员专属元素默认可见，/v1/auth/me 返回前会闪出来：{naked}"
+
+
 def test_boot_learns_the_role_before_loading_server_data():
     """角色得在第一次渲染之前拿到。
 

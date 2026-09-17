@@ -1,5 +1,6 @@
 """自我成长反馈链路的单元级测试。"""
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -246,3 +247,30 @@ def test_concurrent_ratings_all_survive_the_read_modify_write(feedback_file):
     assert len(rows) == 64, f"丢了 {64 - len(rows)} 条反馈：读-改-写没有整体加锁"
     assert sorted(r["message_id"] for r in rows) == sorted(
         f"m{n}-{i}" for n in range(16) for i in range(4))
+
+
+# ---------- "身份层之前建的东西认给谁"这个字面量只能有一份 ----------
+
+
+def test_the_legacy_owner_literal_is_declared_exactly_once():
+    """LEGACY_USER_ID 原来是第四份 "default_user" 字面量。
+
+    它自己的注释还写着"与 authz.BOOTSTRAP_PRINCIPAL、session_store.LEGACY_OWNER
+    同一个身份"——那正是"三处各自抄一遍、靠注释保证一致"的形状，而 uploads.py
+    开头已经把这个道理说破过一次（它只借 SessionStore 的常量）。现在这里改成
+    真引用同一个对象，并扫一遍 app/ 目录禁止再出现第二处赋值：这种漂移不会让
+    任何现有测试变红，只会让某个老用户的附件/会话/摘要在半年后认不回来。
+    """
+    from app.core.authz import BOOTSTRAP_PRINCIPAL
+    from app.core.uploads import UploadStore
+    from app.session.session_store import SessionStore
+
+    assert pa.LEGACY_USER_ID == SessionStore.LEGACY_OWNER == UploadStore.LEGACY_OWNER
+    assert BOOTSTRAP_PRINCIPAL.user_id == SessionStore.LEGACY_OWNER
+
+    app_dir = Path(pa.__file__).resolve().parent
+    holders = sorted(str(p.relative_to(app_dir)) for p in app_dir.rglob("*.py")
+                     if re.search(r"""^\s*LEGACY_\w+\s*=\s*["']default_user["']""",
+                                  p.read_text(encoding="utf-8"), re.M))
+    assert holders == [str(Path("session") / "session_store.py")], \
+        f"LEGACY 归属字面量出现了第二处：{holders}"

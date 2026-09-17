@@ -26,7 +26,7 @@
 
       <nav class="sb-nav">
         <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
-        <button class="nav-item" id="navProviders" data-admin-only><span class="ni-ico">⌗</span>模型服务</button>
+        <button class="nav-item hidden" id="navProviders" data-admin-only><span class="ni-ico">⌗</span>模型服务</button>
         <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
       </nav>
 
@@ -114,7 +114,7 @@
     <div class="modal-card">
       <div class="modal-head">
         <div class="tabs" id="settingsTabs">
-          <button class="tab" id="tabProviders" data-tab="providers" data-admin-only>模型服务</button>
+          <button class="tab hidden" id="tabProviders" data-tab="providers" data-admin-only>模型服务</button>
           <button class="tab" data-tab="memory">长期记忆</button>
           <button class="tab" data-tab="persona">角色设定</button>
           <button class="tab" data-tab="conn">连接</button>
@@ -125,8 +125,10 @@
 
       <div class="modal-body">
         <!-- 模型服务：整块都是管理员专属（后端 7 条路由都要求管理员），
-             data-admin-only 让 app.js 在拿到角色后统一收起 -->
-        <section class="pane" data-pane="providers" id="paneProviders" data-admin-only>
+             data-admin-only 让 app.js 在拿到角色后统一收起。hidden 必须先写在 HTML 上：
+             角色要等 /v1/auth/me 回来才知道，默认可见就等于每次冷启动都给普通用户
+             闪一下"模型服务"，点进去必然 403。默认收起、确认是管理员才放行。 -->
+        <section class="pane hidden" data-pane="providers" id="paneProviders" data-admin-only>
           <p class="pane-note">界面里的模型下拉、以及实际调用哪个模型，都来自下面这份配置。改这一处即可接入任意 OpenAI 兼容服务（DeepSeek、阿里云百炼 Qwen、OpenAI 等）。</p>
           <div id="providerList" class="prov-list"></div>
           <button class="btn btn-block" id="addProviderBtn">＋ 添加模型服务</button>

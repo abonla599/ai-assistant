@@ -92,13 +92,17 @@ def test_provider_draft_test_rejects_placeholder_key():
 
 
 def _guard_callables(route) -> set:
-    """路由依赖树里的可调用对象（含子依赖）。"""
-    found, stack = set(), [route.dependant]
-    while stack:
-        cur = stack.pop()
-        for sub in cur.dependencies:
-            found.add(sub.call)
-            stack.append(sub)
+    """路由依赖树里的可调用对象（含子依赖）——遍历本身用契约测试那一份。
+
+    这里曾经是这套 walker 的第四份拷贝，而且**已经分叉**：它不走
+    `dependant.websocket`，而 test_route_auth_contract._callables_of 走。两份
+    walker 的差异意味着"契约测试说这条覆盖了"与"本文件说这条覆盖了"根本不是同一
+    件事——挂在 websocket 依赖上的管理员守卫，本文件这条就会看不见。既然要的是
+    "按真实路由表扫描"，遍历规则就必须与契约测试同源，否则这把锁自己就是盲区。
+    """
+    from tests.test_route_auth_contract import _callables_of
+
+    found = set(_callables_of(route.dependant))
     for dep in getattr(route, "dependencies", ()) or ():
         if getattr(dep, "dependency", None) is not None:
             found.add(dep.dependency)
