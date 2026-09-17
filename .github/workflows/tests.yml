@@ -16,6 +16,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir --force-reinstall -r backend/requirements.txt
+      # test_sandbox_concurrency.py 真的起容器，用的是 app/sandbox/sandbox_manager.py
+      # 里钉死的 ai-sandbox:latest。它不是 pip 依赖，requirements 装不出来，此前只有
+      # 开发机上手工 build 过的那一份——于是这条用例在 CI 上从来没跑过，只在本机跑过
+      # （而"只在本机跑过"正是这轮 CI 红反复教训的那件事）。镜像就 12 行 Dockerfile，
+      # 在这里现造，让沙箱执行路径真正进回归。
+      - name: Build sandbox image
+        run: docker build -t ai-sandbox:latest -f docker/sandbox/Dockerfile docker/sandbox
       # 跑整个目录，不点名文件。这里曾经写的是
       # `pytest backend/tests/test_memory.py backend/tests/test_integration.py`，
       # 于是 Task 1-7 产出的鉴权契约锁、越权隔离、fail-closed 全部用例在 push 时
