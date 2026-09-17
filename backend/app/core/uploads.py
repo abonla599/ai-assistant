@@ -12,11 +12,11 @@
 import base64
 import json
 import os
-import shutil
 import threading
 import uuid
 from datetime import datetime
 
+from app.core.owner_backfill import backfill_owner
 from app.core.paths import data_root
 # 历史数据认给谁，这个决定只能有一份：会话与附件同属"身份层之前建的东西"，
 # 两处各写一个字符串迟早会对不上（对上不了的话，老用户的附件就永远找不回了）。
@@ -153,35 +153,15 @@ class UploadStore:
     def _backfill_owner(self):
         """身份层之前的附件都是本机管理员自己传的，认给他。
 
-        只在真的缺 owner 时执行一次，字段齐了就一个字节都不写；备份或原子写回
-        失败一律向上抛，进程就不启动——带着半迁移的索引对外服务，等于让"没有
-        owner"的记录被归属校验静默放行。
+        回填的具体规矩（只在真的缺 owner 时执行一次、字段齐了一个字节都不写、
+        备份或原子写回失败一律向上抛）与会话存储共用一份实现，见
+        app/core/owner_backfill.py。
 
         ⚠️ 本方法是导入期跑的：模块级 `store = UploadStore()` 一被执行就迁移
         $UPLOAD_DIR（未设置时是仓库真实的 data/uploads/）。见该行的注释。
         """
-        # 畸形记录要报错给人看，别留 `record["owner"] = ...` 那句
-        # "TypeError: 'str' object does not support item assignment"：冻结成 EXE
-        # 之后它既不写文件名也不说哪条记录，等于没法排查。
-        for upload_id, record in self._index.items():
-            if not isinstance(record, dict):
-                raise ValueError(
-                    f"附件索引 {self.index_path} 中的记录 {upload_id!r} 不是对象（实际是 "
-                    f"{type(record).__name__}），无法补 owner。请修复或还原该文件："
-                    "宁可拒绝启动，也不带着认不出归属的索引对外服务。")
-        # 判据是 not r.get("owner")，不是 "owner" not in r：手工写成
-        # {"owner": null} 的记录也算没迁完，放过去就永远认不回属主。
-        missing = [r for r in self._index.values() if not r.get("owner")]
-        if not missing:
-            return
-        backup = f"{self.index_path}.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        shutil.copy2(self.index_path, backup)
-        for record in missing:
-            record["owner"] = self.LEGACY_OWNER
-        self._flush()
-        # 数据文件的绝对路径进日志：是不是动了用户真实的 data/，第一眼就能看出来。
-        print(f"🧭 已为 {len(missing)} 条历史附件补 owner={self.LEGACY_OWNER}"
-              f"（数据文件 {self.index_path}），原件备份于 {backup}")
+        backfill_owner(self._index, self.index_path, entity="附件",
+                       legacy_owner=self.LEGACY_OWNER, flush=self._flush)
 
     def _flush(self):
         tmp = self.index_path + ".tmp"
