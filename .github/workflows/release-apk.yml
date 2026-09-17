@@ -1,0 +1,92 @@
+name: Release Android APK
+
+# 打 tag 就出公开 Release：`git push origin v0.10` 之后，任何人都能用固定链接装包。
+#
+# 为什么不并进 build-apk.yml：那个文件带 `push.paths` 过滤（只在 android/** 变化时
+# 出 artifact）。把 tags 和 paths 写在同一个 push 触发器里，paths 会不会把 tag 推送
+# 一起挡掉，取决于 GitHub 的过滤语义——这种"能不能触发"的事不该靠猜，所以分开写。
+# 两个文件重复的是二十来行 CI 装配步骤，不是产品逻辑。
+#
+# Release 是公开的（本仓是公开仓库），这正是想要的效果；APK 里不含任何口令，
+# 它只是指向 https://ai.fenever.xyz/app/ 的 WebView 壳，装完仍必须有邀请码才能用。
+on:
+  push:
+    tags:
+      - "v*"
+  # 失败后从 UI 重跑即可：重跑保留原 tag，GITHUB_REF_NAME 仍是 v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # tag 与实际装进 APK 的版本号必须对上，否则发出去的 Release 名字会和包内
+      # versionName 不一致，事后谁也说不清用户装的到底是哪一版。
+      - name: Check tag matches versionName
+        run: |
+          set -eu
+          declared=$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' android/app/build.gradle)
+          tag=${GITHUB_REF_NAME#v}
+          echo "build.gradle versionName=$declared  tag=$tag"
+          if [ "$declared" != "$tag" ]; then
+            echo "::error::tag 是 v$tag 但 build.gradle 写的是 $declared，两者必须一致"
+            exit 1
+          fi
+
+      - name: Assemble debug APK
+        run: gradle -p android --no-daemon --stacktrace assembleDebug
+
+      - name: Stage APK with a friend-friendly filename
+        run: |
+          set -eu
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "ai-assistant-${GITHUB_REF_NAME#v}.apk"
+          ls -l "ai-assistant-${GITHUB_REF_NAME#v}.apk"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          ver="${tag#v}"
+          file="ai-assistant-${ver}.apk"
+          cat > notes.md <<EOF
+          ## 安装（安卓）
+
+          1. 下载下面的 \`${file}\`（约 2 MB，是调试签名的包，能直接装；不上应用商店）
+          2. 传到手机后点开安装。系统会提示"禁止安装未知来源应用"——去
+             **设置 → 应用 → 允许来自此来源的安装**，勾选一次即可
+          3. 打开应用，它会提示未登录
+          4. 向作者要一枚**一次性邀请码**，在 **设置 → 连接** 里填「用户名 + 邀请码」
+             注册，之后自动登录
+
+          ## 这个包是什么
+
+          一个指向 \`https://ai.fenever.xyz/app/\` 的 WebView 外壳，**不含任何口令或密钥**。
+          好处是服务端改了不用重装：你打开时加载的永远是服务器上当前那一版。
+          同一件事在手机浏览器里直接访问 \`https://ai.fenever.xyz/app/\` 也能用，
+          再用浏览器菜单「添加到主屏幕」可以得到几乎一样的全屏图标，不装包也行。
+
+          注册后你的聊天记录、附件、长期记忆都只归属到你这个账号，别人看不到。
+          EOF
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$file" --clobber
+            gh release edit "$tag" --notes-file notes.md
+          else
+            gh release create "$tag" "$file" --title "AI 助手 $ver（安卓）" --notes-file notes.md
+          fi
