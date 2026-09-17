@@ -15,9 +15,18 @@ auth_router 按真实 IP 计费来限（见 test_auth_endpoints.py），而登�
 可问；单答案那条 bcrypt 耗时判据也一并没了，它被"三条必须付满三次"那条覆盖。剩下
 的判据换成三件事：三条全对才放行、比对不许短路（拿 bcrypt 次数当尺子）、答案能在
 重置时轮换。
+
+同一天评审第一轮：产品行为判定为对，但对的是"约束成立却没人看着"这四条，本轮补锁
+——reset 侧的条数闸门（少一条必须在比对之前抛出，判据是 bcrypt 零次）、耗时判据从
+两支扩到四条失败支路（答案错／没留答案／查无此人／已停用）、"改密绝不写 disabled"
+改成读源码的结构性锁（该状态公路上不可达，手法同 test_web_pwa.py 读 JS 文本）、三句
+固定问题逐字钉住。另把一条退化成恒真的断言（"三" 或 "答案" 在话里——RESET_FAIL 也
+能满足）改成断题数。
 """
+import inspect
 import json
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timedelta
@@ -450,6 +459,23 @@ def test_delete_user_removes_the_record_and_its_tokens(tmp_path):
 ANS = ["新市场小学", "hehai2024", "李建国"]
 
 
+def test_the_three_fixed_questions_are_pinned_verbatim():
+    """这三句是全站唯一的一份，不钉住就等于没人看着。
+
+    问题已是常量：界面按它渲染三格输入、Task 3 的文案按它抄、找回凭据的"顺序即
+    answer_hashes 的下标"也按它排。没有这条断言时，改掉一个字（哪怕只把一个全角
+    问号换成半角）在存储层一条测试都不会红，要等到 Task 3/4 的前端契约测试才炸
+    ——所以这里逐字钉。
+    """
+    assert auth_module.RECOVERY_QUESTIONS == ("你小学在哪上？",
+                                             "你的用户名是什么？",
+                                             "你的父亲叫什么名字？"), \
+        "找回问题是全站固定的事实来源，改它要走计划，不能顺手改文案"
+    # 条数是形状闸门、比对次数与那句"3 题"文案共同的事实来源；它跟着常量走，
+    # 所以钉住数字才算钉住"三题"这件事本身。
+    assert auth_module.ANSWER_COUNT == 3
+
+
 def _reg(store, username="找回用", password=PW, answers=ANS):
     return store.register(username=username, password=password, security_answers=answers)
 
@@ -458,7 +484,11 @@ def test_register_needs_all_three_answers_or_none(store):
     for bad in ([], ["新市场小学"], ANS[:2]):
         with pytest.raises(AuthError) as e:
             store.register(username="甲", password="correct-horse-battery", security_answers=bad)
-        assert "三" in str(e.value) or "答案" in str(e.value), f"{bad} 的报错没说到三题：{e.value}"
+        # 断的是"这句话报出了题数"，不是"话里带答案三字"——后者连 RESET_FAIL
+        # （"答案不正确"）都能满足，等于没断。实现写的是阿拉伯数字 "找回的 3 题…"，
+        # 中文量词那一支留给人以后改写文案。
+        assert "3 题" in str(e.value) or "三题" in str(e.value), \
+            f"{bad} 的报错没说到三题：{e.value}"
     principal, _ = store.register(username="甲", password="correct-horse-battery", security_answers=ANS)
     record = json.loads(open(store.path, encoding="utf-8").read())[principal.user_id]
     assert len(record["answer_hashes"]) == 3
@@ -486,9 +516,14 @@ def test_reset_requires_every_answer_and_never_short_circuits(store):
 
 
 def test_answer_comparison_pays_three_bcrypts_whatever_the_answer(store, monkeypatch):
-    """耗时判据：错答案与"查无此人"都必须跑满三次 bcrypt。
+    """耗时判据：四条失败支路都必须跑满三次 bcrypt，一支都不许秒回。
 
     只错第 1 题就返回的话，这里只会数到 1 次——那正是 R3 要挡的事。
+    "没留答案""查无此人""已停用"这三支各自被挪到比对之前，就会成为一条比正常快
+    三倍的信道：那三个字面意思就是"这个用户名不存在"／"这个人没设找回"／
+    "这个人被停用了"，免凭据端点当场变成一份状态名单。文案同形（见
+    test_every_wrong_answer_says_the_very_same_thing）挡不住快慢差，所以四支
+    都拿 bcrypt 次数当尺子量一遍。
     """
     calls = []
     real = auth_module.bcrypt.checkpw
@@ -498,17 +533,50 @@ def test_answer_comparison_pays_three_bcrypts_whatever_the_answer(store, monkeyp
         return real(pw, hashed)
 
     monkeypatch.setattr(auth_module.bcrypt, "checkpw", spy)
-    store.register(username="丙", password="correct-horse-battery", security_answers=ANS)
+    principal, _ = store.register(username="丙", password=PW, security_answers=ANS)
+    store.register(username="没留答案的", password=PW)
+
+    def one(label, username, answers):
+        calls.clear()
+        with pytest.raises(AuthError) as e:
+            store.reset_password(username=username, answers=answers, new_password=PW2)
+        # 这一支若换了措辞，就说明它走的不是比对之后那条出口，次数也就白数了
+        assert str(e.value) == RESET_FAIL, f"{label} 说了别的话：{e.value}"
+        assert len(calls) == 3, f"{label} 只跑了 {len(calls)} 次 bcrypt：比对被短路或挪到了判断之后"
+
+    one("答案错", "丙", ["x1", "x2", "x3"])
+    one("没留答案", "没留答案的", ANS)
+    one("查无此人", "查无此人", ANS)
+    store.disable_user(principal.user_id)
+    one("已停用", "丙", ANS)
+
+
+@pytest.mark.parametrize("answers", [ANS[:2], ANS + ["第四条"]])
+def test_the_reset_answer_count_gate_sits_in_front_of_the_comparison(store, monkeypatch,
+                                                                     answers):
+    """reset 侧的条数闸门是唯一的守门人，这里用"零次比对"钉住它。
+
+    闸门一改成宽容写法（[:3] 之类），"只答对两题"就能改走别人的账号——三题里
+    少一题仍然放行，整条路的强度不是除以三而是直接少了一题的熵。而 HTTP 层的
+    形状校验挡不住绕过去直接调存储层的调用方，注册侧那条测试（走的是 register）
+    也看不见这一支。条数不合格必须在读库比对之前抛出，所以 bcrypt 必须一次都不跑：
+    跑了一次就说明这批答案被当有效凭据比对过了。
+    """
+    calls = []
+    real = auth_module.bcrypt.checkpw
+
+    def spy(pw, hashed):
+        calls.append(1)
+        return real(pw, hashed)
+
+    monkeypatch.setattr(auth_module.bcrypt, "checkpw", spy)
+    store.register(username="庚", password=PW, security_answers=ANS)
     calls.clear()
-    with pytest.raises(AuthError):
-        store.reset_password(username="丙", answers=["x1", "x2", "x3"],
-                             new_password="another-correct-horse")
-    assert len(calls) == 3, f"比对短路了：只跑了 {len(calls)} 次"
-    calls.clear()
-    with pytest.raises(AuthError):
-        store.reset_password(username="查无此人", answers=["x1", "x2", "x3"],
-                             new_password="another-correct-horse")
-    assert len(calls) == 3, "查无此人也要付满三次代价，否则快慢本身就是一份名单"
+    with pytest.raises(AuthError) as e:
+        store.reset_password(username="庚", answers=answers, new_password=PW2)
+    assert str(e.value) != RESET_FAIL, \
+        f"{len(answers)} 条答案被判成了『答案不正确』，说明条数闸门没挡住、走到了比对"
+    assert calls == [], f"{len(answers)} 条答案却跑了 {len(calls)} 次 bcrypt：条数闸门失效"
 
 
 def test_answers_can_be_rotated_at_reset(store):
@@ -532,15 +600,65 @@ def test_partial_new_answers_are_rejected_without_touching_anything(store):
     assert store.login("戊", "correct-horse-battery")[0].user_id == principal.user_id
 
 
-def test_reset_still_revokes_tokens_and_never_un_disables(store):
-    principal, token = store.register(username="己", password="correct-horse-battery", security_answers=ANS)
+def test_reset_revokes_every_token_and_keeps_a_disabled_user_disabled(store):
+    """这条只断两件事：改密作废名下全部令牌；被停用的人来改密只听到 RESET_FAIL。
+
+    原名里的 never_un_disables 已经搬去一条结构性锁
+    （test_reset_password_source_never_writes_the_disabled_flag）。理由：被停用的
+    账号在 reset 上必然走 RESET_FAIL，"改密成功后 disabled 仍为 True"这个状态从
+    公开接口根本到不了，断"成功之后它还是 False"只是在复读 enable_user 的结果。
+
+    这里能真断的是反方向：一次**被拒**的改密不许顺手把人从停用堆里捞出来，
+    否则"被停 → 自己改个密码 → 又能用了"就成了绕过管理员的自助恢复通道（login
+    那条自助路已经在 test_disabled_user_cannot_log_in_even_with_the_right_password
+    里被堵死，这是它的另一半）。
+    """
+    principal, first = _reg(store, username="己")
+    _, second = store.login("己", PW)
     store.disable_user(principal.user_id)
-    with pytest.raises(AuthError):
-        store.reset_password(username="己", answers=ANS, new_password="another-correct-horse")
+
+    with pytest.raises(AuthError) as e:
+        store.reset_password(username="己", answers=ANS, new_password=PW2)
+    assert str(e.value) == RESET_FAIL, "停用不许从文案上被认出来，只能和答案错同一句话"
+    assert [u for u in store.list_users()
+            if u["user_id"] == principal.user_id][0]["disabled"] is True, \
+        "被拒的改密不许把人放出来：那等于停用闸门只对 login 生效"
+
     store.enable_user(principal.user_id)
-    store.reset_password(username="己", answers=ANS, new_password="another-correct-horse")
-    assert store.resolve(token) is None, "改密的理由之一就是让别的设备掉线"
-    assert [u for u in store.list_users() if u["user_id"] == principal.user_id][0]["disabled"] is False
+    # 人在此刻是开着的，所以 login(PW2) 失败只剩一个理由：那次被拒的改密确实没动口令
+    with pytest.raises(AuthError):
+        store.login("己", PW2)
+    store.reset_password(username="己", answers=ANS, new_password=PW2)
+    assert store.resolve(first) is None, "改密的理由之一就是让别的设备掉线"
+    assert store.resolve(second) is None, "每一台设备都得掉线，包括偷到令牌那台"
+    assert [u for u in store.list_users()
+            if u["user_id"] == principal.user_id][0]["disabled"] is False, \
+        "改密也不许反过来把人关回去：他刚从停用里恢复，口令是他自己的"
+
+
+# 写 disabled 的三种写法。读（record.get("disabled")）不在其列——停用这一支本来
+# 就得判，那条判断由耗时测试与措辞测试分别看着。
+_DISABLED_WRITES = (
+    re.compile(r"""\[\s*["']disabled["']\s*\]\s*=(?!=)"""),          # record["disabled"] = ...
+    re.compile(r"""\bdel\b[^=\n]*\[\s*["']disabled["']\s*\]"""),     # del record["disabled"]
+    re.compile(r"""\.update\([^)]*["']disabled["']"""),              # record.update({"disabled": ...})
+)
+
+
+def test_reset_password_source_never_writes_the_disabled_flag():
+    """结构性锁：停用是管理员的动作，改密这条用户自助路没有资格碰它。
+
+    行为上测不到（见 test_reset_revokes_every_token_and_keeps_a_disabled_user_disabled
+    的说明），所以只剩这一条读源码的锁：它挡的是"以后有人往成功路径里加一行
+    `record["disabled"] = False`，顺手把『改密』当成一条自助解封通道"。本仓库有
+    先例——test_web_pwa.py 通篇读 JS 文本当锁，理由一样：那条约束在可观测行为上
+    不成立，只在代码形状上成立。
+    """
+    source = inspect.getsource(AuthStore.reset_password)
+    for pattern in _DISABLED_WRITES:
+        offenders = [line.strip() for line in source.splitlines() if pattern.search(line)]
+        assert not offenders, \
+            f"reset_password 里出现了写 disabled 的代码（{pattern.pattern}）：{offenders}"
 
 
 # ---------- 上面那六条之外的另一半：措辞与落盘形状 ----------
