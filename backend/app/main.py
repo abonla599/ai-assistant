@@ -115,7 +115,7 @@ from app.memory.memory_router import router as memory_router
 from app.core.auth_router import router as auth_router
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
-from app.web.web_router import mount_pwa
+from app.web.web_router import mount_admin, mount_pwa
 
 # ---------- 创建 FastAPI 应用 ----------
 # 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
@@ -140,6 +140,9 @@ app.include_router(auth_router)
 
 # 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
 mount_pwa(app)
+
+# 管理员页挂在 /admin：一个不含数据的空壳，数据一律经 /v1/admin/* 取。
+mount_admin(app)
 
 # ---------- 访问鉴权 ----------
 # 身份规则见 app/core/authz.py（import 在创建应用那一节）。这里只负责装上。

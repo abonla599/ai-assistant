@@ -21,6 +21,18 @@ def _static_dir() -> str:
 STATIC_DIR = _static_dir()
 
 
+def _admin_dir() -> str:
+    """管理员页的位置。与 PWA 同层但分目录：它不属于聊天前端，
+    不该被 /app 那份 service worker 的作用域覆盖。"""
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        return os.path.join(base, "app", "web", "admin")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin")
+
+
+ADMIN_DIR = _admin_dir()
+
+
 def mount_pwa(app: FastAPI) -> None:
     """把 PWA 挂到 /app。
 
@@ -29,3 +41,13 @@ def mount_pwa(app: FastAPI) -> None:
     作用域自然收敛在 /app 下，不会拦截 /v1/* 接口请求。
     """
     app.mount("/app", StaticFiles(directory=STATIC_DIR, html=True), name="pwa")
+
+
+def mount_admin(app: FastAPI) -> None:
+    """把管理员页挂到 /admin。
+
+    这个地址是公开的——有意为之：页面是个不含任何数据的空壳，用户与邀请码只能
+    经 /v1/admin/* 那套 require_admin 接口取到。鉴权中间件的保护前缀只有
+    /v1/、/docs 等，所以这里不需要动 PUBLIC_PATHS。
+    """
+    app.mount("/admin", StaticFiles(directory=ADMIN_DIR, html=True), name="admin")

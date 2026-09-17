@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>管理员 · AI 助手</title>
+<!-- 复用 PWA 那一份设计系统：同一进程同源服务，样式没有第二份真相。
+     只重排本页布局，配色/按钮/字号一律走 /app/style.css 的变量与类。 -->
+<link rel="stylesheet" href="/app/style.css">
+<style>
+  /* 本页不是聊天界面，套不上 .app/.composer 那套骨架，所以只补布局 */
+  body.admin { background: var(--bg); color: var(--text); margin: 0; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 64px; }
+  .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .top h1 { font-size: 20px; margin: 0; }
+  .who { color: var(--text-2); font-size: 13px; }
+  .sec { margin-top: 28px; }
+  .sec h2 { font-size: 15px; margin: 0 0 4px; }
+  .sec p { color: var(--text-3); font-size: 12.5px; margin: 0 0 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  input.num { width: 74px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--text-3); font-weight: 500; font-size: 12px; }
+  td.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
+  td.acts { white-space: nowrap; }
+  td.acts button { margin: 0 2px 2px 0; }
+  .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .tag.off { background: rgba(248,113,113,.14); color: var(--danger); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+  .err { color: var(--danger); font-size: 12.5px; min-height: 18px; margin-top: 6px; }
+  .reveal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+  .reveal .card { max-width: 520px; width: 100%; }
+  .secret { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+</style>
+</head>
+<body class="admin">
+<div class="wrap">
+
+  <!-- 未取到管理员身份时只有这一块可见 -->
+  <section id="gate" class="hidden">
+    <div class="top"><h1>管理员登录</h1></div>
+    <p class="who">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>。它只存在这台浏览器的 localStorage，不会进任何 URL 或日志。</p>
+    <div class="card">
+      <div class="row">
+        <input id="pass" class="field" type="password" placeholder="管理员口令" autocomplete="off">
+        <button id="btnLogin" class="btn btn-primary">进入</button>
+      </div>
+      <div class="err" id="gateErr"></div>
+    </div>
+  </section>
+
+  <main id="panel" class="hidden">
+    <div class="top">
+      <h1>用户与邀请码</h1>
+      <span class="who" id="who"></span>
+      <span style="flex:1"></span>
+      <button id="btnReload" class="btn btn-ghost btn-small">刷新</button>
+      <button id="btnLogout" class="btn btn-ghost btn-small">退出</button>
+    </div>
+    <div class="err" id="flash"></div>
+
+    <section class="sec">
+      <h2>邀请码</h2>
+      <p>一枚码默认只能用一次。发人之后可以再作废；用满或过期都不会再泄露身份，但作废能让它立刻失效。</p>
+      <div class="row">
+        <button id="btnMake" class="btn btn-primary btn-small">生成一枚</button>
+        <label class="who">可用次数
+          <input id="maxUses" class="field num" type="number" min="1" max="50" value="1">
+        </label>
+        <span id="newCode" class="tag hidden"></span>
+      </div>
+      <table><thead><tr><th>邀请码</th><th>已用</th><th>状态</th><th>创建者</th><th class="acts">操作</th></tr></thead>
+      <tbody id="inviteRows"></tbody></table>
+    </section>
+
+    <section class="sec">
+      <h2>用户</h2>
+      <p>「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。</p>
+      <table><thead><tr><th>用户名</th><th>身份</th><th>状态</th><th>最后活跃</th><th class="acts">操作</th></tr></thead>
+      <tbody id="userRows"></tbody></table>
+    </section>
+  </main>
+
+  <!-- 新令牌只在响应里出现一次，关掉就取不回来，所以做成必须主动确认的弹窗 -->
+  <div id="reveal" class="reveal hidden">
+    <div class="card">
+      <h2 style="margin:0 0 4px;font-size:15px">新令牌——只显示这一次</h2>
+      <p style="color:var(--text-3);font-size:12.5px;margin:0">旧令牌已经同时失效。现在复制并发给对方；关掉这个窗口就再也取不到明文了。</p>
+      <div class="secret" id="revealText"></div>
+      <div class="row" style="margin:0">
+        <button id="btnCopy" class="btn btn-primary btn-small">复制</button>
+        <button id="btnCloseReveal" class="btn btn-ghost btn-small">我已保存，关闭</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="admin.js"></script>
+</body>
+</html>
