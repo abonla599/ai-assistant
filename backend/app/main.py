@@ -290,7 +290,7 @@ def _require_session_owner(session_id, principal: Principal) -> None:
 
 
 @app.post("/v1/chat")
-async def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
+def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
     _require_session_owner(request.session_id, principal)
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
@@ -328,9 +328,13 @@ from fastapi.responses import StreamingResponse
 import json as json_module
 
 @app.post("/v1/chat/stream")
-async def stream_chat_endpoint(request: ChatRequest,
-                               principal: Principal = CurrentPrincipal):
-    """流式聊天端点，返回 Server-Sent Events"""
+def stream_chat_endpoint(request: ChatRequest,
+                         principal: Principal = CurrentPrincipal):
+    """流式聊天端点，返回 Server-Sent Events
+
+    端点与 generate() 都必须是同步的：模型 token 是从阻塞 socket 上读出来的，
+    留在事件循环里会让一个慢请求冻住整台服务（线上 524）。
+    """
     from app.core.streaming import stream_chat
 
     # 归属必须在这里判，不能在 generate() 里判：流一开始 HTTP 状态就锁死在 200，
@@ -354,7 +358,7 @@ async def stream_chat_endpoint(request: ChatRequest,
         except Exception as e:
             print(f"流式上下文注入失败（不影响本次对话）: {e}")
 
-    async def generate():
+    def generate():
         message_id = str(uuid.uuid4())
         # 发送开始事件
         yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id, 'model': provider['model']})}\n\n"
@@ -366,8 +370,8 @@ async def stream_chat_endpoint(request: ChatRequest,
 
         full_text = ""
         try:
-            async for chunk in stream_chat(provider["model"], messages,
-                                           provider_id=provider["id"]):
+            for chunk in stream_chat(provider["model"], messages,
+                                     provider_id=provider["id"]):
                 full_text += chunk
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             
@@ -636,7 +640,7 @@ async def submit_feedback(feedback: FeedbackRequest,
 # 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
 # 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
 @app.post("/v1/agent/run")
-async def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
+def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
     try:
         from app.agents.react_agent import ReActAgent
         agent = ReActAgent(
@@ -652,7 +656,7 @@ async def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
         return {"result": "智能体模块尚未就绪，请稍后再试"}
 
 @app.post("/v1/agent/orchestrate")
-async def orchestrate_task(request: OrchestrateRequest, _: Principal = RequireAdmin):
+def orchestrate_task(request: OrchestrateRequest, _: Principal = RequireAdmin):
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
     result = orchestrator.run(

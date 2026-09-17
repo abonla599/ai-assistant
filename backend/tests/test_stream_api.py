@@ -59,7 +59,7 @@ def test_stream_with_session(monkeypatch):
     # 不应依赖真实密钥是否有效（此前错误文本被当成回复保存，才让断言假性通过）。
     from app.core import streaming
 
-    async def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096):
+    def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096):
         for piece in ("你", "好", "呀"):
             yield piece
 
@@ -118,8 +118,8 @@ def test_stream_rejects_a_foreign_session_that_really_exists(client, enforced, m
 
     entered = []
 
-    async def must_not_stream(model, messages, provider_id=None, temperature=0.7,
-                              max_tokens=4096):
+    def must_not_stream(model, messages, provider_id=None, temperature=0.7,
+                      max_tokens=4096):
         entered.append(model)
         yield "不该被调用"
 

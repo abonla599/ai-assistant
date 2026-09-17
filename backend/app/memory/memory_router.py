@@ -235,9 +235,12 @@ def _reject_identity_in_metadata(metadata: Optional[dict]) -> None:
 
 
 # ---------- API 端点 ----------
+# 全部是同步 def：这一层每个端点都会碰 chroma（本地 sqlite/persist 文件）或嵌入模型，
+# 都是阻塞调用。async 端点跑在事件循环上，一个慢查询能把整台服务冻住（含 /health），
+# 而同步 def 会被 FastAPI 放进线程池。新增端点沿用同一形式。
 
 @router.post("/add")
-async def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrincipal):
+def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrincipal):
     _reject_identity_in_metadata(req.metadata)
 
     def real_add():
@@ -256,7 +259,7 @@ async def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrinci
 
 
 @router.post("/search")
-async def search_memory(req: SearchMemoryRequest, principal: Principal = CurrentPrincipal):
+def search_memory(req: SearchMemoryRequest, principal: Principal = CurrentPrincipal):
     def real_search():
         raw = memory_manager.search_memory(principal.user_id, req.query, req.top_k)
         formatted = []
@@ -286,7 +289,7 @@ async def search_memory(req: SearchMemoryRequest, principal: Principal = Current
 
 
 @router.delete("/delete")
-async def delete_memories(req: DeleteMemoryRequest, principal: Principal = CurrentPrincipal):
+def delete_memories(req: DeleteMemoryRequest, principal: Principal = CurrentPrincipal):
     """删除调用者自己的记忆。
 
     原先的请求体里有个 user_id，但函数体一次都没用它：只要拿到别人的记忆 id
@@ -312,7 +315,7 @@ async def delete_memories(req: DeleteMemoryRequest, principal: Principal = Curre
 
 
 @router.put("/update")
-async def update_memory(req: UpdateMemoryRequest, principal: Principal = CurrentPrincipal):
+def update_memory(req: UpdateMemoryRequest, principal: Principal = CurrentPrincipal):
     """改写调用者自己的记忆；别人的 id 在这里就是"不存在"。
 
     与删除同一个洞：原先 update 也根本不认归属。非属主与不存在的 id 得到逐字节
@@ -336,7 +339,7 @@ async def update_memory(req: UpdateMemoryRequest, principal: Principal = Current
 
 
 @router.post("/decay")
-async def decay_memories(decay_factor: float = Query(0.95),
+def decay_memories(decay_factor: float = Query(0.95),
                          principal: Principal = RequireAdmin):
     """衰减调用者本人的记忆权重。
 
@@ -356,7 +359,7 @@ async def decay_memories(decay_factor: float = Query(0.95),
 
 
 @router.get("/list")
-async def list_my_memories(limit: int = Query(20, ge=1, le=100),
+def list_my_memories(limit: int = Query(20, ge=1, le=100),
                            principal: Principal = CurrentPrincipal):
     """我自己的记忆。
 
@@ -391,7 +394,7 @@ async def list_my_memories(limit: int = Query(20, ge=1, le=100),
 
 
 @router.get("/stats")
-async def get_stats(_: Principal = RequireAdmin):
+def get_stats(_: Principal = RequireAdmin):
     """全库统计口径（条数、集合名）：它说的是所有人的数据，因此仅管理员。"""
     def real_stats():
         return memory_manager.get_collection_stats()
