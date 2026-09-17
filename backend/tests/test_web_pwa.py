@@ -272,6 +272,29 @@ def test_registration_ui_elements_wired():
     assert "用户名自己定" not in side.group(0), "卡里重复了表单上方那句副标题"
 
 
+def test_settings_has_one_obvious_entry_pinned_to_the_sidebar_foot():
+    """设置面板有五个页签，原先却没有一个叫「设置」的入口——只能从「模型服务」
+    「长期记忆」和顶栏那个角色 chip 分别钻进去，「连接」与「关于」在手机上几乎
+    点不到（只有报错时程序自己弹）。所以补一个明确的入口，并钉住三件事：
+
+    1. 图标是内联 SVG。`⚙` 这个字符在部分字体里渲染成彩色 emoji、在部分里直接
+       是方块，而这一层图标（＋ ◈ ◐）全是文字字形——齿轮偏偏不能跟着这么写。
+    2. 位置在会话列表之后、sb-foot 之前。会话列表是 flex:1 会长高，放这里等于
+       焊在底部；放到顶部那三条里就跟「新对话」抢视线，也不解决问题。
+    3. 点了要收起侧栏：手机上它是抽屉，不收就是一片遮罩挡住面板。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    row = re.search(r'<button[^>]*id="navSettings"[\s\S]*?</button>', html)
+    assert row, "侧栏里没有 #navSettings 这个入口"
+    assert "<svg" in row.group(0), "设置入口没有自己的图标"
+    assert "⚙" not in html and "⚙" not in js, "用了 ⚙ 字形：它会渲染成 emoji 或方块"
+    assert html.find('id="sessionGroups"') < row.start() < html.find('class="sb-foot"'), \
+        "入口没钉在侧栏底部"
+    assert re.search(r'\$\("navSettings"\)\.onclick\s*=\s*\(\)\s*=>\s*\{\s*openSettings\(\);\s*closeSidebar\(\);', js), \
+        "点击没有同时打开设置并收起侧栏"
+
+
 def test_auth_layer_keeps_the_two_column_layout_and_no_dead_rules():
     """版式的两条硬约束写在 CSS 里，只能在这里钉：没有浏览器测试跑得到它。
 

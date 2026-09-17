@@ -1182,6 +1182,9 @@ function bind() {
   $("newChatBtn").onclick = () => { newChat(); closeSidebar(); };
   $("navProviders").onclick = () => { openSettings("providers"); closeSidebar(); };
   $("navMemory").onclick = () => { openSettings("memory"); closeSidebar(); };
+  // 不传 tab：落在哪一页由 openSettings 按角色决定（管理员=模型服务，其他人=连接）。
+  // 收起侧栏是必须的：手机上它是抽屉，不收就是一片遮罩挡在面板前面。
+  $("navSettings").onclick = () => { openSettings(); closeSidebar(); };
   $("themeBtn").onclick = () => { pref.theme = pref.theme === "dark" ? "light" : "dark"; applyTheme(); };
   $("sessionSearch").oninput = (e) => { state.filter = e.target.value; renderSessions(); };
 

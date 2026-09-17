@@ -78,6 +78,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 .nav-item:hover { background: var(--bg-hover); }
 .ni-ico { width: 18px; text-align: center; color: var(--text-2); font-size: 15px; }
+.ni-ico svg { display: block; margin: 0 auto; }
+/* 设置入口与会话列表之间要有分隔：不画的话它看起来像会话列表的最后一项 */
+.sb-config { border-top: 1px solid var(--line); padding-top: 8px; }
 
 .sb-label { font-size: 11px; color: var(--text-3); padding: 12px 10px 2px; letter-spacing: .05em; }
 .sb-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
@@ -94,7 +97,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .sb-item:hover .ops, .sb-item.active .ops { opacity: 1; }
 .sb-foot {
   display: flex; align-items: center; gap: 8px;
-  padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-2);
+  padding-top: 4px; font-size: 12px; color: var(--text-2);
 }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
 .conn-dot.ok { background: var(--accent); }
