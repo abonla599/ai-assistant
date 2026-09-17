@@ -63,7 +63,9 @@ EXEMPT_PATHS = {"/", "/health"}
 # 这个集合的**完备性**由 test_nothing_routable_lives_outside_both_locks 钉住：契约只管
 # /v1，中间件只管 authz._PROTECTED_PREFIXES，新增一个顶层前缀就会同时落在两把锁之外，
 # 那条测试就是为了让那种形状当场变红。
-SYSTEM_PATHS = EXEMPT_PATHS | {"/app"}
+# /admin 是管理员页的外壳：公开的是**壳**，不是数据——它一个用户的名字都不含，
+# 所有数据都要过 require_admin。那条边界由 backend/tests/test_admin_page.py 单独钉。
+SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin"}
 
 
 def _is_v1(path: str) -> bool:
