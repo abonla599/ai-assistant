@@ -181,3 +181,34 @@ def enforced(monkeypatch, tmp_path):
         return {"Authorization": "Bearer " + token}
 
     return as_user
+
+# 沙箱可用性判断原先抄了三份（test_sandbox_concurrency 一处、test_tools 一处、
+# 三个 backend/ 根下的手工脚本各自裸跑）。它决定的是"这条用例到底跑没跑"，
+# 抄多了迟早有一份偷偷把 skip 写成通过。
+_SANDBOX_IMAGE_BUILD_CMD = (
+    "docker build -t ai-sandbox:latest -f docker/sandbox/Dockerfile docker/sandbox")
+
+
+@pytest.fixture
+def sandbox_language():
+    """要真容器时先问一句能不能跑：缺什么就说清什么，缺就 skip。
+
+    缺 Docker 不是产品的错，但把"没跑"记成"跑过了"是假的绿；一律 failure 又
+    会让每台没装 Docker Desktop 的开发机长红。CI 显式构建 python 镜像
+    （见 .github/workflows/tests.yml），所以在 CI 上这些用例是真在跑。
+    返回一个 `sandbox_language("python") -> "python"` 形式的函数。
+    """
+    from app.sandbox.sandbox_manager import SandboxManager
+
+    def _require(language):
+        sm = SandboxManager()
+        if sm.client is None:
+            pytest.skip(f"Docker 守护进程不可用：{sm.unavailable_reason}")
+        image = SandboxManager.LANGUAGE_IMAGES[language]
+        try:
+            sm.client.images.get(image)
+        except Exception as e:
+            pytest.skip(f"缺少沙箱镜像 {image}（{e}）；构建一次：{_SANDBOX_IMAGE_BUILD_CMD}")
+        return language
+
+    return _require

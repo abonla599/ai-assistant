@@ -51,6 +51,15 @@ def test_unknown_tool():
     assert "未知" in result or "✗" in result
 
 
+def test_wrong_argument_name_is_reported_not_raised():
+    """参数名传错走的是 TypeError 分支：必须变成一句可读的"参数错误"。
+
+    模型生成的 tool call 经常拼错参数名，这条断言保证它不会把整个回合带崩。
+    """
+    result = execute_tool("calculator", {"bad_param": "x"})
+    assert "参数错误" in result
+
+
 class _RecordingSandbox:
     """替掉真沙箱：记录每次执行请求，并按预设脚本返回结果。"""
 
@@ -88,54 +97,32 @@ def test_execute_code_retries_only_until_first_success(monkeypatch):
     assert "ok" in out and "执行错误" not in out
 
 
-def _sandbox_skip_reason(language):
-    """沙箱跑不起来时返回 skip 原因，跑得起来返回 None。"""
-    from app.sandbox.sandbox_manager import SandboxManager
-
-    sm = SandboxManager()
-    if sm.client is None:
-        return f"Docker 守护进程不可用：{sm.unavailable_reason}"
-    image = SandboxManager.LANGUAGE_IMAGES[language]
-    try:
-        sm.client.images.get(image)
-    except Exception as e:
-        return f"沙箱镜像 {image} 缺失（{e}）"
-    return None
-
-
-@pytest.fixture
-def sandbox(request):
-    language = request.param
-    reason = _sandbox_skip_reason(language)
-    if reason is not None:
-        pytest.skip(f"execute_code 用例需要容器：{reason}")
-    return language
-
-
-@pytest.mark.parametrize("sandbox", ["python"], indirect=True)
-def test_code_tool_python(sandbox):
-    result = execute_tool("execute_code", {"code": "print('hello')", "language": sandbox})
+def test_code_tool_python(sandbox_language):
+    sandbox_language("python")
+    result = execute_tool("execute_code", {"code": "print('hello')", "language": "python"})
     assert "hello" in result
     assert "✗" not in result
 
 
-@pytest.mark.parametrize("sandbox", ["javascript"], indirect=True)
-def test_code_tool_javascript(sandbox):
+def test_code_tool_javascript(sandbox_language):
+    # CI 只构建 python 那个镜像，所以这条在 CI 上是 skip；谁建了
+    # ai-sandbox-node:latest，它就在谁那里真跑。
+    sandbox_language("javascript")
     result = execute_tool("execute_code", {
         "code": "console.log('hi from js');",
-        "language": sandbox,
+        "language": "javascript",
     })
     assert "hi from js" in result
 
 
-@pytest.mark.parametrize("sandbox", ["python"], indirect=True)
-def test_code_tool_syntax_error(sandbox):
-    result = execute_tool("execute_code", {"code": "prin('typo')", "language": sandbox})
+def test_code_tool_syntax_error(sandbox_language):
+    sandbox_language("python")
+    result = execute_tool("execute_code", {"code": "prin('typo')", "language": "python"})
     assert "NameError" in result or "错误" in result or "error" in result
 
 
-@pytest.mark.parametrize("sandbox", ["python"], indirect=True)
-def test_code_tool_timeout(sandbox):
+def test_code_tool_timeout(sandbox_language):
     """死循环必须被超时掐断——这是沙箱的 DoS 兜底，不是可选行为。"""
-    result = execute_tool("execute_code", {"code": "while True: pass", "language": sandbox})
+    sandbox_language("python")
+    result = execute_tool("execute_code", {"code": "while True: pass", "language": "python"})
     assert "超时" in result or "timeout" in result or "错误" in result
