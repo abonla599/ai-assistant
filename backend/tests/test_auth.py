@@ -22,6 +22,11 @@ auth_router 按真实 IP 计费来限（见 test_auth_endpoints.py），而登�
 改成读源码的结构性锁（该状态公路上不可达，手法同 test_web_pwa.py 读 JS 文本）、三句
 固定问题逐字钉住。另把一条退化成恒真的断言（"三" 或 "答案" 在话里——RESET_FAIL 也
 能满足）改成断题数。
+
+Task 2（端点收口）在本文件里只做两件事，产品代码一行未动：给 new_answers 侧补一条
+与 answers 侧对称的零次 bcrypt 判据（旧的那条只断"被拒之后库没变"，看不见顺序），
+以及修掉那条读源码的结构锁的两处卫生问题——注释与 docstring 里提到被禁写法就误伤、
+打包环境（本仓要进 EXE）读不到源码时误报成失败而不是跳过。
 """
 import inspect
 import json
@@ -600,6 +605,36 @@ def test_partial_new_answers_are_rejected_without_touching_anything(store):
     assert store.login("戊", "correct-horse-battery")[0].user_id == principal.user_id
 
 
+@pytest.mark.parametrize("new_answers", [ANS[:2], ANS + ["第四条"]])
+def test_a_malformed_answer_rotation_pays_no_bcrypt_at_all(store, monkeypatch,
+                                                           new_answers):
+    """**新增锁（与上面那条条数闸门对称）**：轮换答案的条数也在比对之前就被拦住。
+
+    answers 侧的零次判据已有，new_answers 侧此前只从"被拒之后什么都没动"那一侧看着
+    （上一条）——那半句测不到顺序：条数闸门若挪到比对之后，被拒的重置照样不改库，
+    却已经把三题真跑了一遍 bcrypt。顺序在这条路径上从来不只是性能：跑完才拒，"这一
+    次回得慢"就是"三题猜对了"的信号，免凭据端点于是多了一比特可问的东西。
+    """
+    calls = []
+    real = auth_module.bcrypt.checkpw
+
+    def spy(pw, hashed):
+        calls.append(1)
+        return real(pw, hashed)
+
+    monkeypatch.setattr(auth_module.bcrypt, "checkpw", spy)
+    principal, token = store.register(username="壬", password=PW, security_answers=ANS)
+    calls.clear()
+    with pytest.raises(AuthError) as e:
+        store.reset_password(username="壬", answers=ANS, new_password=PW2,
+                             new_answers=new_answers)
+    assert str(e.value) != RESET_FAIL, \
+        "条数不对的轮换被判成了『答案不正确』——它走到了比对，话术也就和猜错混成一句"
+    assert calls == [], f"{len(new_answers)} 条轮换答案却跑了 {len(calls)} 次 bcrypt：闸门在比对之后"
+    assert store.resolve(token) is not None, "被拒的轮换不许已经作废令牌"
+    assert store.login("壬", PW)[0].user_id == principal.user_id, "口令必须还是旧的"
+
+
 def test_reset_revokes_every_token_and_keeps_a_disabled_user_disabled(store):
     """这条只断两件事：改密作废名下全部令牌；被停用的人来改密只听到 RESET_FAIL。
 
@@ -645,6 +680,28 @@ _DISABLED_WRITES = (
 )
 
 
+def _code_lines(func) -> list:
+    """能拿结构锁去匹配的行：真代码，不含 docstring 与整行注释。
+
+    两个边角都是这一轮评审点出来的：
+    1. **注释咬人**。这条锁要挡的是"以后有人在成功路径里加一行赋值"，而解释为什么
+       不加的那句注释里完全可能出现 `record["disabled"] = False` 这个字样——那时改
+       一句文档就红，红得没有道理，而一条会误报的锁最后被人删掉。docstring 整段切
+       掉，整行注释逐行跳过；行尾还挂着代码的那种（`x = 1  # ...`）照旧参与匹配。
+    2. **打包环境**。本仓要打进 EXE（PyInstaller），`inspect.getsource` 在拿不到
+       源文件时抛 OSError。一个读不到源码的自检应当明说"我没跑成"，而不是把整套
+       测试判红——红在这里等于告诉别人"改密路径坏了"，而坏的是测试的尺子。
+    """
+    try:
+        source = inspect.getsource(func)
+    except OSError as e:
+        pytest.skip(f"读不到 {func.__qualname__} 的源码，结构性锁无从谈起：{e}")
+    doc = func.__doc__
+    if doc:                       # -O / -OO 运行时 docstring 已被剥掉，这里跟着退化
+        source = source.replace(doc, "", 1)
+    return [line for line in source.splitlines() if not line.lstrip().startswith("#")]
+
+
 def test_reset_password_source_never_writes_the_disabled_flag():
     """结构性锁：停用是管理员的动作，改密这条用户自助路没有资格碰它。
 
@@ -654,9 +711,9 @@ def test_reset_password_source_never_writes_the_disabled_flag():
     先例——test_web_pwa.py 通篇读 JS 文本当锁，理由一样：那条约束在可观测行为上
     不成立，只在代码形状上成立。
     """
-    source = inspect.getsource(AuthStore.reset_password)
+    lines = _code_lines(AuthStore.reset_password)
     for pattern in _DISABLED_WRITES:
-        offenders = [line.strip() for line in source.splitlines() if pattern.search(line)]
+        offenders = [line.strip() for line in lines if pattern.search(line)]
         assert not offenders, \
             f"reset_password 里出现了写 disabled 的代码（{pattern.pattern}）：{offenders}"
 

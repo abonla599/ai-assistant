@@ -16,10 +16,10 @@ from collections import defaultdict
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core import authz
-from app.core.auth import RESET_FAIL, AuthError
+from app.core.auth import ANSWER_COUNT, RESET_FAIL, AuthError
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -37,6 +37,13 @@ MAX_FAILURES_PER_WINDOW = 10
 REGISTER_WINDOW_SECONDS = 86400
 MAX_REGISTRATIONS_PER_SOURCE = 3
 
+# 自助改密走的是同一套口径，而且比注册更需要它：三题是全站公开的常量，"答对"不再
+# 说明对面是本人，只说明他猜中了。连着猜中三次的人是另一个人，而每一次成功都把
+# 名下所有会话令牌作废——对被猜的人而言这是真实的伤害（每台设备都掉线）。
+# 上限 3 = 本人忘密改一次 + 反悔改回来 + 再出一次意外，之后只能找管理员。
+RESET_WINDOW_SECONDS = 86400
+MAX_RESETS_PER_SOURCE = 3
+
 # 来源键取自 CF-Connecting-IP：域名必经 Cloudflare，而它会把真实访客 IP 写在
 # 这个头上；后端只监听 127.0.0.1:8000、外部唯一入口就是 cloudflared，没有旁路
 # 可以伪造这个头。取不到该头时退回 uvicorn 看到的对端地址（本机直连与测试）。
@@ -45,6 +52,7 @@ MAX_REGISTRATIONS_PER_SOURCE = 3
 MAX_TRACKED_SOURCES = 4096
 _FAILS = defaultdict(list)
 _REGISTERS = defaultdict(list)
+_RESETS = defaultdict(list)
 
 
 def _store():
@@ -69,7 +77,15 @@ def _recent(ledger, ip: str, window: float, moment: float) -> list:
 
 
 def _prune(moment: float) -> None:
-    for ledger in (_FAILS, _REGISTERS):
+    """来源数超出上限时丢掉"整桶都已过期"的那些键——三本账都要扫，漏一本就是只胀不收。
+
+    保留阈值沿用最短的那本窗口（FAILURE_WINDOW_SECONDS），这是既有取舍、不是新决定：
+    它由**内存**上限触发，不是安全窗口，所以来源数一旦真超过 4096，_REGISTERS 与
+    _RESETS 那两本 24 小时的账会被提前清成 10 分钟。要收紧就得让每本账带自己的窗口，
+    并且那两本一起改。今天这台机器上同时在用的来源是个位数，所以留在这里当说明，
+    没有为它扩范围。
+    """
+    for ledger in (_FAILS, _REGISTERS, _RESETS):
         if len(ledger) <= MAX_TRACKED_SOURCES:
             continue
         for key in [k for k, v in ledger.items()
@@ -96,6 +112,17 @@ def _registrations_full(ip: str) -> bool:
 
 def _note_registration(ip: str) -> None:
     _REGISTERS[ip].append(_now())
+
+
+def _resets_full(ip: str) -> bool:
+    moment = _now()
+    _prune(moment)
+    return (len(_recent(_RESETS, ip, RESET_WINDOW_SECONDS, moment))
+            >= MAX_RESETS_PER_SOURCE)
+
+
+def _note_reset(ip: str) -> None:
+    _RESETS[ip].append(_now())
 
 
 def _client_ip(request: Request) -> str:
@@ -128,9 +155,15 @@ class LoginRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     username: str
-    answers: List[str]
+    # 条数在模型层就钉死成三条。存储层那道闸门（auth._check_answer_shapes）管的是
+    # "绕过 HTTP 直接调存储层"的调用方，替不了这一层：数错格子要看到一条指着 answers
+    # 的 422（填的人自己改得好、不计费），而不是与"答案不正确"同一出口——一句说明填的
+    # 是自己人，另一句说明有人在猜，两者在安全上不是一回事。数字取自 auth 的常量。
+    answers: List[str] = Field(min_length=ANSWER_COUNT, max_length=ANSWER_COUNT)
     new_password: str
     # 给了就连找回答案一起轮换（固定问题不等于固定答案），不给就是原样留着。
+    # "不给"本身合法，所以条数只能由存储层判：它同样在读库与比对之前抛出，落到 HTTP
+    # 还是那句 422、照样不计费（判据见 test_auth.py 里那条对称的零次 bcrypt 锁）。
     new_answers: Optional[List[str]] = None
 
 
@@ -196,10 +229,18 @@ async def reset(req: ResetRequest, request: Request):
     这里没有"先把问题念给你听"那一步：三题是全站常量，前端自己渲染，服务器不为
     一句抄来的话开一条免凭据信道。答案与新密码**一次提交**——分开验答案就等于给
     外人一个 oracle。
+
+    两本账都要看，顺序是先失败后成功：前者挡"一直在猜"，后者挡"已经猜中过几次"。
+    成功路径只往 _RESETS 记一格，**不清** _FAILS——登录与注册敢在成功时清账，是因为
+    "密码对了"基本能说明来路正当；这里不行，三题的文本和常见答案组合本来就是公开的，
+    猜中一次恰恰说明来路不明的那一面还没排除。清掉就等于把预算还给猜中者：每 10 次
+    里蒙中一次，他就永远限不住。
     """
     ip = _client_ip(request)
     if _throttled(ip):
         raise _too_many(FAILURE_WINDOW_SECONDS)
+    if _resets_full(ip):
+        raise _too_many(RESET_WINDOW_SECONDS)
     try:
         _store().reset_password(req.username, req.answers, req.new_password,
                                 req.new_answers)
@@ -208,10 +249,10 @@ async def reset(req: ResetRequest, request: Request):
             # 答案错、没留找回答案、查无此人、已停用：同一句、同一格预算、同一个 401
             _note_failure(ip)
             raise HTTPException(status_code=401, detail=e.reason)
-        # 新密码或答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
+        # 新密码或轮换答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
         # 改好的，不计费
         raise HTTPException(status_code=422, detail=e.reason)
-    _FAILS.pop(ip, None)
+    _note_reset(ip)
     return {"status": "password_reset"}
 
 

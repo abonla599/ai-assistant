@@ -109,16 +109,21 @@ def _isolated_throttle():
     429——那时绿就只是算术运气。放在 conftest 而不是某个测试文件里，是因为它
     保护的是整个套件。
 
-    两本账都要清：_FAILS 记登录失败与撞名，_REGISTERS 记注册成功数。后者漏清的
-    话，前面某条用例注册满 3 个号，就会让后面随便一条注册断言变成 429。
+    三本账都要清，一本都不能少：_FAILS 记登录失败与撞名，_REGISTERS 记注册成功数，
+    _RESETS 记改密成功数。后两本记的都是**成功**，也就是"这条用例明明什么都没做错、
+    只是正常工作了几次"就开始攒账——漏清任何一本，前面某条用例注册满 3 个号或改满
+    3 次密，后面随便一条断言 200 的用例就会拿到 429。24 小时的窗口比 10 分钟那本
+    更经不起带出用例：它当天根本不会自己松开。
     """
-    from app.core.auth_router import _FAILS, _REGISTERS
+    from app.core.auth_router import _FAILS, _REGISTERS, _RESETS
 
     _FAILS.clear()
     _REGISTERS.clear()
+    _RESETS.clear()
     yield
     _FAILS.clear()
     _REGISTERS.clear()
+    _RESETS.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
