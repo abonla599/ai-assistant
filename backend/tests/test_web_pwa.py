@@ -32,6 +32,25 @@ def test_static_assets_reachable():
     assert not missing, f"缺失静态资源: {missing}"
 
 
+def test_static_assets_must_be_revalidated_not_reused():
+    """不发 Cache-Control 的静态资源，等于把改版交给别人的缓存去决定。
+
+    2026-09-17 实测：重建并重启后，公网 /app/style.css 仍是 80 分钟前那份旧的
+    （cf-cache-status: HIT，Cloudflare 对 .css/.js 默认注入 max-age=14400）。
+    源站自己没表态，浏览器与边缘就各自按启发式缓存——朋友那边看到的现象是
+    "改了没生效"，而这正是本项目最容易被误判成代码坏了的一类形状。
+
+    no-cache 不是"不缓存"：每次使用前必须回源问一次，而 ETag 就是那一次问价，
+    答案通常是 304。ETag 一旦丢了，省下的请求就会变成整份重传，所以两个一起钉。
+    """
+    for path in ("/app/style.css", "/app/app.js", "/app/sw.js", "/app/", "/admin/"):
+        res = client.get(path)
+        assert res.status_code == 200, path
+        assert res.headers.get("cache-control") == "no-cache", \
+            f"{path} 的 cache-control 是 {res.headers.get('cache-control')!r}"
+        assert res.headers.get("etag"), f"{path} 没有 ETag：no-cache 会退化成每次全量重传"
+
+
 def test_frontend_uses_relative_api_paths_only():
     """前端不得出现绝对服务地址，否则换网络/换设备即失效。"""
     offenders = []
