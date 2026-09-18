@@ -664,21 +664,63 @@ def test_the_pending_cover_exists_and_hides_the_form():
         "pending 态没把那句「正在确认身份…」亮出来"
 
 
-def test_the_settings_sheet_has_a_chat_pane_that_everyone_can_reach():
-    """模型选择搬进设置后，那一页必须对普通用户也开着。
+def test_model_choice_and_context_window_are_reachable_by_everyone():
+    """「当前模型」与「上下文长度」两行必须对普通用户开着。
 
-    它原先在顶栏，人人可用；而设置里唯一列模型的那页（模型服务）是管理员专属
-    （后端 7 条路由都要管理员）。搬过去却只对管理员可见，等于把普通用户换模型的
-    能力整个删掉——那不会报错，只会让人以为"这里没有模型可换"。
+    模型服务那一页是管理员专属（后端 7 条路由都要管理员）。这两样一旦落在它里面，
+    普通用户就没有"换模型"和"少带几条历史"的能力了——而且**不会报错**，只会以为
+    这里没这个东西。上一版它们分别在「当前会话」页和管理员页的 .params 里，
+    后者正是这个 bug 的形状。
     """
     html = _html()
-    assert '<button class="tab" data-tab="chat">' in html, "设置里没有「当前会话」这一页签"
-    chat = re.search(r'<section class="pane" data-pane="chat">[\s\S]*?</section>', html)
-    assert chat, "找不到 data-pane=\"chat\" 那一页"
-    assert "data-admin-only" not in chat.group(0), "这一页对普通用户收起来了：他会没有模型可换"
-    assert 'id="modelSel"' in chat.group(0) and 'id="exportBtn"' in chat.group(0), \
-        "模型选择或导出没真的搬进来（只在顶栏删掉了）"
 
+    def row_of(el_id):
+        """取包住这个 id 的那一行。id 可能写在 <button> 标签自己身上（exportBtn），
+        也可能在行体里（modelSel），所以按位置回溯到最近的 set-row 开标签。"""
+        at = html.find('id="%s"' % el_id)
+        assert at > 0, f"设置列表里找不到 {el_id}"
+        start = max(html.rfind('<button class="set-row', 0, at), html.rfind('<div class="set-row', 0, at))
+        assert start > 0, f"{el_id} 不在任何一行 set-row 里"
+        close = "</button>" if html[start] == "b" else "</div>"
+        end = html.find(close, at)
+        assert end > 0
+        return html[start:end + len(close)]
+
+    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文条数"), ("exportBtn", "导出对话")):
+        assert "data-admin-only" not in row_of(el_id), \
+            f"{el_id} 那一行标了 data-admin-only：普通用户没有{what}的能力，而且不会报错"
+    prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
+    assert 'id="ctxRange"' not in prov and 'id="tokenInput"' in prov, \
+        "滑杆还留在管理员那一页里，或手工填令牌没跟着收进同一页"
+
+
+
+def test_the_settings_list_has_no_teaching_copy():
+    """界面不教人怎么用：设置区不该再有写死的说明长文，也不该有假控件。
+
+    反向断言钉的是**文案**，不是 `.pane-note` 这个 class——`#provTestResult`、
+    `#registerHint`、`#whoInfo` 这些状态槽还在用它，按 class 钉会误伤。
+    温度（`temperature=0.7` 在后端写死，滑杆只改 localStorage 和回显）连同它的
+    单位字符串一起不许回来：一个不生效的控件比没有控件更坏。
+    """
+    html, js, css = _html(), _js(), _css()
+    sheet = html[html.index('<div class="modal hidden" id="settings"'):html.index('<template id="msgTpl">')]
+    for gone in ("用户名 + 密码自己设", "记忆存在后端向量库里", "角色设定会作为系统提示词",
+                 "这一段对话用哪个模型", "界面里的模型下拉", "已有令牌（本机直跑服务",
+                 "可添加到主屏幕", "凭据与找回是怎么工作的"):
+        assert gone not in sheet, f"设置区里又出现说明文了：{gone}"
+    assert "支持 Markdown 与代码高亮" not in js, "空状态那段教学文案回来了"
+    for gone in ("温度", "temperature", "tempRange", "tempVal"):
+        assert gone not in sheet, f"{gone} 回到了界面"
+    # 后端 main.py 那个 temperature=0.7 还在：删掉滑杆删的是"能改"这个承诺，
+    # 不是那份偏好数据。哪天真要透传，pref 上那个 getter 就是现成的落点。
+    assert "get temperature()" in js, "pref.temperature 被一起删了：那是另一件事，别顺手"
+    row = re.search(r"\.set-row\s*\{[^}]*\}", css)
+    assert row and re.search(r"min-height:\s*(4[4-9]|[5-9][0-9])px", row.group(0)), \
+        ".set-row 热区不到 44px：手机上就是「设置不好点」的根因"
+    assert sheet.count("<svg") >= 6, "行图标不是内联 SVG：emoji 字形会渲染成彩色或方块"
+    for glyph in "⚙🔧🌐📄🧠":
+        assert glyph not in sheet and glyph not in css, f"用了 {glyph} 字形"
 
 
 def test_the_sidebar_foot_is_one_row_that_opens_settings():
@@ -702,8 +744,9 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
     assert re.search(r'\$\("whoRow"\)\.onclick\s*=\s*\(\)\s*=>\s*\{\s*openSettings\(\);\s*closeSidebar\(\);', js), \
         "点击没有同时打开设置并收起侧栏"
     assert '$("userAvatar").textContent = name ? name[0]' in js, "头像没取首字母"
-    about = re.search(r'data-pane="about"[\s\S]*?</section>', html).group(0)
-    assert 'id="themeBtn"' in about, "主题按钮从侧栏搬走之后没落到设置弹层里"
+    about = re.search(r'<p class="set-group">关于</p>[\s\S]*?</div>', html).group(0)
+    assert 'id="themeBtn"' in about and "外观" in about, \
+        "主题入口从侧栏搬走之后没落到设置一级列表里，或它已经不改名成「外观」了"
     # 手机上"设置不好点"与"齿轮旁边那个点是什么鬼"两件事的判据：整行要有 44px 的
     # 可点高度，并且要**写出"设置"两个字**——一个没有文字的齿轮在手机上读起来像装饰。
     css = _css()
@@ -1041,7 +1084,8 @@ def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
     html = _html()
     js = _js()
     marked = _ids_with_attr(html, "data-admin-only")
-    assert {"navProviders", "tabProviders"} <= marked, f"模型服务的入口没标出来：{sorted(marked)}"
+    assert {"navProviders", "rowProviders", "paneProviders"} <= marked, \
+        f"模型服务的入口或页体没标出来：{sorted(marked)}"
     assert 'querySelectorAll("[data-admin-only]")' in js, "app.js 没有统一按属性收口"
     sweep = _function_body(js, "applyRole")
     assert re.search(r'classList\.toggle\("hidden"', sweep), "收口没有真的隐藏元素"
@@ -1111,14 +1155,17 @@ def test_memory_search_stays_inside_the_backends_own_cap():
 def test_memory_stats_is_queried_only_for_admins():
     """/v1/memory/stats 是管理员端点：普通用户那儿不能发这一枪。
 
-    发出去的后果不是报错本身，而是那句"记忆服务不可用"——服务明明好着，只是
-    他没权限，用户于是去重启后端，而重启完全治不了这件事。
+    发出去的后果不是报错本身，而是那句"记忆服务不可用"——服务明明好着，只是他
+    没权限，用户于是去重启后端，而重启完全治不了这件事。
+
+    设置重画时关于页那张 dl 回显整个删了（当前模型在上一行就能改、温度压根不生效，
+    回显等于把同一件事说两遍还捎带一个假数字），于是这一枪**根本没人发**。
+    这条锁因此从"必须按角色分流"改成"前端不发"。谁要把它加回来，先回答：
+    普通用户点开那一行会看见什么。
     """
     js = _js()
-    body = _function_body(js, "loadAbout")
-    assert "memoryStats" in body, "关于页已经不读记忆统计了？那这条契约该删还是该改，得有人说清"
-    assert "isAdmin()" in body and body.index("isAdmin()") < body.index("memoryStats"), \
-        "统计请求没有按角色分流"
+    assert "memoryStats" not in js, \
+        "app.js 又有人打 /v1/memory/stats 了：这一枪要么按角色分流，要么别发"
 
 
 def test_a_stale_token_does_not_read_like_a_first_run():

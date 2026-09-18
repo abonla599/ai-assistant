@@ -121,10 +121,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 .top-title { font-size: 15px; font-weight: 600; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
-/* 顶栏只剩开关与标题；模型下拉搬进设置那一页，宽度跟着容器走。 */
-.model-sel { width: 100%;
-  border: 1px solid var(--line); background: var(--surface);
-  border-radius: 9px; padding: 6px 9px; font-size: 13px; max-width: 46vw;
+/* 模型下拉现在是「当前模型」那一行的值：右对齐、跟着行高走，不另占一块。 */
+.set-sel { max-width: 52vw; text-align: right; text-align-last: right;
+  border: 0; background: transparent; color: var(--text-2);
+  font-size: 14px; padding: 0; outline: none; cursor: pointer;
 }
 .chip {
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text-2);
@@ -293,13 +293,46 @@ button, input, textarea, select { font: inherit; color: inherit; }
 /* ---------- 设置弹窗 ---------- */
 .modal { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .6); display: flex; align-items: center; justify-content: center; padding: 16px; }
 .modal-card { width: min(720px, 100%); max-height: 88vh; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
-.modal-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); }
-.modal-body { overflow-y: auto; padding: 16px; }
-.tabs { display: flex; gap: 2px; flex: 1; overflow-x: auto; }
-.tab { border: 0; background: transparent; color: var(--text-2); padding: 9px 13px; border-radius: 9px; cursor: pointer; font-size: 14px; white-space: nowrap; }
-.tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.pane { display: none; }
-.pane.active { display: block; }
+/* ---------- 设置弹层：一屏到底的分组列表 + 二级页 ----------
+ * 语法照用户给的参考图：分组小标题（灰）+ 圆角卡片 + 行（图标 · 文字 · 值 · 后缀）。
+ * 行高 54px 是拇指热区（手机上点不准的根因就是行太矮）；`.set-go` 的 `›` / `⇅`
+ * 是语义不是装饰——前者进二级页，后者就地改。
+ */
+.set-sheet { width: min(560px, 100%); }
+.set-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.set-bar { display: flex; align-items: center; gap: 10px; flex: none; min-height: 56px;
+  padding: calc(8px + var(--safe-top)) 10px 8px 12px; border-bottom: 1px solid var(--line); }
+.set-title { flex: 1; margin: 0; text-align: center; font-size: 17px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-back { flex: none; font-size: 20px; }
+.set-x { flex: none; margin-left: auto; }
+.set-bar:has(.set-back) .set-title { text-align: left; }
+.set-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 22px; }
+.set-group { margin: 22px 2px 8px; color: var(--text-3); font-size: 12.5px; letter-spacing: .4px; }
+.set-card { background: var(--bg-soft); border-radius: var(--radius); overflow: hidden; }
+.set-last { margin-top: 18px; }
+.set-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px;
+  padding: 0 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent;
+  color: inherit; text-align: left; cursor: pointer; font-size: 15px; }
+.set-row:last-child { border-bottom: 0; }
+.set-row:hover { background: var(--bg-hover); }
+.set-ico { width: 20px; flex: none; display: grid; place-items: center; color: var(--text-2); }
+.set-ico svg { width: 19px; height: 19px; }
+.set-lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-val { flex: none; display: flex; align-items: center; gap: 6px;
+  color: var(--text-3); font-size: 14px; overflow: hidden; }
+.set-val input[type="range"] { width: 92px; accent-color: var(--accent); }
+.set-go { flex: none; width: 14px; text-align: center; color: var(--text-3); font-size: 15px; }
+.set-plain, .set-plain:hover { cursor: default; background: transparent; }
+.set-danger .set-lbl, .set-danger .set-ico { color: var(--danger); }
+.set-me { display: flex; align-items: center; gap: 12px; padding: 14px; }
+.set-av { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid;
+  place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.set-me-name { flex: 1; min-width: 0; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-tag { flex: none; font-size: 11.5px; color: var(--accent);
+  background: var(--accent-soft); padding: 3px 8px; border-radius: 999px; }
+.set-tag:empty { display: none; }
 .pane-note { font-size: 13px; color: var(--text-2); margin: 0 0 14px; }
 .pane-note.err { color: var(--danger); }
 .row { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -354,8 +387,6 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 .cam-hint { font-size: 13px; color: var(--danger); min-height: 18px; }
 .cam-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
-.about { margin: 0; display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; font-size: 13px; }
-.about dt { color: var(--text-3); } .about dd { margin: 0; overflow-wrap: anywhere; }
 
 /* ---------- 移动端 ---------- */
 .backdrop { display: none; }
@@ -373,9 +404,12 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .composer { padding: 4px 12px calc(12px + var(--safe-bottom)); }
   .msg.user .msg-body { max-width: 88%; }
   .msg-tools { opacity: 1; }
-  .modal { padding: 0; align-items: flex-end; }
+  .modal { padding: 0 0 8px; align-items: flex-end; }
   .modal-card { width: 100%; max-height: 92vh; border-radius: 18px 18px 0 0; border-bottom: 0; }
-  .about { grid-template-columns: 96px 1fr; }
+  /* 设置弹层在手机上接近全屏：原先"底部半屏 + 内容在里面再滚一次"是双重滚动，
+     「关于」最后一行永远看不见。现在只留一个滚动轴，底部那 8px 是弹层的边界。 */
+  .set-sheet { max-height: calc(100dvh - 8px); }
+  .set-val input[type="range"] { width: 76px; }
   .att-chip .nm { max-width: 110px; }
   /* 注册那一行是"两个输入框 + 一个按钮"：手机上并排会把邀请码挤成三个字宽，
      三个可点区也小到点不准，改成各占整行。 */

@@ -129,28 +129,92 @@
     </main>
   </div>
 
-  <!-- 设置面板 -->
+  <!-- 设置面板：一屏到底的分组列表 + 二级页。
+       为什么没有 tab：原先 6 个 tab 在 390px 宽下只露得出 4 个，且没有任何"右边还有"
+       的迹象——「连接」「关于」两页等于不存在。分组小标题 + 卡片行把这件事从根上消掉。
+       值的两种后缀是语义：`⇅` 就地改，`›` 进二级页。 -->
   <div class="modal hidden" id="settings" role="dialog" aria-modal="true" aria-label="设置">
-    <div class="modal-card">
-      <div class="modal-head">
-        <div class="tabs" id="settingsTabs">
-          <button class="tab hidden" id="tabProviders" data-tab="providers" data-admin-only>模型服务</button>
-          <button class="tab" data-tab="chat">当前会话</button>
-          <button class="tab" data-tab="memory">长期记忆</button>
-          <button class="tab" data-tab="persona">角色设定</button>
-          <button class="tab" data-tab="conn">连接</button>
-          <button class="tab" data-tab="about">关于</button>
+    <div class="modal-card set-sheet">
+      <div class="set-view" id="setList">
+        <div class="set-bar">
+          <h2 class="set-title">设置</h2>
+          <button class="icon-btn set-x" id="closeSettings" aria-label="关闭">×</button>
         </div>
-        <button class="icon-btn" id="closeSettings" aria-label="关闭">×</button>
+        <div class="set-scroll">
+          <div class="set-card set-me">
+            <span class="set-av" id="setAvatar">·</span>
+            <span class="set-me-name" id="setMe">未登录</span>
+            <span class="set-tag" id="setRole"></span>
+          </div>
+
+          <p class="set-group">账户</p>
+          <div class="set-card">
+            <button class="set-row" id="rowAccounts">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg></span>
+              <span class="set-lbl">切换账户</span><span class="set-val" id="accountsVal"></span><span class="set-go">›</span></button>
+            <button class="set-row" id="rowPassword">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8" cy="12" r="3.6"/><path d="M11.6 12H21l-2 2.5"/></svg></span>
+              <span class="set-lbl">改密码</span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">模型</p>
+          <div class="set-card">
+            <div class="set-row">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></span>
+              <span class="set-lbl">当前模型</span>
+              <span class="set-val"><select id="modelSel" class="set-sel" aria-label="选择模型"></select></span></div>
+            <button class="set-row hidden" id="rowProviders" data-admin-only>
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 12l4-3"/></svg></span>
+              <span class="set-lbl">模型服务</span><span class="set-val" id="chatNote"></span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">对话</p>
+          <div class="set-card">
+            <button class="set-row" id="rowPersona">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-5 4V5Z"/></svg></span>
+              <span class="set-lbl">角色设定</span><span class="set-val" id="personaVal"></span><span class="set-go">›</span></button>
+            <div class="set-row">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h9l3 3v13H6V4Z"/><path d="M9 4v5h6"/></svg></span>
+              <span class="set-lbl">上下文长度</span>
+              <span class="set-val"><b id="ctxVal">10</b> 条
+                <input type="range" id="ctxRange" min="2" max="40" step="2" value="10" aria-label="携带上下文条数"></span></div>
+            <button class="set-row" id="exportBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></span>
+              <span class="set-lbl">导出本次对话</span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">记忆</p>
+          <div class="set-card">
+            <button class="set-row" id="rowMemory">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v6c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6M5 12v6c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8v-6"/></svg></span>
+              <span class="set-lbl">长期记忆</span><span class="set-val" id="memoryVal"></span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">关于</p>
+          <div class="set-card">
+            <button class="set-row" id="themeBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
+              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <div class="set-row set-plain">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
+              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
+          </div>
+
+        </div>
       </div>
 
-      <div class="modal-body">
+      <!-- 二级页：同一弹层内换 view，不新开弹层。 -->
+      <div class="set-view hidden" id="setPages">
+        <div class="set-bar">
+          <button class="icon-btn set-back" id="setBack" aria-label="返回">‹</button>
+          <h2 class="set-title" id="setPageTitle">设置</h2>
+        </div>
+        <div class="set-scroll" id="setPageBody">
         <!-- 模型服务：整块都是管理员专属（后端 7 条路由都要求管理员），
              data-admin-only 让 app.js 在拿到角色后统一收起。hidden 必须先写在 HTML 上：
              角色要等 /v1/auth/me 回来才知道，默认可见就等于每次冷启动都给普通用户
              闪一下"模型服务"，点进去必然 403。默认收起、确认是管理员才放行。 -->
-        <section class="pane hidden" data-pane="providers" id="paneProviders" data-admin-only>
-          <p class="pane-note">界面里的模型下拉、以及实际调用哪个模型，都来自下面这份配置。改这一处即可接入任意 OpenAI 兼容服务（DeepSeek、阿里云百炼 Qwen、OpenAI 等）。</p>
+        <section class="set-page hidden" data-page="providers" id="paneProviders" data-admin-only>
           <div id="providerList" class="prov-list"></div>
           <button class="btn btn-block" id="addProviderBtn">＋ 添加模型服务</button>
 
@@ -170,35 +234,33 @@
             <p class="pane-note" id="provTestResult"></p>
           </form>
 
-          <div class="params">
-            <label class="field">
-              <span>温度 temperature <b id="tempVal">0.7</b></span>
-              <input type="range" id="tempRange" min="0" max="2" step="0.1" value="0.7">
-              <em>越低越严谨，越高越发散。当前后端接口尚未透传该参数，仅作记录。</em>
-            </label>
-            <label class="field">
-              <span>携带上下文条数 <b id="ctxVal">10</b></span>
-              <input type="range" id="ctxRange" min="2" max="40" step="2" value="10">
-              <em>每次请求附带的历史消息数量，过长会超出模型上下文窗口</em>
-            </label>
+          <!-- 手工填令牌：本机直跑服务时的后门。它跟着这一页一起只对管理员出现，
+               普通用户不该在设置里看见一个填令牌的输入框。 -->
+          <div class="row">
+            <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
+            <button class="btn btn-primary" id="saveTokenBtn">保存</button>
           </div>
         </section>
 
-        <!-- 当前会话：模型选择与导出从顶栏搬进来。这一页**不是**管理员页——
-             「模型服务」那一页要管理员权限（后端 7 条路由都是），普通用户换模型
-             只能靠这里，收起来就等于把他的能力删了。 -->
-        <section class="pane" data-pane="chat">
-          <p class="pane-note">这一段对话用哪个模型、要不要角色设定，都在这里改。模型由管理员配好，您只管挑。</p>
-          <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
-          <p class="pane-note" id="chatNote"></p>
+        <!-- 账户：这台机器上认识谁。清单本体在「切换账户」那份实现里补，
+             这一页今天先承担"添加一个账号"——注册只有两处入口：首屏那一层，和这里。 -->
+        <section class="set-page hidden" data-page="accounts" id="paneAccounts">
+          <p class="pane-note" id="whoInfo">未登录</p>
+          <div class="row"><button class="btn" id="openRegister">添加账户</button></div>
+          <p class="pane-note" id="registerHint"></p>
+        </section>
+
+        <!-- 角色设定 -->
+        <section class="set-page hidden" data-page="persona" id="panePersona">
+          <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
           <div class="row">
-            <button class="btn" id="exportBtn">导出当前会话</button>
+            <button class="btn btn-primary" id="savePersonaBtn">保存</button>
+            <button class="btn" id="clearPersonaBtn">清除</button>
           </div>
         </section>
 
         <!-- 长期记忆 -->
-        <section class="pane" data-pane="memory">
-          <p class="pane-note">记忆存在后端向量库里，按用户隔离、跨重启保留。对话中提到的事实可在此查看、搜索或删除。</p>
+        <section class="set-page hidden" data-page="memory" id="paneMemory">
           <form class="row" id="memoryAddForm">
             <input id="memoryInput" type="text" placeholder="让助手记住一件事，例如：我叫张三" autocomplete="off">
             <button class="btn" type="submit">添加</button>
@@ -209,46 +271,7 @@
           </form>
           <ul class="mem-list" id="memoryList"></ul>
         </section>
-
-        <!-- 角色设定 -->
-        <section class="pane" data-pane="persona">
-          <p class="pane-note">角色设定会作为系统提示词随每次请求发送，仅对当前会话生效，保存在本机。</p>
-          <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
-          <div class="row">
-            <button class="btn btn-primary" id="savePersonaBtn">保存</button>
-            <button class="btn" id="clearPersonaBtn">清除</button>
-          </div>
-        </section>
-
-        <!-- 连接 -->
-        <section class="pane" data-pane="conn">
-          <p class="pane-note">用户名 + 密码自己设，注册完就能用。令牌由服务端签发、只存在本机
-            浏览器；换手机或重装后，用同一个用户名登录即可。忘了密码就答那三道固定的找回题
-            （答案就是注册第二步留的那三句），答对能自助改密（改完之后每台设备都要重新登录）。
-            管理员撤销或轮换之后旧令牌立即失效。各人的会话、附件与记忆互相看不到。</p>
-          <p class="pane-note" id="whoInfo">未登录</p>
-          <!-- 注册只留一处：首屏那一层。这里再放一套字段，就等于多一处要各自
-               校验、各自挡双击、各自跟后端字段名对齐的地方（找回三格一加，
-               这套两格的老表单就已经填不出一个合法的注册了）。 -->
-          <div class="row">
-            <button class="btn" id="openRegister">注册一个新账号</button>
-          </div>
-          <p class="pane-note" id="registerHint"></p>
-          <p class="pane-note">已有令牌（本机直跑服务的管理员入口）：直接填入并保存。</p>
-          <div class="row">
-            <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
-            <button class="btn btn-primary" id="saveTokenBtn">保存</button>
-          </div>
-          <p class="pane-note" id="connInfo"></p>
-        </section>
-
-        <!-- 关于 -->
-        <section class="pane" data-pane="about">
-          <div class="row">
-            <button class="btn" id="themeBtn">◐ 换个主题</button>
-          </div>
-          <dl class="about" id="aboutInfo"></dl>
-        </section>
+        </div>
       </div>
     </div>
   </div>

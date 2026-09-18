@@ -59,6 +59,7 @@ function applyTheme() {
   document.documentElement.dataset.theme = pref.theme;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = pref.theme === "light" ? "#ffffff" : "#0e1013";
+  $("themeVal").textContent = pref.theme === "light" ? "浅色" : "深色";
 }
 
 function fmtSize(bytes) {
@@ -457,10 +458,10 @@ function applyRole() {
   /* 头像只取首字母：真实头像要么上传照片（多一处可写文件），要么引外部服务，
      都不值这一行的信息量 */
   $("userAvatar").textContent = name ? name[0] : "·";
-  $("whoInfo").textContent = state.me
-    ? `当前身份：${state.me.username}（${admin ? "管理员" : "普通用户"}）`
-    : "未登录：用用户名和密码注册一个，或直接把管理员给您的令牌填在下面";
-  if (!admin && $("paneProviders").classList.contains("active")) selectTab("conn");
+  syncSetIdentity();
+  // 正停在管理员专属的二级页时角色没了：退回一级列表，别对着一个必然 403 的表单站着。
+  if (!admin && !$("setPages").classList.contains("hidden")
+      && document.querySelector('.set-page[data-page="providers"]:not(.hidden)')) showSetList();
 }
 
 /* ---------------- 模型服务 ---------------- */
@@ -888,11 +889,9 @@ function emptyState() {
   img.src = "icon.png"; img.alt = "";
   const h = document.createElement("h2");
   h.textContent = "开始一段对话";
-  const p = document.createElement("p");
-  p.textContent = "支持 Markdown 与代码高亮，可上传文本/代码和图片。"
-    + (isAdmin() ? "模型在「设置 → 模型服务」里自行接入。"
-                 : "用哪个模型由管理员配好，您在「设置 → 当前会话」里挑。");
-  el.append(img, h, p);
+  // 这里原先有一段"支持 Markdown…模型在设置里怎么挑"的说明：界面不教人怎么用，
+  // 而且它指的那一页名已经变了。要读说明去 docs/用户手册.md。
+  el.append(img, h);
   return el;
 }
 
@@ -1160,32 +1159,54 @@ async function sendFeedback(index, rating, btn) {
   } catch (e) { setStatus("反馈失败：" + e.message, true); }
 }
 
-/* ---------------- 设置面板 ---------------- */
-function openSettings(tab) {
+/* ---------------- 设置弹层 ----------------
+ * 一级是分组列表，二级页在同一个弹层内换 view（不新开一层：手机上两层弹层
+ * 意味着人不知道自己按哪个 × 才能出去）。openSettings 不再挑"默认页签"——
+ * 列表本身就是入口，没有"落在哪一页"这回事了。
+ */
+const SET_PAGES = { providers: "模型服务", accounts: "账户",
+                    persona: "角色设定", memory: "长期记忆" };
+
+function openSettings(page) {
   $("settings").classList.remove("hidden");
-  selectTab(tab || (isAdmin() ? "providers" : "conn"));   // 加载由 selectTab 一处负责
+  showSetList();
+  if (page) openSetPage(page);
 }
 function closeSettings() { $("settings").classList.add("hidden"); }
 
-function selectTab(name) {
+function showSetList() {
+  $("setPages").classList.add("hidden");
+  $("setList").classList.remove("hidden");
+}
+
+function openSetPage(name) {
   // 模型服务这一面对普通用户全是 403：入口平时已被 applyRole 收走，这里是第二道，
-  // 免得别处（默认页签、快捷键、角色切换后的旧状态）把他推进一个只会报错的表单。
+  // 免得别处（快捷键、角色切换后的旧状态）把他推进一个只会报错的表单。
   if (name === "providers" && !isAdmin()) {
     setStatus("模型服务只能由管理员配置，请联系管理员", true);
-    name = "conn";
+    showSetList();
+    return;
   }
-  $("settingsTabs").querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-  $("settings").querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === name));
+  const page = document.querySelector(`.set-page[data-page="${name}"]`);
+  if (!page) { showSetList(); return; }
+  $("setPageTitle").textContent = SET_PAGES[name];
+  $("setList").classList.add("hidden");
+  $("setPages").classList.remove("hidden");
+  document.querySelectorAll(".set-page")
+    .forEach((p) => p.classList.toggle("hidden", p !== page));
   if (name === "providers") loadProviders();
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
-  if (name === "conn") syncConnPane();
-  if (name === "about") loadAbout();
+  if (name === "accounts") syncConnPane();
 }
 
+/** 账户页的两处回显。令牌输入框在管理员的「模型服务」页里，所以这一页
+ *  没打开时也要能把它填上——值统一从 pref 取，不做第二份。 */
 function syncConnPane() {
   $("tokenInput").value = pref.token;
-  $("connInfo").textContent = `当前服务：${location.origin}　·　${pref.token ? "本机已存令牌" : "本机未存令牌"}`;
+  $("whoInfo").textContent = state.me
+    ? `当前身份：${state.me.username}（${isAdmin() ? "管理员" : "普通用户"}）`
+    : "未登录";
 }
 
 function emptyItem(text) {
@@ -1205,6 +1226,9 @@ async function loadMemories() {
       ? await API.searchMemory(state.memoryQuery, 20)
       : await API.listMemory(50);
     const items = data.memories || data.results || [];
+    // 行上的值只在"浏览全部"时写：搜索态那个数是筛选结果，不是库存量，写进去就是骗人。
+    // listMemory 的上限是 50，正好 50 条说明后面还有，不能报成"50 条"。
+    if (!state.memoryQuery) $("memoryVal").textContent = items.length >= 50 ? "50+ 条" : `${items.length} 条`;
     if (!items.length) {
       ul.appendChild(emptyItem(state.memoryQuery ? "没有匹配的记忆" : "还没有记忆"));
       return;
@@ -1236,39 +1260,29 @@ async function loadMemories() {
 
 /** "记忆服务不可用"是一句会让人去做错事的话：重启后端治不了没登录。 */
 function memoryListErrorText(e) {
-  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 连接」重新注册";
+  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 账户」重新注册";
   if (e.status === 403) return "这个账号没有读取记忆的权限，请找管理员确认";
   return "记忆服务不可用：" + e.message;
 }
 
-async function loadAbout() {
-  const dl = $("aboutInfo");
-  dl.innerHTML = "";
-  const rows = [["界面", "PWA（同源托管，可添加到主屏幕）"],
-                ["当前模型", (currentProvider() || {}).name || "未选择"],
-                ["登录身份", state.me
-                  ? `${state.me.username} · ${isAdmin() ? "管理员" : "普通用户"}`
-                  : "未登录"]];
-  // 全库统计是管理员端点：普通用户那儿的 403 不是"记忆服务坏了"，
-  // 所以这一枪根本不该发（他自己的条数在「长期记忆」页签里看得见）。
-  if (isAdmin()) {
-    try {
-      const stats = await API.memoryStats();
-      rows.push(["记忆库", `${stats.collection_name || "-"} · ${stats.total_memories ?? "?"} 条`]);
-    } catch (e) { rows.push(["记忆库", "读取失败：" + e.message]); }
-  }
-  rows.push(["温度 / 上下文", `${pref.temperature} / ${pref.contextWindow} 条`]);
-  rows.forEach(([k, v]) => {
-    const dt = document.createElement("dt"); dt.textContent = k;
-    const dd = document.createElement("dd"); dd.textContent = v;
-    dl.append(dt, dd);
-  });
+/** 设置一级列表顶上的身份卡。
+ *  原先这里是一张 dl 回显（当前模型 / 登录身份 / 温度 · 上下文…）：模型在上一行
+ *  就能改、温度根本不生效，回显等于把同一件事说两遍还捎带一个假数字。值现在
+ *  只待在各自的行上，这一处只写"我是谁"。
+ */
+function syncSetIdentity() {
+  const name = (state.me || {}).username || "";
+  $("setAvatar").textContent = name ? name[0] : "·";
+  $("setMe").textContent = name || "未登录";
+  $("setRole").textContent = name ? (isAdmin() ? "管理员" : "普通用户") : "";
 }
 
 /* 角色只显示在设置那一页里：原先顶栏那颗 chip 是同一件事的第二个入口，
    而它写的"无角色"三个字并不告诉人点进去能干什么。 */
 function syncPersonaChip() {
   $("personaInput").value = pref.persona(pref.sessionId);
+  // 列表上就该看得见这一项有没有内容：点进去才发现"哦我写过"是多余的一步。
+  $("personaVal").textContent = $("personaInput").value.trim() ? "已填写" : "";
 }
 
 function setAttachMenu(open) {
@@ -1447,10 +1461,15 @@ function bind() {
 
   $("closeSettings").onclick = closeSettings;
   $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };
-  $("settingsTabs").onclick = (e) => {
-    const tab = e.target.closest(".tab");
-    if (tab) selectTab(tab.dataset.tab);
-  };
+  $("setBack").onclick = showSetList;
+  $("rowAccounts").onclick = () => openSetPage("accounts");
+  $("rowProviders").onclick = () => openSetPage("providers");
+  $("rowPersona").onclick = () => openSetPage("persona");
+  $("rowMemory").onclick = () => openSetPage("memory");
+  // 改密码复用首层那套三步找回：这里再放一份字段就是第二个要各自校验、
+  // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
+  // 所以先把层打开，再翻到找回那张。
+  $("rowPassword").onclick = () => { closeSettings(); showAuth(); showAuthView("recover"); };
 
   $("addProviderBtn").onclick = () => {
     state.editingProvider = null;
@@ -1465,10 +1484,6 @@ function bind() {
   $("provTestBtn").onclick = testProviderDraft;
   $("provCancelBtn").onclick = closeProviderForm;
 
-  $("tempRange").oninput = (e) => {
-    pref.temperature = e.target.value;
-    $("tempVal").textContent = pref.temperature;
-  };
   $("ctxRange").oninput = (e) => {
     pref.contextWindow = e.target.value;
     $("ctxVal").textContent = pref.contextWindow;
@@ -1586,10 +1601,9 @@ async function boot() {
   bind();
   setupKeyboardAware();
   updateSendEnabled();
-  $("tempRange").value = pref.temperature;
-  $("tempVal").textContent = pref.temperature;
   $("ctxRange").value = pref.contextWindow;
   $("ctxVal").textContent = pref.contextWindow;
+  $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
   /* 第一屏只能是中性层：本机有没有令牌是同步就知道的事，但"这枚令牌还有效吗"
      必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
