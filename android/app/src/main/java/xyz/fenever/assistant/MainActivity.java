@@ -178,7 +178,6 @@ public class MainActivity extends Activity {
             }
             // API 9 起就有，minSdk 23 直接可用；比 API 33 的 setDestinationDirectoryPath 更稳
             request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
-            request.setAllowedOverwrite(true);
             request.setNotificationVisibility(
                     DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             long id = manager.enqueue(request);

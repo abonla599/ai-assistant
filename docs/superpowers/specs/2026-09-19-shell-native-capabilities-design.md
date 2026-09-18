@@ -153,14 +153,30 @@ CDP 验收），提醒那栏显示"这里设的提醒只在这台手机的应用
 
 ## 6. 测试与可验证边界（诚实账）
 
-本机**没有 Android SDK**，所以 Java 的编译与运行验证只能在 CI。上次 `DownloadManager.Request`
-的 `setUserAgent` / `allowOverwrite` 两个不存在的方法烧了两轮 CI，教训是：**任何子代理写的
-Java 都算未验证，直到 CI 绿**。分层如下：
+本机没有完整 Android SDK（跑不了 `gradle assembleDebug`），**但 `javac` 加一份 `android.jar`
+就能在本地把"找不到符号"这一整类错误抓出来**——而 v0.12 连着两轮 CI 红，全是这一类
+（`setUserAgent`、`allowOverwrite`，以及我"修"出来的第三个不存在的名字 `setAllowedOverwrite`）。
+命令（一次性下载 61MB 平台包，产物留在仓库外）：
+
+```bash
+cd /c/Users/34426/.qoder-cn/tmp/android-platform
+cp <repo>/android/app/src/main/java/xyz/fenever/assistant/MainActivity.java src/xyz/fenever/assistant/
+# src/xyz/fenever/assistant/BuildConfig.java 是手写桩，只给 APP_URL
+javac -encoding UTF-8 -classpath android-34-ext12/android.jar -d out \
+      src/xyz/fenever/assistant/*.java
+```
+
+它抓得到：平台 API 的方法名与签名、类型不兼容、抽象方法未实现。
+它抓不到：资源引用（`R.*`）、清单合并、lint、运行时行为、真机渲染。
+**所以任何 Java 文件在提交前先过这条命令**，CI 只用来兜它抓不到的那部分。
+
+分层如下：
 
 | 层 | 在哪验 | 验什么 |
 | --- | --- | --- |
+| Java 平台 API 签名 | **本机 `javac` + `android.jar`** | 方法真实存在、参数类型对（上次那类错误只在这层暴露，且现在本地就能抓） |
 | `core/ReminderStore`、`core/ShareInbox` | CI `gradle :app:testDebugUnitTest`（纯 JVM，不引 Robolectric） | JSON 编解码、owner 过滤、32 条上限、repeat 推进、id 正则拒绝 `../`、文件名清洗 |
-| Java 整体 | CI `assembleDebug` | 平台 API 调用签名真实存在（上次那类错误只在这层暴露） |
+| Java 整体 + 资源 + 清单 | CI `assembleDebug` | 本机 javac 覆盖不到的构建期问题 |
 | JS 降级路径 | 本机 headless Edge + CDP | 无 `AssistantShell` 时不抛错、提醒栏出说明文案、`pendingShares` 恒空 |
 | 桥方法名集合 | 已有 pytest 前端语料锁（`_code_lines` / `_strip_js_comments`） | 方法名漂移即红 |
 | 通知真响、Doze 延迟、组件渲染、分享面板出现、重启后提醒还在 | **只能实机，由你在手机上点** | 见 §9 清单 |
@@ -168,6 +184,9 @@ Java 都算未验证，直到 CI 绿**。分层如下：
 新增 `.github/workflows/android-tests.yml`（`push.paths: android/**` + `workflow_dispatch`），
 跑 `assembleDebug` 与 `testDebugUnitTest`。为什么单开一个文件：`release-apk.yml` 由 tag 触发，
 出包前必须先有测试可跑，把两者并到一个文件会让"测试失败"和"发版失败"混成一次红。
+
+**教训入档**：v0.12 那轮我说过一次"修好了"，依据只是"把报错的两个名字改了"，没等 CI 复跑，
+结果换进去的 `setAllowedOverwrite` 同样不存在。判成败要可核验的证据——编译器说通过才算通过。
 
 ## 7. 发布与版本
 
