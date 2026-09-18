@@ -142,7 +142,7 @@ let regStep = 1;
  * 坏法（人答的是另一套问题，找回永远只回一句"答案不正确"），所以由
  * tests/test_web_pwa.py 拿后端那份逐字比一次。别把这三句再抄到 index.html 里去。
  */
-const RECOVERY_QUESTIONS = ["你小学在哪上？", "你的用户名是什么？", "你的父亲叫什么名字？"];
+const RECOVERY_QUESTIONS = ["你的手机号后四位是什么？", "你小学在哪上？", "你父母姓氏的拼音首字母各一个是什么？"];
 
 /** 题面从常量渲染进那六格（注册与找回各三道）。HTML 里没有第二份文字。 */
 function renderRecoveryQuestions() {

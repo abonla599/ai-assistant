@@ -477,9 +477,9 @@ def test_the_three_fixed_questions_are_pinned_verbatim():
     问号换成半角）在存储层一条测试都不会红，要等到 Task 3/4 的前端契约测试才炸
     ——所以这里逐字钉。
     """
-    assert auth_module.RECOVERY_QUESTIONS == ("你小学在哪上？",
-                                             "你的用户名是什么？",
-                                             "你的父亲叫什么名字？"), \
+    assert auth_module.RECOVERY_QUESTIONS == ("你的手机号后四位是什么？",
+                                             "你小学在哪上？",
+                                             "你父母姓氏的拼音首字母各一个是什么？"), \
         "找回问题是全站固定的事实来源，改它要走计划，不能顺手改文案"
     # 条数是形状闸门、比对次数与那句"3 题"文案共同的事实来源；它跟着常量走，
     # 所以钉住数字才算钉住"三题"这件事本身。
