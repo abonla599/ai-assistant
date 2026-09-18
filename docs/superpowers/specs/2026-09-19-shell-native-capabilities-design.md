@@ -1,0 +1,201 @@
+# 壳的三项原生能力：提醒、分享入口、桌面组件
+
+日期：2026-09-19　状态：设计已逐节确认，待写实现计划
+
+## 0. 背景：这个需求为什么不是"独立软件"
+
+起因是"能不能把 app 从浏览器里独立出来，手机留一个稳定版本，点检查更新才更新"。
+把现状读清楚之后，诉求换了形状：
+
+- 现有 `android/` **已经是原生应用**（`MainActivity` + `WebView`，自己的清单、权限、签名身份）。
+  通知、桌面组件、系统分享入口都属于**宿主应用**，与"页面从哪加载"无关。
+- 他最终要的是**原生能力**，不是版本自主权、不是离线、不是上架。
+  所以"钉版本 / 检查更新"这条明确不在本设计内（见 §8）。
+- 三项能力都做得成，且**服务端只改一行**（一个响应头，§2 末尾）。
+
+用户选的三项：通知提醒（只靠本地排期，不要服务端推事件）、系统分享入口、
+桌面小组件 + 快捷入口（内容 = 今日提醒 + 快捷入口，不要学习统计）。
+明确**不做**本地数据库与离线队列。
+
+## 1. 总体形态与边界
+
+`android/` 从 1 个 Activity 长成 9 个小类 + 3 个资源文件；`build.gradle` 里依然不出现
+`implementation` —— 零第三方依赖这条性质保住，全部走平台 API。
+
+```
+android/app/src/main/java/xyz/fenever/assistant/
+  MainActivity.java        改：装桥、收冷启动 extra、onPageFinished 后冲事件
+  ShellBridge.java         新：唯一注入 JS 世界的对象
+  NotificationChannels.java 新：一次性建渠道
+  core/ReminderStore.java  新：排期表（不 import android.*，JVM 可单测）
+  core/ShareInbox.java     新：待分享件队列（同上）
+  ReminderScheduler.java   新：往 AlarmManager 排/撤
+  ReminderReceiver.java    新：到点 → 发通知 + 推进 repeat + 刷组件
+  BootReceiver.java        新：开机重排（RECEIVE_BOOT_COMPLETED 是安装期权限）
+  ShareActivity.java       新：ACTION_SEND 跳板，NoDisplay，自己不出界面
+  AssistantWidget.java     新：AppWidgetProvider
+android/app/src/main/res/layout/widget_assistant.xml   新
+android/app/src/main/res/xml/widget_assistant_info.xml 新
+android/app/src/main/res/xml/shortcuts.xml             新（静态快捷方式，零代码）
+AndroidManifest.xml        改
+build.gradle               改：versionCode 13 / versionName "0.13"
+```
+
+**每个类一个职责**，且刻意把不带 Android 依赖的逻辑收进 `core/`：`ReminderStore` 与
+`ShareInbox` 能在 CI 里跑真正的 JVM 单元测试（见 §6）——这是本设计里唯一能把"写 Java
+却验不了"这件事压下去的手段。
+
+**权限只加两项**：`POST_NOTIFICATIONS`（Android 13+ 运行时权限，用户第一次设提醒时问一次）、
+`RECEIVE_BOOT_COMPLETED`（安装期，不弹框）。
+**不申请** `SCHEDULE_EXACT_ALARM`，不加前台服务，不做"请到设置里把助手加入白名单"的厂商引导。
+代价写死在这里：用 `setAndAllowWhileIdle`，提醒**可能晚几分钟**，Doze 深睡下更晚。
+对"7:30 背词"够用，对"准点抢课"不够——本产品不承诺准点。
+
+## 2. 桥契约
+
+JS 世界只多一个对象 `window.AssistantShell`，八个方法，全部**同步返回 JSON 字符串**
+（不引回调、不引线程模型）：
+
+```
+capabilities()                                → {"shell":1}
+setOwner(user)                                → 之后到点的通知只发给这个人
+scheduleReminder(json)                        → {"ok":true,"nextAt":...}
+cancelReminder(id)                            → {"ok":true}
+listReminders()                               → [{"id":...,"at":...,"title":...}]
+pendingShares()                               → [{"id":...,"name":...,"mime":...,"size":...}]
+readShareChunk(id, offset, length)            → {"b64":"..."}
+consumeShare(id)                              → {"ok":true}
+```
+
+三条铁律：
+
+1. **桥不接触会话令牌、不拼 JS、不执行任何文本。** 原生→JS 只有一个固定句式
+   （`window.__shellEvent && window.__shellEvent('<json>')`），且 json 里**只放 id 不放内容**——
+   分享来的文件名是外部可控字符串，拼进 `evaluateJavascript` 就是 JS 注入；JS 拿 id 回查元数据。
+2. **id 走正则白名单**（`^[A-Za-z0-9_-]{8,24}$`，与 `export_store.TICKET_ID_RE` 同脾气；
+   提醒 id 是 JS 给的 `r-` + 12 位，分享 id 是壳给的 16 位 url-safe 随机），
+   路径永远由壳自己拼成 `cacheDir/shares/<校验过的 id>`，绝不接受外部传入的路径片段。
+3. `readShareChunk` 单次 `length` 上限 512KB，超出直接拒绝；分享件消费后或 30 分钟即删。
+
+**已拍板的两条裁决**：
+
+- **① `owner` 命名空间**：提醒与分享件都带 `owner`（用户名，不是令牌）。不加的话，A 账号设的
+  "提醒我给某人发消息"在 B 登录后照样弹到锁屏上，与已修过的跨用户记忆泄露（见
+  `2026-09-18-account-switching-design.md`）是同一个形状，只是发生在设备上。
+  `listReminders()` / `pendingShares()` 只返回 `owner == activeOwner` 的条目；
+  `activeOwner` 由 JS 在每次登录/切号后调 `setOwner` 写入，**未 setOwner 前桥一律返回空集**
+  （fail-closed，宁可看不见也不看见别人的）。
+- **② 那一行 CSP**：`@JavascriptInterface` 会挂到**每个 frame** 的 window 上，而
+  `view.getUrl()` 只看主文档，所以同源页面上任何能插入第三方 iframe 的 XSS 都能绕过 origin 校验。
+  真正的补法不是加固校验，是给 `/app` 加响应头 `Content-Security-Policy: frame-src 'none'`，
+  写在 `backend/app/web/web_router.py:50`（`RevalidatingStaticFiles.get_file_response` 设
+  `Cache-Control` 的旁边）。**这是全设计唯一一处后端代码改动**（CI 工作流另计，见 §6）。
+  可行性已实测：全站 grep 无 `iframe`、无 `window.open`，所以它不会碰坏任何东西。
+  残余风险如实记录：若将来 XSS 能在**同源**页面执行 JS，桥仍可被调用；
+  届时泄漏面是"用户自己设备上刚分享进来的图片"与"自己设的提醒"，不含令牌、不含会话数据。
+
+**JS 侧降级**：`window.AssistantShell` 不存在时（浏览器直接开网址、以及 headless Edge 里跑
+CDP 验收），提醒那栏显示"这里设的提醒只在这台手机的应用里生效"，分享队列恒空，其余功能照旧。
+这条不是兼容性装饰——它是"同一份 JS 同时服务浏览器与 APK 两种宿主"的地基。
+
+## 3. 提醒排期
+
+- **存储**：`SharedPreferences` 单文件，值是一段 JSON 数组，每条
+  `{id, owner, at, title, body, repeat}`。`id` 由 JS 生成（`r-` + 12 位随机），
+  使 JS 成为"这条提醒是谁建的"的事实来源，壳只是执行者。
+- **时间约定**：`at` 是 epoch 毫秒，由 JS 用设备本地时区算好再传；**壳不做任何日历运算**。
+  不写死这一条，跨时区与夏令时时会出现两套解释。
+- **repeat**：`once | daily | weekly`。`once` 触发后从表里消失；其余把 `at` 推到下一次并重排。
+  推送过点（Doze 延迟）不补发历史轮次，直接对齐下一个未来时刻。
+- **排期**：`AlarmManager.setAndAllowWhileIdle(RTC_WAKEUP, at, pi)`；
+  `PendingIntent` 用 `FLAG_IMMUTABLE | FLAG_UPDATE_CURRENT`，requestCode 取 `id.hashCode()`。
+- **上限**：每个 owner 32 条，超出返回 `{"ok":false,"error":"too_many"}`，防止 JS 把表撑爆。
+- **到点**：`ReminderReceiver` → 校验 `owner == activeOwner`（不符则跳过不发）→
+  发通知（channel `assistant_reminders`，`IMPORTANCE_DEFAULT`）→ 推进 repeat → 刷组件。
+- **点通知回界面**：通知的 Intent 打开 `MainActivity` 带 extra `open_from=reminder:<id>`。
+  页面可能还没加载完，所以事件先排队，在 `WebViewClient.onPageFinished` 之后统一冲出。
+  **不改 URL**（换 query 会触发整页重载，把已登录的界面打断）。
+- **重启**：`BootReceiver` 读表，把所有未来的 `at` 重排（AlarmManager 的闹钟在重启后不保留）。
+  已过点的 `once` 不补发，只按 repeat 规则推到下一次。
+
+## 4. 系统分享入口
+
+- **清单**：`ShareActivity` `exported=true` + `theme=@android:style/Theme.NoDisplay`，
+  intent-filter 收 `ACTION_SEND`，`text/plain`、`image/*`、`application/pdf` 三种
+  （PDF 与后端 `uploads.py` 的 doc 类对齐）。只支持单条，`SEND_MULTIPLE` 不做。
+- **流程**：读 `EXTRA_STREAM` → 用 8KB 缓冲流复制进 `cacheDir/shares/<新 id>`（**不整块进内存**）
+  → 记元数据 → 启动 `MainActivity` 带 extra `pending_share=<id>` → `finish()`。
+  字节过河只有一条路：JS 调 `readShareChunk` 分块取 base64，拼成 Blob 后走**现有**
+  `POST /v1/uploads`，拿回附件 id 再正常发消息。**服务端零改动。**
+- **体积**：>10MB 直接拒（`uploads.py:27-28` 图片/文档上限就是 10MB，不另造一个数）。
+- **清理**：`ShareInbox` 每次被调用时顺手删除超过 30 分钟的文件；`consumeShare` 立即删。
+  `cacheDir` 系统在存储紧张时可能自己清掉——所以 JS 侧读到"文件不在了"要提示重新分享，
+  而不是静默失败。
+- **归属**：分享件带 owner（见 §2 裁决①）。未登录时收到的分享，owner 记为 `null`，
+  对任何人都不可见，30 分钟后消失。不为它发明"登录后可见"的中间态。
+
+## 5. 桌面组件与快捷入口
+
+- **`AssistantWidget`**（`AppWidgetProvider`）+ `widget_assistant.xml`：标题行 +
+  最多 4 行提醒 + 底部两个按钮。**只用平台控件**（LinearLayout/TextView/ImageView），
+  不用 RecyclerView，因此不引 `RemoteViewsService`。超出 4 条显示"还有 N 条"。
+- **刷新**：`ReminderStore` 任何写操作后 `AppWidgetManager.updateAppWidget`；
+  `onUpdate` 里按 activeOwner 重算；intent-filter 加 `ACTION_DATE_CHANGED` 与
+  `ACTION_TIMEZONE_CHANGED`，让"今日"跨天时内容会换。**不做定时轮询**（AppWidget 本身有
+  最小更新间隔限制，轮询是白费劲）。
+- **点按（一个被证据逼出来的取舍）**：组件按钮原本最自然是"拍照提问"直接拉起相机，但那需要
+  `FileProvider` 给相机一个可写 URI，而 `FileProvider` 在 `androidx.core` 里 —— **会打破零依赖**。
+  取舍：按钮只做"打开 App 并告诉 JS 该弹哪个面板"（extra `open_from=camera|new_chat`），
+  相机由网页的 `<input type=file capture>` 触发（`MainActivity.onShowFileChooser` 已支持，
+  相机运行时权限已打通）。零新依赖，代价是少一步直达。
+- **App Shortcuts**：`res/xml/shortcuts.xml` 静态快捷方式两条（拍照提问、新开对话），
+  指向 `MainActivity` + 同一个 `open_from` extra。零代码、零依赖。
+
+## 6. 测试与可验证边界（诚实账）
+
+本机**没有 Android SDK**，所以 Java 的编译与运行验证只能在 CI。上次 `DownloadManager.Request`
+的 `setUserAgent` / `allowOverwrite` 两个不存在的方法烧了两轮 CI，教训是：**任何子代理写的
+Java 都算未验证，直到 CI 绿**。分层如下：
+
+| 层 | 在哪验 | 验什么 |
+| --- | --- | --- |
+| `core/ReminderStore`、`core/ShareInbox` | CI `gradle :app:testDebugUnitTest`（纯 JVM，不引 Robolectric） | JSON 编解码、owner 过滤、32 条上限、repeat 推进、id 正则拒绝 `../`、文件名清洗 |
+| Java 整体 | CI `assembleDebug` | 平台 API 调用签名真实存在（上次那类错误只在这层暴露） |
+| JS 降级路径 | 本机 headless Edge + CDP | 无 `AssistantShell` 时不抛错、提醒栏出说明文案、`pendingShares` 恒空 |
+| 桥方法名集合 | 已有 pytest 前端语料锁（`_code_lines` / `_strip_js_comments`） | 方法名漂移即红 |
+| 通知真响、Doze 延迟、组件渲染、分享面板出现、重启后提醒还在 | **只能实机，由你在手机上点** | 见 §9 清单 |
+
+新增 `.github/workflows/android-tests.yml`（`push.paths: android/**` + `workflow_dispatch`），
+跑 `assembleDebug` 与 `testDebugUnitTest`。为什么单开一个文件：`release-apk.yml` 由 tag 触发，
+出包前必须先有测试可跑，把两者并到一个文件会让"测试失败"和"发版失败"混成一次红。
+
+## 7. 发布与版本
+
+- `versionCode 13` / `versionName "0.13"`；打 tag `v0.13` 触发既有 `release-apk.yml`
+  （它已校验 tag 与 `versionName` 必须一致）。
+- Release 说明**必须改**：现在不再"只是个壳、改服务端不用重装"。向后兼容约定写死两条：
+  **桥的方法只加不减、不改语义**；**服务端与前端都不得假设壳有桥**。
+  老壳装在新服务端上必须仍能正常聊天（走 §2 的降级路径）。
+- 签名仍是 CI 的 debug keystore。上架要 AAB + 永久上传密钥，那是另一次设计（§8）。
+
+## 8. 明确不做
+
+- 钉版本 / 检查更新（与原生能力无关，已单独分析：它只防"新前端带病上线"，
+  且会放弃"重启电脑＝给所有手机热修复"这条现在白拿的性质）。
+- 本地数据库、离线可看历史、同步队列。
+- 服务端推送通道（`/v1/tasks` 是管理员专属的 agent 子任务分解，不是 per-user 事件源，
+  要做推送等于新起一个子系统）。
+- 学习统计类组件内容。
+- 上架 Google Play / 签名密钥迁移。
+- iOS（没有 iOS 客户端，不为其设计）。
+
+## 9. 实机验收清单（在手机上点，8 条）
+
+1. 设一条 2 分钟后的提醒 → 锁屏出通知，标题正文与设置一致。
+2. 通知点进去 → 直接落在助手界面，且不是重新登录。
+3. 设一条每天重复 → 触发后第二天时间已推进，不是消失。
+4. 手机重启 → 那条提醒还在且会响。
+5. 相册里选一张图 → 分享 → 出现"AI 助手" → 点开后进 App 且附件栏已挂着那张图 → 发出去模型能看见。
+6. 分享一张 >10MB 的图 → 有明确拒绝提示，不是静默没反应。
+7. 桌面组件显示今日提醒；换到另一个账号登录 → 组件里看不见上一个账号的提醒。
+8. 手机浏览器直接开 `https://ai.fenever.xyz/app/` → 一切照旧，提醒栏出说明文案，无报错。
