@@ -107,15 +107,20 @@ function safeFilename(text) {
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
  *  - 本机压根没存过令牌：首启，该注册一个账号；
  *  - 存了却被服务端拒：管理员撤销或轮换过，或这台机器换了人。
- * 两种都直接弹首屏凭据层——它就在眼前，不必再去「设置」里找入口。
+ * 两种都要把首屏凭据层挡在面前——它就在眼前，不必再去「设置」里找入口。
  * 403 不走这里：那是"身份是真的、角色不够"，换凭据没有用。
+ *
+ * 但"弹层已经开着"是第三种情况：那时人是坐在这层里敲字的，一条与表单不相干的后台
+ * 401（同步消息、建会话、载入旧会话都会打到）不该把他敲到一半的密码整格抹掉——
+ * showAuth 那一路经过 setAuthMode → clearAuthCredentials，见那里。所以这里只在
+ * 弹层不可见时把它挡回来，可见时只更新状态条那一句话。
  */
 function needsAuth(err) {
   if (!err || err.status !== 401) return false;
   setStatus(pref.token
     ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
     : "还没有登录：用用户名和密码登录，或注册一个", true);
-  showAuth(pref.token ? "login" : "register");
+  if ($("authModal").classList.contains("hidden")) showAuth(pref.token ? "login" : "register");
   return true;
 }
 
@@ -157,11 +162,13 @@ function recoveryAnswers() {
   return [$("rcAns1").value.trim(), $("rcAns2").value.trim(), $("rcAns3").value.trim()];
 }
 
-/** 离开一条流程 = 这一层的凭据格子一律清空。**清格子的地方只有这一处。**
+/** 离开一条流程 = 这一层的凭据格子一律清空。**进出这一层时清格子的地方只有这一处。**
  *  hidden 只是"看不见"，不是"没内容"：猜错拿 401 之后人还留在这一层，三句找回答案与
  *  新密码就躺在 DOM 里，点「回去登录」或被 needsAuth 重新弹层时一个字都没清。找回答案
  *  走的是和密码同一个慢哈希，它往往是个能猜的地名，所以同样是凭据。
  *  用户名不在名单里：留在屏内重试的人不该重敲名字，改密成功后还要把它回填给登录框。
+ *  afterAuth 里那几行逐格清是另一回事（那里钉的是"清空必须晚于令牌落库"），别把两处并成
+ *  一处：并了就把那条锁牵进来一起动了。
  */
 function clearAuthCredentials() {
   $("authPass").value = "";
@@ -364,9 +371,10 @@ async function submitRecovery() {
   $("rcHint").textContent = "改密码中…";
   try {
     await API.resetPassword(rcName, answers, pw);
-    // 答案与新密码同样是凭据，但这里不单独清：清格子只有 clearAuthCredentials() 一处，
-    // 由下面的 showAuth → setAuthMode 走到。上一版只在成功分支逐格清，于是猜错 401
-    // 之后离开流程就漏——同一个 bug 的成因就是"清凭据的地方不止一处"。
+    // 答案与新密码同样是凭据，但这里不单独清：找回这条流程内清格子只有
+    // clearAuthCredentials() 一处，由下面的 showAuth → setAuthMode 走到（afterAuth 是
+    // "令牌落库之后清输入框"那一处，不归这条流程管）。上一版只在成功分支逐格清，于是
+    // 猜错 401 之后离开流程就漏——同一个 bug 的成因就是"流程内清凭据的地方不止一处"。
     rcStep = 1;
     renderRecovery();
     // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去。那句提示不许省：

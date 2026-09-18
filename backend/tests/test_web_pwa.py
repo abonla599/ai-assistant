@@ -393,6 +393,10 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
     之后 395 条测试全绿（评审实测），而函数于是会继续往下走到发请求。可达后果不是
     理论值：第二步填过答案后点「上一步」（答案仍在框里）再点「下一步」，本地那道
     "三道答案都非空"的闸门就失效了，真的会发出 POST /v1/auth/register。
+
+    修复轮 2 再钉**位置**：形状对了不代表闸门在进门的第一件事上。整段挪到本地校验之后
+    （字面仍是 `{ regNext(); return; }`）时 37 条全绿，可 `$("authGo").disabled = true`
+    已经执行完了才 return——按钮从此点不动，第一步再也进不了第二步，比原来那条更狠。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     for name, required in (("regNext", ("authUser", "authPass", "authPass2")),
@@ -409,8 +413,8 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
         "两次密码的一致性不在第一步判，就会带着不一致去挨一次 422"
 
     # 步骤闸门写在两张表单唯一的提交函数开头（不另设一层包装：多一层就多一处能漏判的地方）
-    for name, go, api_call in (("submitAuth", "regNext", "API.register"),
-                               ("submitRecovery", "rcNext", "API.resetPassword")):
+    for name, go, api_call, btn in (("submitAuth", "regNext", "API.register", "authGo"),
+                                    ("submitRecovery", "rcNext", "API.resetPassword", "rcGo")):
         body = _function_body(js, name)
         gate = re.search(r"\{ %s\(\); return; \}" % re.escape(go), body)
         assert gate, (f"{name} 的第一步闸门不是短路形状（`{{ {go}(); return; }}`）："
@@ -418,6 +422,17 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
         assert api_call in body, f"{name} 里找不到 {api_call}：第二步那一枪不发了吗"
         assert gate.start() < body.index(api_call), \
             f"{name} 的短路闸门晚于发请求：第一步那一枪照样打出去"
+        # 形状钉住了，位置还没钉：整段挪到本地校验之后时上面三条照绿，可那时
+        # $("authGo").disabled = true 已经执行完才 return（return 在 try 之前 → finally
+        # 不执行，在途标志一起卡死），第一步再也进不了第二步（那种挪法 37 条全绿）。
+        entering = re.search(r"if \(state\.registering\) return", body)
+        assert entering, f"{name} 的在途闸门（进门先挡）不见了"
+        assert entering.end() < gate.start() <= entering.end() + 160, \
+            (f"{name} 的步骤闸门没有紧跟在 `if (state.registering) return` 之后"
+             f"（当前相隔 {gate.start() - entering.end()} 字符）：中间那些锁按钮、本地校验"
+             f"会先跑完，闸门 return 之后按钮就一直是禁用的")
+        assert gate.start() < body.index(f'$("{btn}").disabled = true'), \
+            f"{name} 的短路闸门晚于 #{btn} 禁用：第一步走到这里就再也点不动了"
 
 
 def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
@@ -544,7 +559,9 @@ def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
     assert body.index('$("rcNew2").value') < body.index("API.resetPassword"), \
         "确认密码没在发请求之前比对"
     assert "showAuth(\"login\")" in body, "改密成功要回到登录：令牌已全部作废，不能装作还登录着"
-    assert "API.resetPassword" in body.split("showAuth")[0], "登录视图的切换该在改密之后"
+    # 锚点是那句**调用**，不是裸词 "showAuth"：拿词当锚时，app.js 里任何一句提到 showAuth
+    # 的注释挪到发请求之前都会把这条弄红，而红话说的是不相干的"切换该在改密之后"。
+    assert "API.resetPassword" in body.split('showAuth("login")')[0], "登录视图的切换该在改密之后"
     assert "其他设备需要重新登录一次" in body, "改密的连带后果没告诉人"
     assert re.search(r"if \(state\.registering\) return", body), "找回没有在途闸门"
     unlock = body[body.index("finally"):]
@@ -765,17 +782,23 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
 
 
 def test_leaving_a_flow_wipes_every_credential_from_the_boxes():
-    """离开流程时凭据不许留在隐藏框里——清格子只有**一处**，且在 setAuthMode 收口。
+    """离开流程时凭据不许留在隐藏框里——**这两条流程内**清格子只有一处，且在 setAuthMode 收口。
 
     原来只有 submitRecovery 的成功分支清那五格：猜错拿 401 之后人还留在这一层，
     三句找回答案与新密码就躺在 DOM 里（hidden 是"看不见"，不是"没内容"——手机上是
     切回去就还在，凑过来是能看见的），点「回去登录」或被 needsAuth 重新弹层时一个字
     都没清。注册同理：setAuthMode 从前只把 regStep 归零，留着上一次没提交出去的答案。
 
-    为什么收口选 setAuthMode：showAuth（首启、needsAuth 重弹层、设置里的「注册一个新
-    账号」、改密成功回登录）与 authSwitch 换模式全都经过它，清一处就覆盖所有"进出这一
-    层"的路径。而留在屏内重试不受影响——setAuthMode 不在登录失败的那条路上，密码故意
+    为什么收口选 setAuthMode：showAuth（首启、needsAuth 在弹层还没起来时、设置里的「注册
+    一个新账号」、改密成功回登录）与 authSwitch 换模式全都经过它，清一处就覆盖所有"进出
+    这一层"的路径。而留在屏内重试不受影响——setAuthMode 不在登录失败的那条路上，密码故意
     留着（见上一条测试的注释），用户名更不该抹。
+
+    "只有一处"的适用范围要说准：它指的是 submitAuth / submitRecovery 这两个函数体内不许
+    再各自逐格清。afterAuth（app.js，注册与登录成功收起弹层）仍然逐格清，而且
+    test_registration_locks_its_button_while_the_request_is_in_flight 正**要求**它那么清
+    ——那里钉的是"清空必须晚于令牌落库"。把它并进 setAuthMode 收口会牵动那条锁，不在本
+    轮清单里。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     fields = (["authPass", "authPass2"]
@@ -793,16 +816,48 @@ def test_leaving_a_flow_wipes_every_credential_from_the_boxes():
     assert "clearAuthCredentials()" in _function_body(js, "setAuthMode"), \
         "清格子退回成功分支了：猜错 401 之后离开流程就漏"
 
+    # 上面那条只钉了"收口里在清"，没钉"有人走进这个收口"。下面这两根线才是全部的连接线：
+    # 把 authSwitch 改绑成一段不经 setAuthMode 的等价写法、或删掉 showAuth 里那句
+    # setAuthMode，397 条原本全绿（评审实测）——格子于是只在没人走的那条路上被清过。
+    assert "setAuthMode(" in _function_body(js, "showAuth"), \
+        ("showAuth 不再经过 setAuthMode：首启、needsAuth 弹层、设置里的「注册一个新账号」、"
+         "改密成功回登录这四条路全都不清格子了")
+    switch = re.search(r'\$\("authSwitch"\)\.onclick = (.*)', js)
+    assert switch and "setAuthMode(" in switch.group(1), \
+        "authSwitch 换模式绕过了 setAuthMode：登录↔注册来回切一次，上一模式留下的明文还在格子里"
+
     # 「回去登录」必须走过这个收口，而不是只把两块表单的 class 换一换
     assert '$("rcBack").onclick = () => showAuth("login")' in js, \
         "rcBack 绕过了 setAuthMode：找回失败后离开流程，三句答案与新密码还在 DOM 里"
 
-    # 清格子只有一处。成功分支再单独清一次，就是"哪条路径忘了清"的下一次起点
+    # 流程内清格子只有一处。成功分支再单独清一次，就是"哪条路径忘了清"的下一次起点
     # （submitRecovery 的成功分支正是这么漏掉失败分支的）
     recovery = _function_body(js, "submitRecovery")
     for el in fields:
         assert f'$("{el}").value = ""' not in recovery, \
             f"#{el} 又在成功分支里单独清了：清凭据的地方变成了两处"
+
+
+def test_a_background_401_while_the_layer_is_up_keeps_what_you_typed():
+    """后台一条 401 不许把用户正在敲的密码抹掉（修复轮 2 的回归锁）。
+
+    上一轮把清凭据收口到 setAuthMode 之后，needsAuth 那条"任何 401 都重走 showAuth"的
+    路就顺带有了抹格子的权力：弹层已经开着、人正敲到一半时来一发后台 401（同步会话消息
+    replaceMessages、建会话 ensureSession、载入旧会话 restore 那几类调用都会打到），敲的
+    就没了。清凭据是"离开/进入这一层"的卫生动作，而这一层压根没被离开。
+    判据：弹层不可见时行为不变（首启与令牌被撤销都要它挡住），已可见时只更新状态条那句
+    话，不重走 showAuth。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _function_body(js, "needsAuth")
+    assert 'if ($("authModal").classList.contains("hidden")) showAuth(' in body, \
+        ("needsAuth 在弹层已经开着的时候还重走 showAuth：那条路经过 setAuthMode → "\
+         "clearAuthCredentials，人正在敲的密码会被一条不相干的后台 401 抹掉")
+    assert body.index("setStatus(") < body.index("showAuth("), \
+        "状态条那两种 401 的说法得无条件更新，别跟着弹层一起被挡在 if 里"
+    for bypass in ("clearAuthCredentials(", "setAuthMode("):
+        assert bypass not in body, \
+            f"needsAuth 里另开了 {bypass} 这条路：清格子的地方又变成两处，本条回归还会回来"
 
 
 def test_going_back_a_step_leaves_no_orphan_message():
