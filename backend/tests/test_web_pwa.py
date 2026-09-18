@@ -248,6 +248,82 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} 的大括号没闭合（或函数被截断）")
 
 
+def _up_to_matching_brace(text: str) -> str:
+    """从开头的 `{` 走到它配对的那个 `}`（含）。走不到就明说，别把截断当"没有"。"""
+    assert text.startswith("{"), f"这段文本不是以花括号开头：{text[:40]}"
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:i + 1]
+    raise AssertionError(f"花括号没闭合，取不到整段：{text[:60]}…")
+
+
+def _handler_of(js: str, el: str, event: str = "onclick") -> str:
+    """`$("el").onclick = <处理器>` 里的那一段处理器文本，**多行写法也整段拿到**。
+
+    原来写的是 `= (.*)`，只吃一行：把这个处理器改成多行 arrow function（内容仍然
+    经过 setAuthMode）就会红成"绕过了 setAuthMode"——红话说反了，而一条会说反话的锁
+    最后的下场是被人删掉。所以块体按配对花括号整段取，表达式体取到下一条 `$(` 绑定之前。
+    """
+    m = re.search(r'\$\("%s"\)\.%s = ' % (re.escape(el), re.escape(event)), js)
+    assert m, f"app.js 里没有 $({el}).{event} 这条绑定：接线被改了还是被删了？"
+    rest = js[m.end():]
+    if rest.lstrip().startswith("{"):
+        return _up_to_matching_brace(rest.lstrip())
+    nxt = re.search(r"\n\s*\$\(", rest)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def _strip_js_comments(src: str) -> str:
+    """把 JS 注释挖掉、换行留在原处：判语料之前先过这道。
+
+    两类事故都真出现过："某词在不在函数体里"这种断言，一句解释性的注释就能把它喂绿
+    （留着 `// setAuthMode(mode);` 而把真调用删掉，38 条全绿）；反过来一条**出现次数**
+    的断言又会被同一句注释误判红。两头的代价都是"锁被人当噪声拆掉"，所以尺子先剥注释。
+    字符串里的 `//` 不是注释，所以按字符扫并带一个引号状态机（漏了这一步，一句
+    `"https://…"` 就会把其后整行吃掉）。它的判据见
+    test_the_comment_ruler_needs_its_own_test。
+    """
+    out = []
+    quote = ""
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if quote:
+            out.append(ch)
+            if ch == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            end = src.find("\n", i)
+            i = n if end < 0 else end          # 换行本身留着：行号不能错位
+            continue
+        if ch == "/" and nxt == "*":
+            end = src.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append("\n" * src.count("\n", i, end))
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # 没有闭合标签的元素：不能当祖先压进栈里，否则后面的 </div> 会错位
 _VOID_TAGS = ("input", "img", "br", "hr", "meta", "link", "path", "circle", "source")
 
@@ -285,6 +361,27 @@ def _open_tags_to(html: str, container: str, el_id: str) -> list:
         if re.match(r"</?([a-zA-Z][\w-]*)", tag).group(1).lower() not in _VOID_TAGS:
             path.append(tag)       # void 元素不会有闭合标签，压进去就会把后面的配对全错位
     return []
+
+
+def test_the_comment_ruler_needs_its_own_test():
+    r"""剥注释这把尺子自己得有判据：它一坏，上面那些锁就退回"能不能被注释喂绿"。
+
+    钉四件事：行注释里的字样消失、真语句一条不少地留下、**跨行**块注释里的字样不算调用
+    （`\n\s*setAuthMode(...)` 那种形状锁最怕的就是它——注释的第二行看起来就是一行代码）、
+    字符串里的 `//` 不被当成注释起点（否则那一行剩下的部分凭空消失，锁会绿在"没找到"上）。
+    """
+    src = ('function f() {\n'
+           '  // 上一版的 setAuthMode(x) 就在这里\n'
+           '  setAuthMode(mode || authMode);\n'
+           '  /* 解释一句：showAuth() 负责\n'
+           '     清格子，别照抄 setAuthMode() */\n'
+           '  const url = "https://example.com/v1";\n'
+           '}\n')
+    stripped = _strip_js_comments(src)
+    assert stripped.count("setAuthMode(") == 1, f"真语句没了或注释没剥净：{stripped!r}"
+    assert "showAuth(" not in stripped, f"跨行块注释的第二行被当成了代码：{stripped!r}"
+    assert '"https://example.com/v1"' in stripped, "字符串里的 // 被当成了注释起点"
+    assert stripped.count("\n") == src.count("\n"), "换行被吃掉：行号错位会让按行的形状锁失真"
 
 
 def test_registration_ui_elements_wired():
@@ -422,15 +519,34 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
         assert api_call in body, f"{name} 里找不到 {api_call}：第二步那一枪不发了吗"
         assert gate.start() < body.index(api_call), \
             f"{name} 的短路闸门晚于发请求：第一步那一枪照样打出去"
-        # 形状钉住了，位置还没钉：整段挪到本地校验之后时上面三条照绿，可那时
+        # 形状钉住了，位置也得钉：整段挪到本地校验之后时上面三条照绿，可那时
         # $("authGo").disabled = true 已经执行完才 return（return 在 try 之前 → finally
         # 不执行，在途标志一起卡死），第一步再也进不了第二步（那种挪法 37 条全绿）。
-        entering = re.search(r"if \(state\.registering\) return", body)
+        # 只认本仓库通篇在用的这一种写法（不带花括号的 `if (state.registering) return`）：
+        # 写成 `if (state.registering) { return; }` 是等价行为、这条会红——那是让改的人顺手
+        # 统一写法，不是本条要承诺的契约，别把它读成"任何挡双击的形状都在锁里"。
+        entering = re.search(r"if \(state\.registering\) return;?", body)
         assert entering, f"{name} 的在途闸门（进门先挡）不见了"
-        assert entering.end() < gate.start() <= entering.end() + 160, \
-            (f"{name} 的步骤闸门没有紧跟在 `if (state.registering) return` 之后"
-             f"（当前相隔 {gate.start() - entering.end()} 字符）：中间那些锁按钮、本地校验"
-             f"会先跑完，闸门 return 之后按钮就一直是禁用的")
+        assert entering.end() < gate.start(), \
+            f"{name} 的步骤闸门排在了在途闸门之前：先 return 的那一条不再是挡双击的那一条"
+        # 为什么位置要紧：中间那些语句会先跑完。上一版把这个"紧跟"钉成 160 字符的窗口
+        # （现值 136），于是加一行二十几个字的注释就能把它弄红，而红话说的还是"锁按钮会
+        # 先跑完"——注释什么都不跑。改成钉形状：这两行之间只许出现无副作用的变量声明，
+        # 注释先剥掉（解释"为什么这里不写语句"的注释恰恰最可能长）。
+        head, _, gate_line = body[entering.end():gate.start()].rpartition("\n")
+        # gate 匹配的是那个花括号，所以闸门自己那一行的 `if (…)` 也在这个片段里：它得单独判
+        # ——条件里不许有分号或花括号，那条语句才真是"这一行的第一件事"。
+        assert re.fullmatch(r"\s*(?:if \([^;{]*\)\s*)?", gate_line), \
+            (f"{name} 的闸门那一行在 if 条件之前还挂着别的东西（{gate_line.strip()!r}）："
+             "它不再是紧跟在途闸门之后的第一条语句")
+        for line in _strip_js_comments(head).splitlines():
+            code_line = line.strip()
+            if not code_line:
+                continue
+            assert re.fullmatch(r"(const|let) [A-Za-z_$][\w$]* = [^;()]+;", code_line), \
+                (f"{name} 的在途闸门与步骤闸门之间多了一条会做事的语句：「{code_line}」"
+                 f"会在闸门 return 之前跑完，而 #{btn} 已经禁用、在途标志还没进 try，"
+                 f"于是第一步再也点不动（后果见修复轮 2 的行为探针）")
         assert gate.start() < body.index(f'$("{btn}").disabled = true'), \
             f"{name} 的短路闸门晚于 #{btn} 禁用：第一步走到这里就再也点不动了"
 
@@ -806,24 +922,32 @@ def test_leaving_a_flow_wipes_every_credential_from_the_boxes():
               + [f"rcAns{i}" for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
               + ["rcNew", "rcNew2"])
 
-    clearer = _function_body(js, "clearAuthCredentials")
+    clearer = _strip_js_comments(_function_body(js, "clearAuthCredentials"))
     for el in fields:
         assert f'$("{el}").value = ""' in clearer, \
             f"离开流程时 #{el} 没人清：格子里还躺着明文"
     assert "authUser" not in clearer, "清格子不许顺手抹掉用户名：留在屏内重试的人得重敲"
 
-    # 唯一的收口：进出这一层、换模式都经过 setAuthMode
-    assert "clearAuthCredentials()" in _function_body(js, "setAuthMode"), \
+    # 唯一的收口：进出这一层、换模式都经过 setAuthMode。同一把尺子先剥注释——
+    # "删掉 clearAuthCredentials() 这行、原地留一句提到它的注释"骗得过 in 判断。
+    closer = _strip_js_comments(_function_body(js, "setAuthMode"))
+    assert re.search(r"\n\s*clearAuthCredentials\(\);", closer), \
         "清格子退回成功分支了：猜错 401 之后离开流程就漏"
 
-    # 上面那条只钉了"收口里在清"，没钉"有人走进这个收口"。下面这两根线才是全部的连接线：
+    # 上面那条只钉了"收口里在清"，没钉"有人走进这个收口"。下面这两根线才是全部的连接线。
     # 把 authSwitch 改绑成一段不经 setAuthMode 的等价写法、或删掉 showAuth 里那句
-    # setAuthMode，397 条原本全绿（评审实测）——格子于是只在没人走的那条路上被清过。
-    assert "setAuthMode(" in _function_body(js, "showAuth"), \
-        ("showAuth 不再经过 setAuthMode：首启、needsAuth 弹层、设置里的「注册一个新账号」、"
-         "改密成功回登录这四条路全都不清格子了")
-    switch = re.search(r'\$\("authSwitch"\)\.onclick = (.*)', js)
-    assert switch and "setAuthMode(" in switch.group(1), \
+    # setAuthMode，397 条原本全绿（上一轮实测）——格子于是只在没人走的那条路上被清过。
+    # 本轮再实测一次：把那两处真调用删掉、**原地留一句含 `setAuthMode(...)` 的注释**，
+    # 上面那把"在不在字符串里"的锁照绿 38 条——这根线可以用注释喂。所以两条都先剥注释、
+    # 再钉语句形状；authSwitch 那条还要整段取处理器：`= (.*)` 只吃一行，处理器写成多行
+    # arrow function（仍然经过 setAuthMode）会被红成"绕过了 setAuthMode"，红话说反了。
+    show = _strip_js_comments(_function_body(js, "showAuth"))
+    assert re.search(r"\n\s*setAuthMode\([^;]*\);", show), \
+        ("showAuth 里没有一行**语句形式**的 setAuthMode 调用（写在注释里的不算）："
+         "首启、needsAuth 弹层、设置里的「注册一个新账号」、改密成功回登录这四条路"
+         "全都不清格子了")
+    switch = _strip_js_comments(_handler_of(js, "authSwitch"))
+    assert "setAuthMode(" in switch, \
         "authSwitch 换模式绕过了 setAuthMode：登录↔注册来回切一次，上一模式留下的明文还在格子里"
 
     # 「回去登录」必须走过这个收口，而不是只把两块表单的 class 换一换
@@ -845,19 +969,37 @@ def test_a_background_401_while_the_layer_is_up_keeps_what_you_typed():
     路就顺带有了抹格子的权力：弹层已经开着、人正敲到一半时来一发后台 401（同步会话消息
     replaceMessages、建会话 ensureSession、载入旧会话 restore 那几类调用都会打到），敲的
     就没了。清凭据是"离开/进入这一层"的卫生动作，而这一层压根没被离开。
-    判据：弹层不可见时行为不变（首启与令牌被撤销都要它挡住），已可见时只更新状态条那句
-    话，不重走 showAuth。
+    判据：弹层不可见时行为不变（首启与令牌被撤销都要它挡住），已可见时**只**更新状态条
+    那一句话——那句更新是无条件的，两种 401 的说法不该跟着弹层一起被挡在 if 里。
+
+    本轮把上面那两句话各自钉住（修复轮 2 的措辞说过头了：它写着「setStatus 必须无条件」，
+    实际只钉了次序）：
+    - 无条件 = `setStatus(` 落在函数体顶层那一格缩进上，不是嵌在某个 if 里；次序那条保留。
+    - 不重走 = 整个函数里 `showAuth(` 只许出现一次。上一版只钉被判断那一行在不在，于是
+      「保留那一行、后面补一句 `else showAuth(authMode);`」是 38 条全绿的（评审实测），
+      而回归恰恰就藏在 else 那一支里。
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    body = _function_body(js, "needsAuth")
-    assert 'if ($("authModal").classList.contains("hidden")) showAuth(' in body, \
-        ("needsAuth 在弹层已经开着的时候还重走 showAuth：那条路经过 setAuthMode → "\
+    # 判语料之前剥注释：这一层的注释提到 showAuth( 完全正常（函数上面那段就写着「showAuth
+    # 那一路经过 setAuthMode」），钉出现次数会被它误判红；反过来它也能喂绿那条 in 判断。
+    code = _strip_js_comments(_function_body(js, "needsAuth"))
+    assert 'if ($("authModal").classList.contains("hidden")) showAuth(' in code, \
+        ("needsAuth 在弹层已经开着的时候还重走 showAuth：那条路经过 setAuthMode → "
          "clearAuthCredentials，人正在敲的密码会被一条不相干的后台 401 抹掉")
-    assert body.index("setStatus(") < body.index("showAuth("), \
-        "状态条那两种 401 的说法得无条件更新，别跟着弹层一起被挡在 if 里"
-    for bypass in ("clearAuthCredentials(", "setAuthMode("):
-        assert bypass not in body, \
-            f"needsAuth 里另开了 {bypass} 这条路：清格子的地方又变成两处，本条回归还会回来"
+    assert re.search(r"^  setStatus\(pref\.token", code, re.M), \
+        ("setStatus 不在 needsAuth 的顶层：它被嵌进了某个 if 里，于是「弹层已经开着」那一种 "
+         "401 连状态条那一句都不再更新——这里要的是只重弹不重说话")
+    assert code.index("setStatus(") < code.index("showAuth("), \
+        "状态条那两种 401 的说法得先更新，再决定要不要把弹层挡回来"
+    # 被钉住的那一行只说「这一行在」，不说「没有第二条重弹的路」；次数锁补的就是这一格。
+    for needle, allowed in (("showAuth(", 1), ("setAuthMode(", 0),
+                            ("clearAuthCredentials(", 0)):
+        assert code.count(needle) == allowed, \
+            (f"needsAuth 里 {needle} 出现了 {code.count(needle)} 次（只许 {allowed} 次）："
+             "重弹与清格子各只有被钉住的那一条路，另开一条本条回归就回来了")
+    assert not re.search(r"\belse\b[\s\S]{0,60}showAuth\(", code), \
+        ("needsAuth 里有个 else 分支去走 showAuth：那正是「弹层已经开着」那一种，"
+         "人敲到一半的密码会被一条不相干的后台 401 抹掉")
 
 
 def test_going_back_a_step_leaves_no_orphan_message():
