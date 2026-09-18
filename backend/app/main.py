@@ -19,8 +19,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import uvicorn
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
 
 # ---------- 路径设置 ----------
 # 确保项目根目录 (backend) 在路径中，以便支持 from app.xxx import xxx
@@ -458,16 +456,16 @@ def stream_chat_endpoint(request: ChatRequest,
 # 非本人一律 404 而不是 403：403 等于承认这个 id 存在，session_id 是 uuid4，
 # 但只要有一次 403 漏出来，这个接口就成了"哪些会话真实存在"的探测器。
 @app.post("/v1/sessions")
-async def create_session(model: str = "deepseek-chat",
+def create_session(model: str = "deepseek-chat",
                          principal: Principal = CurrentPrincipal):
     return sessions_store.create(model, owner=principal.user_id)
 
 @app.get("/v1/sessions")
-async def list_sessions(principal: Principal = CurrentPrincipal):
+def list_sessions(principal: Principal = CurrentPrincipal):
     return {"sessions": sessions_store.list_summaries(principal.user_id)}
 
 @app.get("/v1/sessions/{session_id}")
-async def get_session(session_id: str, principal: Principal = CurrentPrincipal):
+def get_session(session_id: str, principal: Principal = CurrentPrincipal):
     session = sessions_store.get(session_id, owner=principal.user_id)
     if session is None:
         # 404 而非 403：403 等于承认这个 id 存在，可以被拿来枚举
@@ -477,7 +475,7 @@ async def get_session(session_id: str, principal: Principal = CurrentPrincipal):
     return sessions_store.public(session)
 
 @app.delete("/v1/sessions/{session_id}")
-async def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
+def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
     if sessions_store.delete(session_id, owner=principal.user_id):
         return {"status": "deleted", "session_id": session_id}
     raise HTTPException(status_code=404, detail="会话不存在")
@@ -486,7 +484,7 @@ class SessionMessagesRequest(BaseModel):
     messages: List[Dict[str, Any]] = []
 
 @app.put("/v1/sessions/{session_id}/messages")
-async def replace_session_messages(session_id: str, req: SessionMessagesRequest,
+def replace_session_messages(session_id: str, req: SessionMessagesRequest,
                                    principal: Principal = CurrentPrincipal):
     """整体替换会话消息，使前端编辑/删除/重新生成后的视图与后端一致。"""
     if not sessions_store.replace(session_id, principal.user_id, req.messages):
@@ -556,7 +554,7 @@ from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
 @app.get("/v1/models")
-async def list_models(_: Principal = CurrentPrincipal):
+def list_models(_: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
 
     身份在这里刻意不用取名（catalog() 是全站视图），挂它也不是为了挡住匿名读取
@@ -594,12 +592,12 @@ class ProviderRequest(BaseModel):
     is_default: bool = False
 
 @app.get("/v1/providers")
-async def list_providers(_: Principal = RequireAdmin):
+def list_providers(_: Principal = RequireAdmin):
     # 绝不返回明文密钥，只给掩码与"是否已配置"
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
-async def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
+def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
@@ -607,7 +605,7 @@ async def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.put("/v1/providers/{provider_id}")
-async def update_provider(provider_id: str, req: ProviderRequest,
+def update_provider(provider_id: str, req: ProviderRequest,
                           _: Principal = RequireAdmin):
     record = req.model_dump()
     record["id"] = provider_id
@@ -618,13 +616,13 @@ async def update_provider(provider_id: str, req: ProviderRequest,
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/providers/{provider_id}")
-async def remove_provider(provider_id: str, _: Principal = RequireAdmin):
+def remove_provider(provider_id: str, _: Principal = RequireAdmin):
     if provider_store.delete(provider_id):
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
-async def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
+def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
     if provider_store.set_default(provider_id):
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
@@ -661,9 +659,9 @@ def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")
-async def upload_attachment(file: UploadFile = File(...),
+def upload_attachment(file: UploadFile = File(...),
                             principal: Principal = CurrentPrincipal):
-    blob = await file.read()
+    blob = file.file.read()
     try:
         record = upload_store.save(file.filename or "unnamed", blob,
                                    file.content_type or "", owner=principal.user_id)
@@ -672,7 +670,7 @@ async def upload_attachment(file: UploadFile = File(...),
     return record
 
 @app.get("/v1/uploads/{upload_id}/file")
-async def download_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+def download_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
     # 附件是别人传的账单和论文。非属主给 404，不给 403：后者会把"id 存在"这件事
     # 白送出去，而 id 只有 16 位十六进制。
     record = upload_store.get(upload_id, owner=principal.user_id)
@@ -681,7 +679,7 @@ async def download_attachment(upload_id: str, principal: Principal = CurrentPrin
     return FileResponse(record["path"], media_type=record["mime"], filename=record["name"])
 
 @app.delete("/v1/uploads/{upload_id}")
-async def delete_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+def delete_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
     if upload_store.delete(upload_id, owner=principal.user_id):
         return {"status": "deleted", "id": upload_id}
     raise HTTPException(status_code=404, detail="附件不存在")
@@ -691,7 +689,7 @@ FEEDBACK_WEIGHT_STEP = 0.1
 
 
 @app.post("/v1/feedback")
-async def submit_feedback(feedback: FeedbackRequest,
+def submit_feedback(feedback: FeedbackRequest,
                           principal: Principal = CurrentPrincipal):
     """记录反馈，并立刻把它作用回系统。
 

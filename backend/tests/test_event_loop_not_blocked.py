@@ -18,8 +18,11 @@ import pytest
 from app.core import streaming
 from app.main import app
 
-# 这些端点都会朝进程外发一次网络请求（模型调用或嵌入接口）。它们必须是同步 def，
+# 这些端点要么朝进程外发一次网络请求（模型/嵌入），要么做真实文件 I/O
+# （会话与配置整份落盘、附件写删、PDF 全文抽取、chroma 逐条更新）。它们必须是同步 def，
 # 好让 FastAPI 把整个处理函数放进线程池，而不是占着事件循环。
+# 判据是"有没有阻塞"，不是"是不是网络"——一次 200ms 的 sessions.json 写盘和一次
+# 慢上游是同一类事故，只是量级不同。
 NETWORK_BOUND_ENDPOINTS = [
     "/v1/chat",
     "/v1/chat/stream",
@@ -32,6 +35,19 @@ NETWORK_BOUND_ENDPOINTS = [
     # 设置里的「测试」就能把整台服务冻住二十秒，形状与上面那次 524 一模一样。
     "/v1/providers/test",
     "/v1/providers/{provider_id}/test",
+    # 会话与模型服务配置：每次写都是 makedirs + 整份 JSON 落盘
+    "/v1/sessions",
+    "/v1/sessions/{session_id}",
+    "/v1/sessions/{session_id}/messages",
+    "/v1/models",
+    "/v1/providers",
+    "/v1/providers/{provider_id}",
+    "/v1/providers/{provider_id}/default",
+    # 附件：写文件、删文件，PDF 还要 fitz 全文抽取（CPU 秒级）
+    "/v1/uploads",
+    "/v1/uploads/{upload_id}/file",
+    # 反馈：全表扫消息 + 整份 feedback.json 读写 + chroma 逐条改权重 + 再整读一遍分析
+    "/v1/feedback",
 ]
 
 # 上游卡住的模拟时长，与 /health 的容忍上限。上限比"循环被占住"的任何形状低一个
@@ -156,3 +172,18 @@ def test_health_is_answerable_while_a_stream_is_stalled(monkeypatch):
     assert waited < HEALTH_BUDGET_SECONDS, (
         f"/health 等了 {waited:.1f}s：一个卡住的模型请求把事件循环占住了，"
         f"这正是线上 524 的形状（上限 {HEALTH_BUDGET_SECONDS}s）")
+
+
+def test_nobody_turns_off_certificate_verification_process_wide():
+    """main.py 里不许再出现"全进程关掉证书校验"。
+
+    这行早先是给卡巴斯基拆 TLS 救急用的，代价是 urllib/http.client 等所有走默认
+    上下文的出网请求都不再验证书——方向与 app/core/tls.py 的承诺正相反。模型客户端
+    现在统一用系统信任锚（core/tls.system_ssl_context），这张全局免检牌已经没有
+    存在的理由，留着就是给下一个人省事的借口。
+    """
+    from pathlib import Path
+    from app.core import paths as _paths          # 只为确认导入链没绕开 app 包
+
+    src = Path(__file__).resolve().parents[1].joinpath("app/main.py").read_text(encoding="utf-8")
+    assert "_create_unverified_context" not in src, "全局关掉证书校验的那行又回来了"
