@@ -5,8 +5,12 @@
 
 契约只有两句话：
 1. 走 /v1/ 的每条路由，依赖树里必须出现 current_principal 或 require_admin；
-2. 免凭据的面只有 authz.PUBLIC_PATHS 那一处，它今天是三条：注册、登录、自助改密
-   （找回问题已是全站常量，所以"先问服务器要问题"那一步连同端点一起没了）。
+2. 免凭据的面只有 authz 里那两处名单：PUBLIC_PATHS 的精确条目（今天是三条：
+   注册、登录、自助改密——找回问题已是全站常量，所以"先问服务器要问题"那一步
+   连同端点一起没了），以及 PUBLIC_ROUTE_TEMPLATES 的带变量条目（今天只有一条：
+   导出票据兑换，凭据是链接里那段一次性票据本身）。两张名单都要逐个点名，
+   多一条就红——见 test_public_allowlist_is_exactly_the_bootstrap_endpoints 与
+   test_the_ticket_redemption_door_is_one_segment_thick。
 
 判定看的是**依赖树里的可调用对象本身**，不是参数名：参数名可以随便起，身份也
 能藏在子依赖里（端点只依赖一个"取会话"的辅助函数，那个辅助函数才带 principal）。
@@ -53,10 +57,11 @@ from tests.conftest import RECOVERY_FIELDS
 from starlette.websockets import WebSocket
 
 from app.core import authz
-from app.core.authz import (PUBLIC_PATHS, CurrentPrincipal, Principal,
-                            UNAUTHORIZED_DETAIL, current_principal, install_auth,
-                            require_admin)
+from app.core.authz import (PUBLIC_PATHS, PUBLIC_ROUTE_TEMPLATES,
+                            CurrentPrincipal, Principal, UNAUTHORIZED_DETAIL,
+                            current_principal, install_auth, require_admin)
 from app.main import app
+from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_ID_CHARS, TICKET_ID_RE
 
 GUARD_CALLABLES = {current_principal, require_admin}
 # 非 /v1 的系统端点：健康检查与静态首页。契约刻意只管 /v1——它们是运维探针和
@@ -156,9 +161,17 @@ def _describe(route) -> str:
 
 
 def _identity_gaps(app_obj=None):
-    """该路由表里"没声明任何身份守卫"的 /v1 路由（公开名单除外）。"""
+    """该路由表里"没声明任何身份守卫"的 /v1 路由（两张公开名单除外）。
+
+    PUBLIC_ROUTE_TEMPLATES 豁免的是**路由模板**——票据兑换那条是刻意不挂身份
+    依赖的（凭据在链接里），它免不免凭据由中间件按正则判定，另有一条行为锁
+    （test_the_ticket_redemption_door_is_one_segment_thick）守着"正则不许宽到
+    漏进别的路径"。这里如果只看 PUBLIC_PATHS，契约会把那条合规的一次性链接
+    端点判红，而误报的出口往往是往名单里塞例外——那才是这把锁被拆掉的方式。
+    """
     return [route for route in _v1_routes(app_obj)
             if route.path not in PUBLIC_PATHS
+            and route.path not in PUBLIC_ROUTE_TEMPLATES
             and not (_route_guards(route) & GUARD_CALLABLES)]
 
 
@@ -183,14 +196,20 @@ def test_every_v1_route_declares_an_identity_dependency():
 
 
 def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
-    """免凭据端点必须逐个点名，多一条就红。
+    """免凭据面必须逐个点名，两张名单各钉各的，多一条就红。
 
-    现在是三条：注册、登录，以及自助改密。它们不是"漏了鉴权"——没有身份的人本来
-    就得能进来拿身份、也得能在忘了密码时自救。但每一条都是攻击面，所以这条钉的是
+    PUBLIC_PATHS 今天是三条：注册、登录、自助改密。它们不是"漏了鉴权"——没有身份的
+    人本来就得能进来拿身份、也得能在忘了密码时自救。但每一条都是攻击面，所以这条钉的是
     "不许悄悄多第四条"；这三条自己的防线不在这里，在 auth_router（真实 IP 限流、
     几种失败同一句话）与 auth 存储层（同形措辞与同形耗时）里。
+
+    PUBLIC_ROUTE_TEMPLATES 是带变量段的那一类，今天只有一条：导出票据兑换。它的凭据
+    是链接里那段一次性票据本身，所以免登录是设计而非漏洞；"这条门只有一整段票据那么宽"
+    由下面的 test_the_ticket_redemption_door_is_one_segment_thick 用真请求守着，这里先
+    钉住"名单不许悄悄多第二条"。
     """
     assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"}
+    assert set(PUBLIC_ROUTE_TEMPLATES) == {f"{EXPORT_PATH_PREFIX}{{ticket_id}}"}
 
 
 def test_the_reset_step_is_reachable_without_credentials(client, enforced):
@@ -388,25 +407,56 @@ def test_agent_and_task_surface_is_admin_only():
 
 
 def test_every_public_path_is_a_real_route():
-    """PUBLIC_PATHS 里的死条目是一扇留着的门：端点改名或搬家后它仍然免凭据，只是后面
-    没人接。允许它存在，等于允许公开面只增不减。"""
+    """公开名单里的死条目是一扇留着的门：端点改名或搬家后它仍然免凭据，只是后面
+    没人接。允许它存在，等于允许公开面只增不减。两张名单同一个口径。"""
     mounted = {r.path for r in _v1_routes()}
-    orphan = [p for p in PUBLIC_PATHS if p not in mounted]
+    orphan = [p for p in set(PUBLIC_PATHS) | set(PUBLIC_ROUTE_TEMPLATES)
+              if p not in mounted]
     assert not orphan, f"公开名单里有已不存在的端点：{sorted(orphan)}"
 
 
 def test_no_public_path_shadows_another_route():
     """公开项不许带结尾斜杠，也不许是别的路径的前缀。
 
-    中间件现在用精确匹配，所以"前缀"这一条今天没有直接危害；危害在于有人把 == 换成
-    startswith 的那一刻——届时 /v1/auth/register 会顺带放行 /v1/auth/register/anything。
-    这条让那种改法在合入当天就变红。
+    中间件现在用精确匹配（带变量那条用锚定正则），所以"前缀"这一条今天没有直接危害；
+    危害在于有人把 == 换成 startswith 的那一刻——届时 /v1/auth/register 会顺带放行
+    /v1/auth/register/anything。这条让那种改法在合入当天就变红。
     """
     paths = {r.path for r in _v1_routes()}
-    assert all(not p.endswith("/") for p in PUBLIC_PATHS), "公开项不许以 / 结尾"
-    for pub in PUBLIC_PATHS:
+    all_public = set(PUBLIC_PATHS) | set(PUBLIC_ROUTE_TEMPLATES)
+    assert all(not p.endswith("/") for p in all_public), "公开项不许以 / 结尾"
+    for pub in all_public:
         shadowed = [p for p in paths if p != pub and p.startswith(pub + "/")]
         assert not shadowed, f"{pub} 是 {sorted(shadowed)} 的前缀，不能留在公开名单里"
+
+
+def test_the_ticket_redemption_door_is_one_segment_thick(client, enforced):
+    """带变量的免凭据门只有一整段票据那么宽——这不是前缀放行，也不许漂成前缀放行。
+
+    PUBLIC_PATHS 是精确字符串，兑换的路径却带随机 id，中间件因此在 authz 里多了一份
+    锚定正则（PUBLIC_ROUTE_TEMPLATES）。这条用真请求钉它两半：
+
+    - 形状对但没签过（22 个合法字符）→ 已过中间件、死在票据表里：404，同一句话。
+      它必须到得了处理函数，否则壳 APK 拿不到任何文件；它也拿不到东西，所以"免登录"
+      没有漏成"免票据"。
+    - 形状不对（带斜杠、太短、太长、两段式）→ 一律还是 401，与整条 /v1 面同一个
+      凭据门。把正则改成前缀匹配会当场红在这里——那正是要防的"省事"改法。
+    """
+    enforced("垫底用户")   # 库里有身份，排除与形状无关的 503 通路
+    shape_ok = EXPORT_PATH_PREFIX + "Z" * TICKET_ID_CHARS
+    assert TICKET_ID_RE.fullmatch(shape_ok[len(EXPORT_PATH_PREFIX):]), "探针自身得先是票据形状"
+    res = client.get(shape_ok)
+    assert res.status_code == 404, f"没签过的票据形状竟被凭据门挡了：{res.status_code}"
+
+    for near_miss in (EXPORT_PATH_PREFIX,                       # 目录本身
+                      EXPORT_PATH_PREFIX + "short",             # 不够长
+                      shape_ok + "Z",                           # 超长一字符
+                      shape_ok + "/sub",                        # 多一段
+                      shape_ok.replace("Z", "✦")):              # 非法字符
+        res = client.get(near_miss)
+        assert res.status_code == 401, \
+            f"{near_miss!r} 白拿到了免凭据通道（{res.status_code}）——放行漂成前缀了"
+        assert res.json()["detail"] == UNAUTHORIZED_DETAIL
 
 
 # ---------- 中间件的放行判定（从 test_auth_endpoints.py 挪来） ----------

@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 
 from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
                            auth_store)
+# 导出票据的路径形状只有存储层知道（长度跟着生成器走），这里引用而不是抄第二份。
+from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_PATH_RE
 
 BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
@@ -20,11 +22,33 @@ BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 # 找回只有改密这一条公开端点：三题是全站常量，页面自己渲染，不必问服务器要。
 # 新增公开端点必须同时改这里，否则路由契约测试会红。
 PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"})
+
+# 免凭据的第二种形状：带变量段的公开路由。精确匹配的门今天只有票据兑换这一条
+# 需要跨过去——链接本身就是凭据（128 位随机、5 分钟过期、一次作废，见
+# app/session/export_store.py），壳 APK 的下载请求带不出 Authorization 头，
+# 不匿名就没有任何文件能落进手机。
+# 放行的是"整条路径恰好等于前缀+票据形状"（锚定的正则，不是前缀匹配）：
+# /v1/exports/ 、/v1/exports/short、/v1/exports/x/y 都仍然要凭据。key 是路由
+# 模板（给路由契约测试核对挂载表用），value 是中间件匹配具体请求用的正则。
+# 新增一条带变量的公开路由 = 在这里点名 + 改 tests/test_route_auth_contract.py，
+# 与 PUBLIC_PATHS 同一套"多一条就红"的规矩。
+PUBLIC_ROUTE_TEMPLATES = {f"{EXPORT_PATH_PREFIX}{{ticket_id}}": TICKET_PATH_RE}
+
 _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 
 # 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺
 # （"没有身份"，区别于 403 的"有身份但不够"）。
 UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
+
+
+def is_public_path(path: str) -> bool:
+    """这条**具体请求路径**免不免凭据：精确名单，或恰好整条命中票据形状。
+
+    判定收在这一个函数里，中间件与测试共用同一份口径；写成两处各来一遍的
+    话，改天漂移的那一半就是没人知道的免凭据门。
+    """
+    return path in PUBLIC_PATHS or any(p.match(path)
+                                       for p in PUBLIC_ROUTE_TEMPLATES.values())
 
 
 def _auth_mode() -> str:
@@ -103,7 +127,7 @@ def install_auth(app) -> None:
         path = request.url.path
         if request.method == "OPTIONS" or not path.startswith(_PROTECTED_PREFIXES):
             return await call_next(request)
-        if path in PUBLIC_PATHS:
+        if is_public_path(path):
             return await call_next(request)
 
         if _auth_mode() == "disabled":

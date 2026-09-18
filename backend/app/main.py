@@ -493,6 +493,64 @@ async def replace_session_messages(session_id: str, req: SessionMessagesRequest,
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
 
+# ---------- 导出下载（一次性票据） ----------
+# 前端 blob: + <a download> 在 Android WebView 壳里存不下文件（壳收不到 blob 下载
+# 回调，也不会给下载请求带 Authorization），所以导出必须换成一条免登录、真实、
+# 一次性的 HTTPS 链接。鉴权靠"链接本身就是票据"，不靠请求头：
+#   1. 签发（下面第一条）走 CurrentPrincipal，且复用 _require_session_owner——
+#      "不是你的会话"和"这会话不存在"是同一句话、同一个 404，不是枚举信道；
+#   2. 兑换（第二条）免凭据可达，但免登录的门只放行"整条恰好是票据形状"的路径
+#      （authz.PUBLIC_ROUTE_TEMPLATES），且票据 5 分钟过期、兑换一次即作废。
+from app.session.export_store import (EXPORT_PATH_PREFIX, TICKET_TTL_SECONDS,
+                                      content_disposition, export_ticket_store,
+                                      session_markdown)
+from fastapi.responses import Response
+
+# 兑换失败只有一句话：票据不存在、已过期、已被用过、签发后会话又被删了，四种
+# 走到这里都回同一份 404。区分它们等于把这个端点养成一台"这条链接是否真存在过"
+# 的探测器——正是票据链接最不该成为的东西。
+EXPORT_TICKET_INVALID_DETAIL = "导出链接无效或已过期"
+
+
+@app.post("/v1/sessions/{session_id}/export-ticket")
+def create_export_ticket(session_id: str, principal: Principal = CurrentPrincipal):
+    """为属于自己的会话签一张一次性导出票据，返回可匿名兑换的相对路径。
+
+    同步 def：签发要读写进程内会话存储（带锁 + 落盘），放在事件循环里就是
+    那次线上 524 的形状。归属校验必须在签票之前，且复用 _require_session_owner
+    而不是另写一套判断。
+    """
+    _require_session_owner(session_id, principal)
+    # 惰性清理（剔除过期条目）写在 store.issue 内部：每次签发顺带扫一遍，
+    # 既不必起后台线程，也不会让过期票据在表里越积越多。
+    ticket_id = export_ticket_store.issue(session_id, principal.user_id)
+    return {"path": f"{EXPORT_PATH_PREFIX}{ticket_id}",
+            "expires_in": TICKET_TTL_SECONDS}
+
+
+@app.get("/v1/exports/{ticket_id}")
+def redeem_export_ticket(ticket_id: str):
+    """用票据换回该会话的 Markdown。免登录，所以这一条路由不挂任何身份依赖。
+
+    兑换即作废：store.consume 无论命中与否都把票据弹出，第二次永远拿不回内容。
+    取会话用签发时记下的 owner（不是当前请求者——这里根本没有请求者身份），
+    只导出服务端真实存着的消息。文件名走 RFC 5987，标题绝不原样拼进响应头。
+    """
+    redeemed = export_ticket_store.consume(ticket_id)
+    if redeemed is None:
+        raise HTTPException(status_code=404, detail=EXPORT_TICKET_INVALID_DETAIL)
+    session_id, owner = redeemed
+    session = sessions_store.get(session_id, owner=owner)
+    if session is None:
+        # 签发与会话删除之间有窗口：票据还在，会话已经没了。回同一句话，
+        # 别把"票据有效但会话已删"这件事透露出去。
+        raise HTTPException(status_code=404, detail=EXPORT_TICKET_INVALID_DETAIL)
+    return Response(content=session_markdown(session),
+                    media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": content_disposition(
+                        session.get("title"))})
+
+
 # ---------- 模型列表（由 Provider 配置派生） ----------
 from fastapi import UploadFile, File
 from fastapi.responses import FileResponse

@@ -179,6 +179,9 @@ const API = (() => {
     listSessions: () => request("/v1/sessions"),
     getSession: (id) => request("/v1/sessions/" + encodeURIComponent(id)),
     deleteSession: (id) => request("/v1/sessions/" + encodeURIComponent(id), { method: "DELETE" }),
+    /* 导出：换一张一次性下载票据。壳里的 WebView 收不到 blob 下载、也不会给下载
+       请求带 Authorization，所以文件必须由服务端给一个真实的 https 链接。 */
+    exportTicket: (id) => request(`/v1/sessions/${encodeURIComponent(id)}/export-ticket`, { method: "POST" }),
     replaceMessages: (id, messages) =>
       request("/v1/sessions/" + encodeURIComponent(id) + "/messages", { method: "PUT", body: { messages } }),
     chat: (payload) => request("/v1/chat", { method: "POST", body: payload }),

@@ -297,9 +297,11 @@ def _strip_js_comments(src: str) -> str:
     test_the_comment_ruler_needs_its_own_test。
 
     状态机走到行尾必须把单/双引号关掉（反引号除外：模板字符串真能跨行）。不加这一步
-    它在这份文件上从来就没工作过：app.js 里 `safeFilename()` 那句
+    它在这份文件上从来就没工作过：app.js 的旧导出路径里 `safeFilename()` 那句
     `.replace(/[\\/:*?"<>|\r\n]+/g, " ")` 的正则字面量带一个裸 `"`，引号状态一开着就
-    一路跨行带到文件尾，其后 1400 多行全被当成"还在字符串里"原样抄走。实测旧写法剥完
+    一路跨行带到文件尾，其后 1400 多行全被当成"还在字符串里"原样抄走（那个函数已随
+    导出改走服务端票据而删掉，形状本身由下面 tricky 那段自己钉住，不靠语料里还有它）。
+    实测旧写法剥完
     还剩 49 行整行注释与 53 行块注释续行，改完之后是 0 行，而真代码一处不少（1595 行、
     `API.` 29 处、`$(` 246 处）——一把看起来在干活、实际上只剥了前 103 行的尺子，比没有
     尺子更糟，因为写锁的人以为自己有牙。判据（含"不许退化成恒真"那一半）在同一条测试里。
@@ -450,7 +452,8 @@ def test_the_comment_ruler_needs_its_own_test():
     assert stripped.count("\n") == src.count("\n"), "换行被吃掉：行号错位会让按行的形状锁失真"
 
     # 第五件：正则字面量里那个裸双引号把状态机骗开之后，"引号没闭合"必须有尽头。
-    # 这一小段就是 app.js 的 safeFilename() 那一行的形状。
+    # 这一小段就是当初把尺子骗过去的那一行的形状（app.js 里那个函数已随导出改走
+    # 服务端票据被删，所以判据必须自带样本，不能依赖语料里还留着它）。
     tricky = ('const bad = /[:*?"<>|]+/g;\n'
               '// authFail(""); 这一整行是注释，不许留在语料里\n'
               'setUserError("");\n')
@@ -1507,3 +1510,55 @@ def test_a_brand_new_identity_is_not_blocked_on_choosing_a_model():
         "loadModels 另写了一套挑选规则：两处口径迟早分家"
     assert "await loadModels()" in _function_body(js, "send"), \
         "清单还没回来时该先去拉一次，而不是直接拒发"
+
+
+def test_account_rows_offer_switch_and_delete_and_the_current_one_offers_nothing():
+    """账户列表里非当前的每人两颗按钮：切换账号 / 删除账号；当前那一行一颗都不给。
+
+    2026-09-18 真机反馈：原先非当前行只有一颗「退出」，人按字面理解成"从这台机器上
+    退出这条记录"，实际做的却是撤销那个人的登录；当前行没有按钮但整行可点，误触即换人。
+    """
+    js = _js("app.js")
+    body = _function_body(js, "renderAccounts")
+    assert "切换账号" in body and "删除账号" in body, "两颗按钮没到位"
+    assert "退出" not in body, "还留着那颗含义不明的「退出」"
+    assert "row.onclick" not in body, "整行可点：误触就换人，按钮该明确到动作"
+    assert body.index("x.userId !== here") < body.index("切换账号"), \
+        "按钮没被「当前那一行不给按钮」的判断罩住"
+
+
+def test_removing_an_identity_survives_a_token_the_server_already_rejects():
+    """服务端明确不认这枚令牌（401/403）时，本机的条目必须照样删得掉。
+
+    顺序仍然是先撤销再删；但账号已经被人从管理员侧删掉时，撤销请求会在鉴权中间件
+    就 401，原先那版把它当失败、拒绝移除条目——于是清单里留下一条永远移不掉的幽灵
+    （真机上就是那行 u_d65141d2「需要重新登录」）。网络错误与 5xx 仍要留着条目：
+    那种情况下令牌可能还活着，"看起来删掉了但还能用"比没删更糟。
+    """
+    body = _function_body(_js("app.js"), "dropIdentity")
+    assert "401" in body and "403" in body, "没按 HTTP 状态区分「已作废」与「没送到」"
+    assert "e.status" in body, "判据落在状态码上，不许落到错误文案的字面"
+
+
+def test_logging_out_falls_back_to_the_newest_identity_not_the_first_in_the_list():
+    """退出当前身份后退回谁，必须和 currentEntry 的兜底同一条规则。
+
+    readIdentities() 的原始顺序里可能躺着已被删除的账号，取 [0] 会把人换成一枚死
+    令牌——真机上表现为"登录已失效"但界面仍写着原来那个人。
+    """
+    body = _function_body(_js("app.js"), "logoutCurrent")
+    assert "readIdentities()[0]" not in body, "还在按插入顺序取第一条"
+    assert "addedAt" in body, "没按 addedAt 挑最新那条"
+
+
+def test_export_asks_the_server_for_a_downloadable_url():
+    """导出不能再走 blob：WebView 的下载回调收不到 createObjectURL 出来的地址。
+
+    壳那边已经注册 DownloadListener，前端要给它一个真实的 https 链接——由服务端
+    签发一次性票据（另一个提交里加的 /v1/sessions/{id}/export-ticket）。
+    """
+    body = _function_body(_js("app.js"), "exportCurrent")
+    assert "exportTicket" in body, "导出还在本地拼 blob"
+    assert "download(" not in body, "blob 那条路在 App 里点了没反应"
+    api = _js("api.js")
+    assert "export-ticket" in api, "api.js 里没有签发票据的口子"

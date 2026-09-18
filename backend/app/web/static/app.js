@@ -72,8 +72,14 @@ async function dropIdentity(userId) {
   try {
     await API.logout(hit.token);
   } catch (e) {
-    setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
-    return false;
+    /* 401/403 是"服务器本来就不认这枚令牌"（账号被管理员删过、或被轮换过）：
+       撤销要达到的目的已经达成，本机条目照删。其余失败（断网、5xx）留着条目——
+       那种情况下令牌可能还活着，"看起来删掉了但那枚还能用"比没删更糟。
+       判据只看 HTTP 状态：文案会被服务端改，状态码不会。 */
+    if (e.status !== 401 && e.status !== 403) {
+      setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
+      return false;
+    }
   }
   saveIdentities(readIdentities().filter((x) => x.userId !== userId));
   return true;
@@ -170,24 +176,6 @@ function outbound() {
   const persona = pref.persona(pref.sessionId);
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
-}
-
-function download(name, text, mime) {
-  const url = URL.createObjectURL(new Blob([text], { type: mime + ";charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function titleOf(text) {
-  const t = (text || "").trim().replace(/\s+/g, " ");
-  return t ? t.slice(0, 24) : "新对话";
-}
-
-function safeFilename(text) {
-  const cleaned = (text || "").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim();
-  return (cleaned || "对话").slice(0, 40);
 }
 
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
@@ -1334,20 +1322,22 @@ function renderAccounts() {
       tag.className = "set-val";
       tag.textContent = x.userId === here ? "当前" : (x.stale ? "需要重新登录" : "");
       row.append(name, tag);
+      /* 当前这一行两颗按钮都不给：换人不需要按钮（已经是这个人），
+         而"删除"落在自己身上只会把正在用的会话打断——误触的代价不对称。 */
       if (x.userId !== here) {
-        const out = document.createElement("button");
-        out.className = "set-mini";
-        out.textContent = "退出";
-        out.onclick = async () => {
-          out.disabled = true;
+        const go = document.createElement("button");
+        go.className = "set-mini";
+        go.textContent = "切换账号";
+        go.onclick = () => switchTo(x.userId);
+        const del = document.createElement("button");
+        del.className = "set-mini set-del";
+        del.textContent = "删除账号";
+        del.onclick = async () => {
+          go.disabled = del.disabled = true;
           if (await dropIdentity(x.userId)) renderAccounts();
-          else out.disabled = false;
+          else go.disabled = del.disabled = false;
         };
-        row.append(out);
-      }
-      if (x.userId !== here) {
-        row.onclick = () => switchTo(x.userId);
-        row.classList.add("set-click");
+        row.append(go, del);
       }
       box.append(row);
     });
@@ -1417,7 +1407,11 @@ async function logoutCurrent() {
   const hit = currentEntry();
   if (!hit) { showAuth("login"); return; }
   if (!await dropIdentity(hit.userId)) return;
-  if (readIdentities().length) { setCurrent(readIdentities()[0].userId); await switchTo(readIdentities()[0].userId); }
+  // 退回谁必须和 currentEntry 的兜底同一条规则：清单的插入顺序里可能躺着已被删除的
+  // 账号，取 [0] 会把人换成一枚死令牌，表现为"登录已失效"但界面还写着原来那个人。
+  const rest = readIdentities().slice()
+    .sort((a, b) => (b.addedAt || "").localeCompare(a.addedAt || ""));
+  if (rest.length) { setCurrent(rest[0].userId); await switchTo(rest[0].userId); }
   else { resetViewForIdentity(); showAuth("register"); }
 }
 
@@ -1768,14 +1762,17 @@ function bind() {
   });
 }
 
-function exportCurrent() {
-  const real = state.messages.filter((m) => !m.transient);
-  if (!real.length) { setStatus("当前没有可导出的对话", true); return; }
-  const name = safeFilename(titleOf((real.find((m) => m.role === "user") || {}).content));
-  const md = ["# " + name, ""]
-    .concat(real.map((m) => `**${m.role === "user" ? "我" : "助手"}**：\n\n${m.content}\n`))
-    .join("\n");
-  download(`${name}.md`, md, "text/markdown");
+async function exportCurrent() {
+  /* 导出不再在本地拼 blob：壳那边的 WebView 收不到 blob 的下载回调，也绝不会给
+     下载请求带上 Authorization 头。改成先向服务端换一张一次性票据，再把浏览器/壳
+     直接指到那个真实链接上——响应带 Content-Disposition，下载自然发生。 */
+  if (!state.messages.some((m) => !m.transient)) { setStatus("当前没有可导出的对话", true); return; }
+  try {
+    const t = await API.exportTicket(pref.sessionId);
+    location.href = t.path;
+  } catch (e) {
+    setStatus("导出失败：" + e.message, true);
+  }
 }
 
 /** 移动端软键盘会盖住输入框：把 body 高度收到可视视口，flex 布局即整体让位。 */

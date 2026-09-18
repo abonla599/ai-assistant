@@ -325,13 +325,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .set-go { flex: none; width: 14px; text-align: center; color: var(--text-3); font-size: 15px; }
 .set-plain, .set-plain:hover { cursor: default; background: transparent; }
 .set-danger .set-lbl, .set-danger .set-ico { color: var(--danger); }
-/* 账户清单：整行可点 = 切过去；当前那条描边；行内那颗「退出」单独占一个热区。 */
-.set-click { cursor: pointer; }
+/* 账户清单：当前那条只描边、不给按钮；其余每人「切换账号」「删除账号」两颗。 */
 .set-current { box-shadow: inset 0 0 0 1px var(--accent); }
 .set-mini { flex: none; border: 1px solid var(--line); background: transparent;
   color: var(--text-2); border-radius: 999px; padding: 6px 12px; font-size: 12.5px;
-  min-height: 32px; cursor: pointer; }
-.set-mini:hover { color: var(--danger); border-color: var(--danger); }
+  min-height: 44px; cursor: pointer; }
+.set-mini:hover { color: var(--accent); border-color: var(--accent); }
+.set-mini.set-del { color: var(--danger); border-color: var(--danger); }
+.set-mini.set-del:hover { background: var(--danger); color: var(--bg); }
 .set-mini[disabled] { opacity: .5; cursor: default; }
 .set-me { display: flex; align-items: center; gap: 12px; padding: 14px; }
 .set-av { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid;

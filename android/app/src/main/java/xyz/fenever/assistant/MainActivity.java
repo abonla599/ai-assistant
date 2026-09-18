@@ -1,11 +1,17 @@
 package xyz.fenever.assistant;
 
 import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -14,22 +20,37 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.ValueCallback;
+import android.widget.Toast;
+
+import java.net.URLDecoder;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * AI 助手的 WebView 外壳。
  *
- * 界面与后端全部在线上（https://ai.fenever.xyz/app/），壳只负责三件网页自己做不到的事：
- * 给 WebView 提供原生文件选择、把网页的摄像头请求转成运行时权限、以及断网时给出可读提示。
- * 因此改界面不需要重新打包 APK。
+ * 界面与后端全部在线上（https://ai.fenever.xyz/app/），壳只负责几件网页自己做不到的事：
+ * 给 WebView 提供原生文件选择、把网页的摄像头请求转成运行时权限、把带 attachment 的响应
+ * 交给系统 DownloadManager 落到公共下载目录、以及断网时给出可读提示。
+ * 这些全走 Android 平台 API，仍然不引任何第三方依赖；因此改界面不需要重新打包 APK。
  */
 public class MainActivity extends Activity {
 
     private static final int FILE_CHOOSER_CODE = 1001;
     private static final int CAMERA_PERMISSION_CODE = 1002;
 
+    // 从 contentDisposition 里抠文件名用；同时兼容 filename= 与 RFC 5987 的 filename*=
+    private static final Pattern DISPOSITION_FILENAME =
+            Pattern.compile("filename\\*?\\s*=\\s*(?:\"([^\"]*)\"|([^;]+))", Pattern.CASE_INSENSITIVE);
+
     private WebView webview;
     private ValueCallback<Uri[]> filePathCallback;
     private PermissionRequest pendingCameraRequest;
+
+    // DownloadManager 的 enqueue id -> 展示用的文件名；回调线程与接收器都在主线程，普通 HashMap 够用
+    private final Map<Long, String> pendingDownloads = new HashMap<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,7 +134,161 @@ public class MainActivity extends Activity {
             }
         });
 
+        webview.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) ->
+                startDownload(url, userAgent, contentDisposition));
+
+        // ACTION_DOWNLOAD_COMPLETE 只由系统 DownloadManager 发出，属系统广播，
+        // 因此即便 targetSdk 34 也不必给 registerReceiver 传 RECEIVER_EXPORTED 标志。
+        registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+
         webview.loadUrl(BuildConfig.APP_URL);
+    }
+
+    /**
+     * 把网页给出的下载请求落到公共「下载」目录。
+     *
+     * WebView 对 attachment 响应默认不做任何处理，所以这里显式交给系统 DownloadManager；
+     * 走公共目录由系统负责写入，无需申请任何运行时权限，也不要往清单里加 WRITE_EXTERNAL_STORAGE。
+     */
+    private void startDownload(String url, String userAgent, String contentDisposition) {
+        Uri uri = Uri.parse(url);
+        String scheme = uri.getScheme();
+        // 只放行 http/https；file、content、javascript 等一律忽略，绝不把它丢给任意 Intent
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+            return;
+        }
+
+        String fileName = fileNameFromDisposition(contentDisposition);
+        if (fileName == null) {
+            fileName = sanitizeFileName(uri.getLastPathSegment());
+        }
+        if (fileName == null) {
+            fileName = "ai-assistant-" + System.currentTimeMillis();
+        }
+
+        try {
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                toast("这台设备不支持下载");
+                return;
+            }
+            DownloadManager.Request request = new DownloadManager.Request(uri);
+            if (userAgent != null && !userAgent.isEmpty()) {
+                request.setUserAgent(userAgent);
+            }
+            // API 9 起就有，minSdk 23 直接可用；比 API 33 的 setDestinationDirectoryPath 更稳
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+            request.allowOverwrite(true);
+            request.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            long id = manager.enqueue(request);
+            pendingDownloads.put(id, fileName);
+        } catch (Exception e) {
+            // 存储不可用、目录被拒等：不要静默失败
+            toast("下载失败：" + e.getMessage());
+        }
+    }
+
+    /** 完成/失败都要有反馈：Toast 提示，别让用户对着没反应的界面猜。 */
+    private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L);
+            String name = pendingDownloads.remove(id);
+            String label = name != null ? name : "文件";
+            int status = -1;
+            try {
+                DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                if (manager != null) {
+                    Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id));
+                    if (cursor != null) {
+                        try {
+                            if (cursor.moveToFirst()) {
+                                status = cursor.getInt(
+                                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                            }
+                        } finally {
+                            cursor.close();
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // 查不到状态时按失败处理，宁可多提醒也别静默
+            }
+            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                toast("已保存到「下载」：" + label);
+            } else if (status == DownloadManager.STATUS_FAILED) {
+                toast("下载失败：" + label);
+            }
+        }
+    };
+
+    /** 从响应头取文件名，取不到返回 null 交给调用方回退。 */
+    private static String fileNameFromDisposition(String contentDisposition) {
+        if (contentDisposition == null || contentDisposition.isEmpty()) {
+            return null;
+        }
+        Matcher matcher = DISPOSITION_FILENAME.matcher(contentDisposition);
+        while (matcher.find()) {
+            String value = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+            if (value == null) {
+                continue;
+            }
+            value = value.trim();
+            int sep = value.indexOf("''"); // RFC 5987：UTF-8''%E4%BD%A0...
+            if (sep >= 0) {
+                try {
+                    value = URLDecoder.decode(value.substring(sep + 2), "UTF-8");
+                } catch (Exception ignored) {
+                    value = value.substring(sep + 2);
+                }
+            }
+            String cleaned = sanitizeFileName(value);
+            if (cleaned != null) {
+                return cleaned;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 清洗服务器给的文件名：不把原样字符串拼进路径。
+     * 去掉路径分隔符（只保留最后一段）、控制字符与文件系统非法字符，并限制长度。
+     */
+    private static String sanitizeFileName(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String name = raw;
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        StringBuilder sb = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c < 0x20 || c == 0x7F) {
+                continue; // 控制字符直接丢弃
+            }
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?'
+                    || c == '"' || c == '<' || c == '>' || c == '|') {
+                sb.append('_'); // 非法字符替换，避免逃出目录或报错
+            } else {
+                sb.append(c);
+            }
+        }
+        name = sb.toString().trim();
+        if (name.isEmpty() || name.equals(".") || name.equals("..")) {
+            return null;
+        }
+        if (name.length() > 128) {
+            name = name.substring(0, 128);
+        }
+        return name;
+    }
+
+    private void toast(final String message) {
+        runOnUiThread(() -> Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show());
     }
 
     /** 网页标了只要图片时就不要给出一堆无关类型。 */
@@ -239,6 +414,12 @@ public class MainActivity extends Activity {
             pendingCameraRequest.deny();
             pendingCameraRequest = null;
         }
+        try {
+            unregisterReceiver(downloadReceiver);
+        } catch (Exception ignored) {
+            // 没注册成功过（理论上不会）就别因收尾再抛
+        }
+        pendingDownloads.clear();
         webview.destroy();
         super.onDestroy();
     }
