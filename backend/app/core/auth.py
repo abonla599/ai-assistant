@@ -181,14 +181,21 @@ class AuthError(Exception):
     注册端的"该用户名已存在"是有意保留的实话（改名是用户自己能解决的事），
     但它前面没有闸门，所以那份预算改由 HTTP 层按真实 IP 计费（AuthError.taken）。
 
-    taken 必须显式带着：HTTP 层拿它决定"这句要不要进限流账本"。靠 reason 里
-    有没有某个字来判，等于把一条安全预算挂在文案上——改文案的那天计费静默失效。
+    charge 是同一件事在找回那一侧的写法：**这句要不要进 _RESET_FAILS**。找回端点上
+    "答案错 / 没留答案 / 查无此人 / 已停用"四种原因同一句话、同一格预算，而新密码太短、
+    答案条数不对那些是当事人自己改得好的手滑，422 且不计费。
+
+    这两个标记都必须显式带着：HTTP 层靠它们决定"这句要不要进限流账本"。靠 reason 里
+    有没有某个字、或等于哪句文案来判，等于把一条安全预算挂在文案上——改文案的那天计费
+    静默失效。终审 F4 抓到的就是没带 charge 时的具体形状：路由写 `e.reason == RESET_FAIL`，
+    第五种内部原因一旦新增就静默落到 else 那一支——不计费，还把它原话说给一个免凭据端点。
     """
 
-    def __init__(self, reason: str, *, taken: bool = False):
+    def __init__(self, reason: str, *, taken: bool = False, charge: bool = False):
         super().__init__(reason)
         self.reason = reason
         self.taken = taken
+        self.charge = charge
 
 
 def _quarantine(path: str, why: str) -> None:
@@ -400,11 +407,11 @@ class AuthStore:
             # 它们开一条"秒回"的快路径。all() 之后仍要判这两条：dummy 摘要理论上
             # 会被 "timing-equalizer" 这个答案撞中，只靠 all() 不够硬。
             if not all(results) or record is None or not record.get("answer_hashes"):
-                raise AuthError(RESET_FAIL)
+                raise AuthError(RESET_FAIL, charge=True)
             if record.get("disabled"):
                 # 停用与答案错也说同一句话：告诉调用方"这个账号被停用了"等于让
                 # 任何人确认账号存在、并知道该去找谁求情。
-                raise AuthError(RESET_FAIL)
+                raise AuthError(RESET_FAIL, charge=True)
             record["pw_hash"] = hash_password(pw)
             if replacement is not None:
                 record["answer_hashes"] = [hash_password(k) for k in replacement]

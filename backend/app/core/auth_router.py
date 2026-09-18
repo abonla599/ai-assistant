@@ -19,7 +19,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core import authz
-from app.core.auth import RESET_FAIL, AuthError
+# 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
+# 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
+from app.core.auth import AuthError
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -28,6 +30,14 @@ router = APIRouter(tags=["身份"])
 # 重启即清零是可接受的，因为真正的凭据是 bcrypt 校验与长密码。
 # 账本只记失败，不记格式错（用户名打错字、密码太短）：那是当事人自己能改好的事，
 # 把它算进预算只会让唯一的登录入口被自己的手滑锁死。
+# **任何成功都不还回预算**（终审 F3 删掉了 register/login 成功路径上的两处
+# `_FAILS.pop(ip)`）。旧契约"密码对了就说明来路正当"实测是假的：一台机器、一枚来源 IP，
+# 只要穿插"自己的号成功一次"，撞名枚举能跑到 45 次 409 / 0 次 429，口令猜测能跑到
+# 36 次错 / 0 次 429——因为"成功"本身就是这个免凭据端点上随手可得的东西（猜对自己的
+# 口令、再注册一个小号）。代价如实认：同一个十分钟窗口里连续打错十次的真人要等窗口过去，
+# 话术已经是"尝试次数过多，请稍后再试"。判据是两条反转过的锁
+# （test_a_correct_login_does_not_pay_back_the_failure_budget 与
+# test_a_successful_register_does_not_pay_back_the_failure_budget）。
 FAILURE_WINDOW_SECONDS = 600
 MAX_FAILURES_PER_WINDOW = 10
 
@@ -55,11 +65,14 @@ _REGISTERS = defaultdict(list)
 _RESETS = defaultdict(list)
 # 猜找回答案的失败单独一册（窗口与上限沿用 FAILURE_WINDOW_SECONDS /
 # MAX_FAILURES_PER_WINDOW，换的只是账本）。
-# 理由：_FAILS 在登录与注册成功时会被 _FAILS.pop(ip) 清空——那是这两个端点的既有契约
-# （"密码对了"基本说明来路正当）。但一个正在猜三题答案的人，随手就能拿到一次那样的
-# 成功：猜对自己的口令、或再注册一个小号。共用一本账等于每成功一次就把找回的预算还给他，
-# 于是"每 10 次里蒙中一次"就能无限猜下去。找回这本账任何成功路径都不许清，改密成功也不行
-# （判据：test_no_other_success_pays_off_the_guessing_ledger）。
+# 拆开之后仍然站得住的两条理由：一，猜口令与猜三题是两种不同的猜测面，共用一格预算时
+# 前者会把后者顶满，一个人猜错九次之后连自己的密码都不许再试一次；二，429 落在哪本账上
+# 要看得出来，否则运维没法从 Retry-After 区分"刚才有人在枚举用户名"还是"有人在猜找回答案"。
+# 找回这本账任何成功路径都不许清，改密成功也不行（判据：
+# test_no_other_success_pays_off_the_guessing_ledger）。
+# 当初拆账的**原始**理由是"_FAILS 会被登录或注册成功清空，猜答案的人随手就能拿到一次
+# 那样的成功"——终审 F3 把那两处 pop 删掉之后，那半边理由已经不成立了，留着的是上面这两条。
+# 别把这段再读成"那本会被成功清、这本不会"。
 _RESET_FAILS = defaultdict(list)
 
 # 每本账配自己的窗口：_prune 是内存闸门，拿十分钟那把尺子去过 24 小时那两本，就是
@@ -217,7 +230,7 @@ async def register(req: RegisterRequest, request: Request):
     except AuthError as e:
         raise _register_error(e, ip)
     _note_registration(ip)
-    _FAILS.pop(ip, None)
+    # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role}
 
@@ -226,8 +239,10 @@ def _register_error(e: AuthError, ip: str) -> HTTPException:
     """把存储层的失败原因翻译成状态码，并给唯一那条可被滥用的信道计费。"""
     if e.taken:
         # 实话保留，但它现在是免凭据的用户名枚举信道：每问一次扣一格登录预算。
-        # 真人改名一次就过了，脚本则要每 10 次换一枚真实访客 IP——而换 IP 意味着
-        # 它背后真有一张分布式网络，那时限流本来也挡不住，只是把成本抬上去。
+        # 真人改名一次就过了，脚本则要每 10 次换一枚真实访客 IP——**这句从终审 F3 起才算数**：
+        # 那时删掉了 register/login 成功路径上的 _FAILS.pop(ip)，它再也拿不到"自己的号
+        # 成功一次"来洗账。换 IP 意味着它背后真有一张分布式网络，那时限流本来也挡不住，
+        # 只是把成本抬上去。
         _note_failure(ip)
         return HTTPException(status_code=409, detail=e.reason)
     # 用户名、密码、三条找回答案本身不合格：都是当事人自己能改好的，不计费也不该挡别人的路。
@@ -246,7 +261,7 @@ async def login(req: LoginRequest, request: Request):
         _note_failure(ip)
         # 401 而不是 403：这里没有"身份是真的但角色不够"这一说，只有"没认出来"。
         raise HTTPException(status_code=401, detail=e.reason)
-    _FAILS.pop(ip, None)
+    # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role}
 
@@ -261,12 +276,13 @@ async def reset(req: ResetRequest, request: Request):
 
     这个端点只看**两本**账，顺序是先猜错、后猜中：_RESET_FAILS 挡"一直在猜"，
     _RESETS 挡"已经猜中过几次"。第三本 _FAILS（登录与注册共用的失败账）它既不看不写，
-    猜错的格子也刻意不记到那本上——那本在登录或注册成功时会被清空（那是它们的既有契约），
-    可一个正在猜三题的人随手就能拿到一次那样的成功：猜对自己的口令、或再注册一个小号。
-    共用一本账就等于每成功一次把预算还给他，每 10 次里蒙中一次他就永远限不住。
-    反过来同样不通融：改密成功也只往 _RESETS 记一格，**不清** 任何失败账——登录与注册敢在
-    成功时清账，是因为"密码对了"基本能说明来路正当；这里不行，三题的文本和常见答案组合
-    本来就是公开的，猜中一次恰恰说明来路不明的那一面还没排除。
+    猜错的格子也刻意不记到那本上：猜口令与猜三题是两种不同的猜测面，共用一格预算时前者
+    会把后者顶满，而 429 落在哪本账上得能从 Retry-After 里读出来（为什么单独一册，见
+    _RESET_FAILS 上面那一段）。
+    反过来同样不通融：改密成功只往 _RESETS 记一格，**不清**任何失败账——三题的文本和
+    常见答案组合本来就是公开的，猜中一次恰恰说明来路不明的那一面还没排除。
+    （这一段以前还写着"因为 _FAILS 会在登录或注册成功时被清空"：终审 F3 把那两处
+    `_FAILS.pop(ip)` 删了，现在两本账任何成功都不还。）
     """
     ip = _client_ip(request)
     if _reset_throttled(ip):
@@ -277,8 +293,11 @@ async def reset(req: ResetRequest, request: Request):
         _store().reset_password(req.username, req.answers, req.new_password,
                                 req.new_answers)
     except AuthError as e:
-        if e.reason == RESET_FAIL:
-            # 答案错、没留找回答案、查无此人、已停用：同一句、同一格预算、同一个 401
+        if e.charge:
+            # 答案错、没留找回答案、查无此人、已停用：同一句、同一格预算、同一个 401。
+            # 判的是存储层带上来的显式标记，不是 e.reason 等于哪句文案——文案是会说、
+            # 会换的，预算不该挂在它上面（锁：
+            # test_the_reset_billing_follows_the_flag_not_the_wording）。
             _note_reset_failure(ip)
             raise HTTPException(status_code=401, detail=e.reason)
         # 新密码或轮换答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
