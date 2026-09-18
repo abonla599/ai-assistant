@@ -92,6 +92,55 @@ def test_stream_with_session(monkeypatch):
     client.delete(f"/v1/sessions/{session_id}")
 
 
+def test_a_failed_model_call_says_which_exception_and_why(client, monkeypatch, capsys):
+    """故障上屏时必须带异常类型和根因，不能只剩 SDK 那句默认文案。
+
+    真实事故：本机卡巴斯基拆 TLS，python 侧证书校验失败，手机上只看到
+    "Connection error."（openai.APIConnectionError 的默认 message，不含任何线索），
+    排查花了一小时。类型和 __cause__ 里才有 CERTIFICATE_VERIFY_FAILED。
+    """
+    from app.core import streaming
+
+    SSL_TEXT = ("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                "self-signed certificate in certificate chain (_ssl.c:1010)")
+
+    class APIConnectionError(Exception):
+        pass
+
+    class ConnectError(Exception):
+        pass
+
+    class SSLCertVerificationError(Exception):
+        pass
+
+    def boom(model, messages, provider_id=None, temperature=0.7, max_tokens=4096):
+        # 真机上量到的一条链，四层里三层是同一句话（截图见 2026-09-18）：
+        # openai 包 httpx，httpx 又包了一层自己，最里才是 ssl 的校验失败
+        err = APIConnectionError("Connection error.")
+        err.__cause__ = ConnectError(SSL_TEXT)
+        err.__cause__.__cause__ = ConnectError(SSL_TEXT)
+        err.__cause__.__cause__.__cause__ = SSLCertVerificationError(SSL_TEXT)
+        raise err
+        yield "永远不会到这里"
+
+    monkeypatch.setattr(streaming, "stream_chat", boom)
+
+    res = client.post("/v1/chat/stream", json={
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "你好"}]})
+
+    assert '"type": "error"' in res.text, res.text
+    assert "APIConnectionError" in res.text, "异常类型没上屏：只剩一句没用的默认文案"
+    assert "CERTIFICATE_VERIFY_FAILED" in res.text, "根因藏在 __cause__ 里，必须一起带出来"
+    # 同一句话不许刷屏：手机上那条因此占了六行，而它只说了一件事
+    assert res.text.count("CERTIFICATE_VERIFY_FAILED") == 1, "根因文案重复上屏"
+    assert "SSLCertVerificationError" in res.text, "并句不许把最里层的类型名也丢掉"
+    # 同一句话还要落到 stderr——冻结版就是靠它把故障留成证据的
+    captured = capsys.readouterr().err
+    assert "CERTIFICATE_VERIFY_FAILED" in captured, "日志里没留下根因"
+    assert captured.count("CERTIFICATE_VERIFY_FAILED") == 1, "日志里也不许重复"
+
+
 def test_stream_rejects_a_foreign_session_that_really_exists(client, enforced, monkeypatch):
     """404 必须来自"这不是你的会话"，而不是"这个 id 压根不存在"。
 

@@ -11,9 +11,11 @@ import re
 import threading
 import uuid
 
+import httpx
 from openai import OpenAI
 
 from app.core.paths import data_root, load_project_env
+from app.core.tls import system_ssl_context
 
 # 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
 # 否则首次运行时读不到 DEEPSEEK_API_KEY、播种不出任何模型配置。
@@ -245,7 +247,8 @@ class ProviderStore:
         provider = self.resolve(provider_id)
         try:
             client = OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
-                            timeout=20.0, max_retries=0)
+                            timeout=20.0, max_retries=0,
+                            http_client=httpx.Client(verify=system_ssl_context()))
             completion = client.chat.completions.create(
                 model=provider["model"],
                 messages=[{"role": "user", "content": "ping"}],
@@ -258,7 +261,8 @@ class ProviderStore:
 
 
 def build_client(provider: dict) -> OpenAI:
-    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"])
+    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
+                  http_client=httpx.Client(verify=system_ssl_context()))
 
 
 store = ProviderStore()

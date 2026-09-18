@@ -28,6 +28,10 @@ NETWORK_BOUND_ENDPOINTS = [
     "/v1/memory/add",
     "/v1/memory/search",
     "/v1/memory/update",
+    # 这两个走的是 provider_store.ping()：一次 timeout=20 的同步模型调用。点一下
+    # 设置里的「测试」就能把整台服务冻住二十秒，形状与上面那次 524 一模一样。
+    "/v1/providers/test",
+    "/v1/providers/{provider_id}/test",
 ]
 
 # 上游卡住的模拟时长，与 /health 的容忍上限。上限比"循环被占住"的任何形状低一个

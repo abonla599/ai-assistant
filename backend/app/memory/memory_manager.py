@@ -2,9 +2,11 @@ import os
 import uuid
 import traceback
 import chromadb
+import httpx
 from openai import OpenAI
 
 from app.core.paths import data_root, load_project_env
+from app.core.tls import system_ssl_context
 
 load_project_env()
 
@@ -47,7 +49,11 @@ class MemoryManager:
                     try:
                         self.client = OpenAI(
                             api_key=api_key,
-                            base_url="https://api.apiyi.com/v1"
+                            base_url="https://api.apiyi.com/v1",
+                            # 嵌入接口一旦因信任锚不对而握手失败，下面会静默降级成
+                            # 伪嵌入：不报错，但语义检索再也读不到记忆。所以这里必须
+                            # 与聊天用同一个信任锚，见 app/core/tls.py
+                            http_client=httpx.Client(verify=system_ssl_context())
                         )
                         self.embed_model = "text-embedding-3-small"
                         # 验证 API 是否可用

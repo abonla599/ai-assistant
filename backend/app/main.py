@@ -268,6 +268,31 @@ from app.core.providers import (store as provider_store, ProviderError, PRESETS,
 from app.core.uploads import store as upload_store, build_user_content, UploadError
 
 
+def _fail_reason(e: BaseException) -> str:
+    """把异常链压成一句能定位的话：类型全留，重复的句子并掉。
+
+    SDK 的默认文案不含任何线索（openai 那句 "Connection error." 底下才躺着
+    "CERTIFICATE_VERIFY_FAILED：本机卡巴斯基拆了 TLS"），根因只在 __cause__ /
+    __context__ 上。真机上量到这条链四层里有三层是同一句话，所以按文案分组、组内
+    并掉重名类型：一层原文配一串类型名，才是既说得清又不刷屏的形状。
+    """
+    groups = []          # 每项是 ([类型名...], 文案)
+    seen = set()
+    cur = e
+    while cur is not None and len(seen) < 8 and id(cur) not in seen:
+        seen.add(id(cur))
+        name = type(cur).__name__
+        text = str(cur)[:160]
+        if groups and groups[-1][1] == text:
+            if groups[-1][0][-1] != name:
+                groups[-1][0].append(name)
+        else:
+            groups.append(([name], text))
+        cur = cur.__cause__ or cur.__context__
+    return " ← ".join(" → ".join(names) + (f": {text}" if text else "")
+                      for names, text in groups)
+
+
 def _prepare_chat(request: ChatRequest, principal: Principal):
     """解析模型服务、拼装附件。
 
@@ -339,8 +364,9 @@ def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
         raise
     except Exception as e:
         # 失败就明确失败：把错误当回复返回会让它被写进会话历史、伪装成成功
-        raise HTTPException(status_code=502,
-                            detail=f"模型调用失败：{type(e).__name__}: {str(e)[:200]}")
+        reason = _fail_reason(e)
+        print(f"模型调用失败: {reason}", file=sys.stderr, flush=True)
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{reason}")
 
     message_id = str(uuid.uuid4())
     if request.session_id:
@@ -383,7 +409,8 @@ def stream_chat_endpoint(request: ChatRequest,
             query_text = ChatPipeline.text_of(messages[-1].get("content"))
             messages, used_memory_ids = pipe.inject_context(messages, query_text)
         except Exception as e:
-            print(f"流式上下文注入失败（不影响本次对话）: {e}")
+            print(f"流式上下文注入失败（不影响本次对话）: {_fail_reason(e)}",
+                  file=sys.stderr, flush=True)
 
     def generate():
         message_id = str(uuid.uuid4())
@@ -413,12 +440,15 @@ def stream_chat_endpoint(request: ChatRequest,
                 try:
                     pipe.save_interaction(user_text, full_text)
                 except Exception as e:
-                    print(f"流式记忆保存失败（不影响已返回的回复）: {e}")
+                    print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
+                          file=sys.stderr, flush=True)
             
             # 发送完成事件
             yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
         except Exception as e:
-            yield f"data: {json_module.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            reason = _fail_reason(e)
+            print(f"流式模型调用失败: {reason}", file=sys.stderr, flush=True)
+            yield f"data: {json_module.dumps({'type': 'error', 'message': f'模型调用失败：{reason}'})}\n\n"
     
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -542,15 +572,19 @@ async def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/test")
-async def test_provider(provider_id: str, _: Principal = RequireAdmin):
-    """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。"""
+def test_provider(provider_id: str, _: Principal = RequireAdmin):
+    """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。
+
+    必须是同步 def：ping 是一次 timeout=20 的阻塞模型调用，留在 async 里就是
+    "点一下测试，整台服务二十秒不响应"（见 test_event_loop_not_blocked）。
+    """
     try:
         return provider_store.ping(provider_id)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/v1/providers/test")
-async def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())
@@ -565,7 +599,7 @@ async def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin)
                                        max_tokens=4)
         return {"ok": True, "detail": f"{candidate['model']} 响应正常"}
     except Exception as e:
-        return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:180]}"}
+        return {"ok": False, "detail": _fail_reason(e)}
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")

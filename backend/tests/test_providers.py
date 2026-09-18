@@ -125,3 +125,70 @@ def test_every_provider_route_is_admin_gated():
     bare = [f"{sorted(r.methods - {'HEAD', 'OPTIONS'})} {r.path}" for r in routes
             if require_admin not in _guard_callables(r)]
     assert not bare, f"以下模型服务路由允许普通用户进入：{bare}"
+
+
+# ---------- 信任锚：本机有 HTTPS 中间人时不许整条链路降级 ----------
+
+def _app_source_files():
+    import app as app_pkg
+    root = Path(app_pkg.__file__).parent
+    return [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+
+
+def test_no_openai_client_is_built_without_an_explicit_http_client():
+    """每一处 OpenAI(...) 都必须自带 http_client。
+
+    本机卡巴斯基在拆 TLS：它签发的证书在 certifi 那份根证书包里，所以默认构造的
+    客户端一律 CERTIFICATE_VERIFY_FAILED。漏一处的后果还不一样——聊天会红着脸报错，
+    而 memory_manager 那处会静默降级成伪嵌入，语义检索再也读不到记忆，界面上毫无痕迹。
+    """
+    import re
+
+    offenders = []
+    for path in _app_source_files():
+        text = path.read_text(encoding="utf-8")
+        for call in re.finditer(r"OpenAI\(([^)]*)\)", text, re.S):
+            if "http_client" not in call.group(1):
+                offenders.append(path.name)
+    assert not offenders, f"以下文件里的 OpenAI 客户端没带 http_client：{sorted(set(offenders))}"
+
+
+def test_the_trust_anchor_still_verifies_certificates():
+    """换信任锚不等于关校验：证书必须照验、主机名必须对照。"""
+    import ssl
+
+    from app.core.tls import system_ssl_context
+
+    ctx = system_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+    assert ctx.verify_mode == ssl.CERT_REQUIRED, "不许把校验关掉"
+    assert ctx.check_hostname, "不许关掉主机名比对"
+
+
+def test_build_client_feeds_that_context_to_httpx(monkeypatch):
+    """build_client 必须真的把上下文交给 httpx，而不是攒着不用。
+
+    用抛哨兵异常的方式截获构造参数：假客户端要装到能让 openai SDK 跑完，就得连
+    timeout、base_url 一起仿，那测的就成了 SDK 的内部约定而不是我们的接线。
+    """
+    import pytest
+
+    from app.core import providers
+
+    seen = {}
+
+    class Recorder(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            raise Recorder()
+
+    monkeypatch.setattr(providers.httpx, "Client", FakeClient)
+    # 打在 providers 的名字上：它是 from ... import 进来的直接绑定，
+    # 改 tls 模块那份属性对 build_client 不起作用
+    monkeypatch.setattr(providers, "system_ssl_context", lambda: "SENTINEL")
+    with pytest.raises(Recorder):
+        providers.build_client({"api_key": "sk-x", "base_url": "https://api.deepseek.com"})
+    assert seen.get("verify") == "SENTINEL", f"httpx 没拿到系统信任锚：{seen}"

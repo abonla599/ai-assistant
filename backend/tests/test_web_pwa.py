@@ -1488,3 +1488,22 @@ def test_a_taken_username_still_lands_under_the_username_field():
     # 第二步不许把用户名那一格藏起来，否则这条信道没有落点
     renderer = _function_body(js, "renderRegister")
     assert "authUser" not in renderer, "renderRegister 动了用户名那一格：撞名的红字会没地方看"
+
+
+def test_a_brand_new_identity_is_not_blocked_on_choosing_a_model():
+    """刚注册/刚登录的人 providerId 是空的，但不该因此发不出消息。
+
+    2026-09-18 真机 UI 上撞实：新身份点发送，send() 因为 currentProvider() 返回
+    null 直接 return，界面只留一句红字「当前没有可用模型，请联系管理员配置模型服务」
+    ——而服务端好得很。模型清单是一次网络往返，在那之前它必然是空的。
+    判据两条：挑不到就用 pickUsableProvider() 兜底；清单还没回来就先拉一次再判。
+    """
+    js = _js("app.js")
+    pick = _function_body(js, "pickUsableProvider")
+    assert "usable" in pick and "default" in pick, "兜底那条没走「默认优先、且只挑可用」"
+    cur = _function_body(js, "currentProvider")
+    assert "pickUsableProvider" in cur, "currentProvider 还是「清单里没命中就返回 null」"
+    assert "pickUsableProvider" in _function_body(js, "loadModels"), \
+        "loadModels 另写了一套挑选规则：两处口径迟早分家"
+    assert "await loadModels()" in _function_body(js, "send"), \
+        "清单还没回来时该先去拉一次，而不是直接拒发"

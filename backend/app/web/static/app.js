@@ -581,7 +581,7 @@ async function loadModels() {
     ? `${usable.length} 个模型可用` : "服务端还没有可用的模型";
 
   if (!usable.some((p) => p.id === pref.provider)) {
-    const def = usable.find((p) => p.default) || usable[0];
+    const def = pickUsableProvider();
     if (def) pref.provider = def.id;
   }
   renderModelSelect();
@@ -610,8 +610,16 @@ function renderModelSelect() {
   sel.value = pref.provider;
 }
 
+function pickUsableProvider() {
+  const usable = state.providers.filter((p) => p.usable);
+  return usable.find((p) => p.default) || usable[0] || null;
+}
+
 function currentProvider() {
-  return state.providers.find((p) => p.id === pref.provider) || null;
+  const listed = state.providers.find((p) => p.id === pref.provider);
+  // 没选中、或选中的那个已经不可用（新身份的 providerId 是空的，管理员也可能刚把
+  // 某家的密钥填坏）：退回服务端会用的那个默认，而不是把人拦在发送键上。
+  return listed && listed.usable ? listed : pickUsableProvider();
 }
 
 async function loadProviders() {
@@ -1146,7 +1154,13 @@ async function send(text) {
   text = (text || "").trim();
   if ((!text && !state.pending.length) || state.streaming) return;
 
-  if (!currentProvider() || !currentProvider().usable) {
+  if (!state.providers.length) {
+    // 打开页面就按发送时模型清单还在路上：先拉一次。拉不到才承认"服务端没配"，
+    // 否则一句"当前没有可用模型"会把一次正常的网络竞态说成服务坏了。
+    try { await loadModels(); } catch (e) { /* 落到下面那句 */ }
+  }
+
+  if (!currentProvider()) {
     if (isAdmin()) {
       setStatus("当前没有可用模型，请在「设置 → 模型服务」中配置", true);
       openSettings("providers");

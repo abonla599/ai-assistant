@@ -1,7 +1,7 @@
 /* PWA service worker：缓存应用外壳，接口请求一律走网络。
  * /v1/* 与 /app 下的 API 绝不被缓存，否则手机会读到上一次的会话与记忆数据。
  */
-const CACHE = "ai-assistant-shell-v5";
+const CACHE = "ai-assistant-shell-v6";
 const SHELL = [
   "./",
   "index.html",
