@@ -200,6 +200,14 @@
               <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
           </div>
 
+          <!-- 退出 = 先让服务端作废这一枚令牌，再把这个人从本机清单里去掉。
+               只删本机不撤销是个假动作：那枚令牌在服务端还活着。 -->
+          <div class="set-card set-last">
+            <button class="set-row set-danger" id="rowLogout">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 4h5v16h-5"/><path d="M10 12H3M6 9l-3 3 3 3"/></svg></span>
+              <span class="set-lbl">退出登录</span></button>
+          </div>
+
         </div>
       </div>
 
@@ -242,9 +250,11 @@
           </div>
         </section>
 
-        <!-- 账户：这台机器上认识谁。清单本体在「切换账户」那份实现里补，
-             这一页今天先承担"添加一个账号"——注册只有两处入口：首屏那一层，和这里。 -->
+        <!-- 账户：这台机器上认识谁。清单由 app.js 的 renderAccounts 填进
+             #accountList（每行 = 一个名字 + 一个退出，点名字那行就切过去）。
+             注册只有两处入口：首屏那一层，和这里这颗按钮。 -->
         <section class="set-page hidden" data-page="accounts" id="paneAccounts">
+          <div class="set-card" id="accountList"></div>
           <p class="pane-note" id="whoInfo">未登录</p>
           <div class="row"><button class="btn" id="openRegister">添加账户</button></div>
           <p class="pane-note" id="registerHint"></p>

@@ -695,6 +695,98 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
 
 
 
+def test_the_identity_list_is_the_only_source_of_credentials():
+    """本机身份清单是凭据的唯一出处：老键与 pref 之外的读取一律不许存在。
+
+    `api.js` 原先绕过 pref 直接读 localStorage 的 accessToken。多身份之后那就是
+    第二个事实来源——清单切到 B 而请求头还是 A，正是本项目为跨用户泄露付过一次
+    账的那个形状（见 [[ai-assistant-memory-cross-user-leak]]）。
+    """
+    js, api = _js(), _js("api.js")
+    assert 'localStorage.getItem("accessToken")' not in api, \
+        "api.js 还在绕过 pref 读令牌：清单和它一旦漂移，界面是 B 而请求头是 A"
+    assert "pref.token" in api, "api.js 改从 pref 取凭据"
+    # 老键只能出现在迁移那一处
+    assert js.count('"accessToken"') <= 2, "accessToken 这个键名出现在两处以上：迁移没做完"
+    assert "function migrateLegacyIdentity()" in js, "没有一次性的老键迁移"
+    body = _function_body(js, "migrateLegacyIdentity")
+    for gone in ("accessToken", "userId", "sessionId"):
+        assert gone in body, f"迁移没处理老键 {gone}"
+
+
+def test_the_current_identity_always_resolves_to_someone():
+    """currentId 缺失或指向已经不在清单里的人时必须有兜底，且添加即设为当前。
+
+    没有兜底会出现「记着 5 个人但开 app 说没登录」，而那条路有两种实现。
+    """
+    js = _js()
+    cur = _function_body(js, "currentEntry")
+    assert "CURRENT_KEY" in cur and "addedAt" in cur, "兜底没取最新那一条"
+    assert "setCurrent" in _function_body(js, "addIdentity"), "注册/登录成功之后没把他设为当前身份"
+    assert "IDENTITY_CAP = 5" in js, "清单上限不是 5：超出后顶掉谁没有依据"
+
+
+def test_switching_clears_the_view_before_it_refills_it():
+    """切换必须按 换指针 → 清屏 → 重取 的顺序，且清屏要覆盖那 7 样。
+
+    顺序反了会出现"用 A 的视图去渲染 B 的数据"；漏一项就是屏幕上还挂着上一个人的
+    对话——用户据此判断「账号之间记忆共享」，哪怕服务端根本没共享。
+    """
+    js = _js()
+    sw = _function_body(js, "switchTo")
+    assert sw.index("setCurrent(") < sw.index("resetViewForIdentity()") < sw.index("await loadWho()"), \
+        "切换的顺序不对：必须换指针、清屏、再重取"
+    assert "controller.abort()" in sw, "切走时没掐断正在输出的回答"
+    # 注册/登录成功也是换人：从设置里添加第二个账户时，屏幕上正挂着第一个人的对话。
+    # 只靠 restore() 那句"没有指针就清空"兜是运气，这里要它显式清。
+    assert "resetViewForIdentity()" in _function_body(js, "afterAuth"), \
+        "afterAuth 换人不清屏"
+    body = _function_body(js, "resetViewForIdentity")
+    for gone in ("state.messages", "state.sessions", "state.pending", "state.memoryQuery",
+                 "memoryList", "personaInput", "$(\"input\")"):
+        assert gone in body, f"清屏漏了这一项：{gone}"
+    # 反向：清屏清的是**视图**，不许顺手擦掉每个人自己"刚才在哪条会话"的指针。
+    # 我第一版把它列进了上面那张名单，实测切回上一个人时 messages=0——对话还在服务端，
+    # 只是再也没人记得回去。指针归各自那条记录所有，换人时读的就是新那个人自己的。
+    assert "lastSessionId" not in body, "清屏擦了上一个人的会话指针：切回来会找不到刚才聊的"
+
+
+def test_restore_no_longer_relies_on_a_404_to_lose_the_previous_person():
+    """原先「切到人没有会话时清掉旧对话」是靠服务端回 404 挡的，那是运气不是设计。
+
+    restore() 第一句是 if (!pref.sessionId) return —— 指针为空时旧消息整段留在
+    屏幕上。清屏现在由 resetViewForIdentity 负责，这里钉它不再 return-而不作为。
+    """
+    body = _function_body(_js(), "restore")
+    guard = re.search(r"if \(!pref\.sessionId\)[\s\S]{0,80}?\}", body)
+    assert guard and "state.messages" in guard.group(0), \
+        "sessionId 为空时 restore 只是 return：上一个人的对话会留在屏上"
+
+
+def test_removing_an_identity_revokes_it_first():
+    """从清单里移除一个人 = 让服务端作废他那一枚，顺序不能反。
+
+    先删本机再撤销：撤销失败时本机条目已经找不回来，而那枚令牌在服务端还活着——
+    "看起来删掉了但其实还能用"，比没删更糟。
+    """
+    js = _js()
+    body = _function_body(js, "dropIdentity")
+    assert "logout" in body and "catch" in body, "移除没有先撤销，或撤销失败时没有任何交代"
+    assert body.index("logout") < body.index("saveIdentities"), "先删了本机条目才去撤销"
+
+
+def test_logout_wrapper_sends_the_token_it_is_revoking():
+    """撤销清单里另一个人时，请求头带的必须是**他那枚**令牌。
+
+    走 authHeaders() 的默认路径只能撤销当前身份；先把他切成当前再退出，等于为了
+    删除而把那个人的会话加载到共用设备的屏幕上。
+    """
+    api = _js("api.js")
+    body = re.search(r"async function logout[\s\S]*?\n  \}", api)
+    assert body and "Authorization" in body.group(0) and "token" in body.group(0), \
+        "logout 没有接受显式令牌"
+
+
 def test_the_settings_list_has_no_teaching_copy():
     """界面不教人怎么用：设置区不该再有写死的说明长文，也不该有假控件。
 
@@ -1214,9 +1306,9 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
     # 用 "12345678"，安全上是净损失。
     tail = _function_body(js, "afterAuth")
     assert '$("authPass").value = ""' in tail, "首屏那格的密码没人清"
-    # 收尾动作的先后是硬约束：先清输入框再写 pref.token 的话，中途抛异常就把
-    # 唯一一次拿到令牌的机会连同输入一起丢了。
-    assert tail.index("pref.token = res.token") < tail.index('$("authPass").value = ""'), \
+    # 收尾动作的先后是硬约束：先清输入框再落库的话，中途抛异常就把唯一一次拿到
+    # 令牌的机会连同输入一起丢了。（多身份之后落库走 addIdentity，不再是一个键。）
+    assert tail.index("addIdentity(res)") < tail.index('$("authPass").value = ""'), \
         "清空必须晚于令牌落库：早一步就是在丢凭据"
     # 确认密码与三条找回答案同样是凭据（答案走的是同一个慢哈希），落地之后一并清掉
     assert '$("authPass2").value = ""' in tail, "确认密码那一格还留着明文"

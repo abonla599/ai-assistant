@@ -3,12 +3,107 @@
 
 const $ = (id) => document.getElementById(id);
 
-/* ---------------- 本地偏好 ---------------- */
+/* ---------------- 本机身份清单 ----------------
+ * 一台机器上可能同时记着几个人的令牌（设置 → 切换账户）。清单是凭据的唯一出处：
+ * pref.token / pref.userId / pref.sessionId / pref.provider 都只是"当前那一条"的
+ * 派生读取，写只能走 addIdentity / setCurrent / dropIdentity 三个入口。
+ *
+ * 刻意不给老代码留一份 accessToken 镜像：那会出现"界面写着 B、请求头带着 A"，
+ * 而本项目已经为跨用户泄露付过一次账。跟机器走的偏好（theme/temperature/
+ * contextWindow）与按会话走的 persona 都保持原样——会话 id 全局唯一，键名自带归属。
+ */
+const IDENTITY_CAP = 5;
+const ID_KEY = "identities", CURRENT_KEY = "currentId";
+
+function readIdentities() {
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(ID_KEY) || "[]"); }
+  catch (e) { return []; }          // 手改坏的 JSON 不该把 app 锁死：当没记过人
+  return Array.isArray(raw) ? raw.filter((x) => x && x.userId && x.token) : [];
+}
+
+function saveIdentities(list) { localStorage.setItem(ID_KEY, JSON.stringify(list)); }
+
+/** 当前那一条。currentId 缺失、或指向一个已经不在清单里的人 → 取最新那条并写回。
+ *  没有这条兜底就会出现「记着 5 个人但开 app 说没登录」，而那个症状有两种实现。 */
+function currentEntry() {
+  const list = readIdentities();
+  if (!list.length) return null;
+  const want = localStorage.getItem(CURRENT_KEY);
+  let hit = list.find((x) => x.userId === want);
+  if (!hit) {
+    hit = list.slice().sort((a, b) => (b.addedAt || "").localeCompare(a.addedAt || ""))[0];
+    localStorage.setItem(CURRENT_KEY, hit.userId);
+  }
+  return hit;
+}
+
+function patchCurrent(fields) {
+  const hit = currentEntry();
+  if (!hit) return;
+  saveIdentities(readIdentities().map((x) =>
+    x.userId === hit.userId ? Object.assign(x, fields) : x));
+}
+
+function setCurrent(userId) { localStorage.setItem(CURRENT_KEY, userId); }
+
+function addIdentity(res) {
+  const list = readIdentities().filter((x) => x.userId !== res.user_id);
+  list.push({ userId: res.user_id, username: res.username || "", role: res.role || "user",
+              token: res.token, lastSessionId: "", providerId: "",
+              addedAt: new Date().toISOString() });
+  setCurrent(res.user_id);
+  while (list.length > IDENTITY_CAP) {
+    const oldest = list.slice().sort((a, b) =>
+      (a.addedAt || "").localeCompare(b.addedAt || ""))[0];
+    list.splice(list.indexOf(oldest), 1);
+    // 顶掉别人时的撤销是尽力而为：它不该挡住一次刚刚成功的登录。
+    // 用户主动"移除"走 dropIdentity，那条必须撤销成功才算删掉。
+    if (oldest.token) API.logout(oldest.token).catch(() => {});
+  }
+  saveIdentities(list);
+}
+
+/** 移除 = 先让服务端作废他那一枚，再删本机条目。
+ *  顺序反了会出现"看起来删掉了但那枚令牌还能用"，比没删更糟。 */
+async function dropIdentity(userId) {
+  const hit = readIdentities().find((x) => x.userId === userId);
+  if (!hit) return true;
+  try {
+    await API.logout(hit.token);
+  } catch (e) {
+    setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
+    return false;
+  }
+  saveIdentities(readIdentities().filter((x) => x.userId !== userId));
+  return true;
+}
+
+/** loadWho 成功之后把服务端说的"我是谁"写回当前那条：清单里的 username/role
+ *  只是显示用的，真身永远以 /v1/auth/me 为准。 */
+function touchIdentity(me) {
+  if (me) patchCurrent({ username: me.username, role: me.role });
+}
+
+/** 一次性的老键迁移：多身份之前这台机器只记着一个人。 */
+function migrateLegacyIdentity() {
+  const token = localStorage.getItem("accessToken");
+  if (!token || localStorage.getItem(ID_KEY)) return;
+  const entry = { userId: localStorage.getItem("userId") || "manual",
+                  username: "", role: "user", token,
+                  lastSessionId: localStorage.getItem("sessionId") || "",
+                  providerId: localStorage.getItem("provider") || "",
+                  addedAt: new Date().toISOString() };
+  saveIdentities([entry]);
+  setCurrent(entry.userId);
+  ["accessToken", "userId", "sessionId", "provider"].forEach((k) => localStorage.removeItem(k));
+}
+
 const pref = {
-  get provider() { return localStorage.getItem("provider") || ""; },
-  set provider(v) { localStorage.setItem("provider", v); },
-  get sessionId() { return localStorage.getItem("sessionId") || ""; },
-  set sessionId(v) { v ? localStorage.setItem("sessionId", v) : localStorage.removeItem("sessionId"); },
+  get provider() { return (currentEntry() || {}).providerId || ""; },
+  set provider(v) { patchCurrent({ providerId: v || "" }); },
+  get sessionId() { return (currentEntry() || {}).lastSessionId || ""; },
+  set sessionId(v) { patchCurrent({ lastSessionId: v || "" }); },
   get temperature() { return Number(localStorage.getItem("temperature") || 0.7); },
   set temperature(v) { localStorage.setItem("temperature", String(v)); },
   get contextWindow() { return Number(localStorage.getItem("contextWindow") || 10); },
@@ -19,14 +114,10 @@ const pref = {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   },
   set theme(v) { localStorage.setItem("theme", v); },
-  /* 身份两件套：令牌是 /v1/auth/register 签发的那一枚（或由管理员手工给出），
-   * userId 是服务端回的那个，不再是本机随机造的 web_xxxx——自造标识曾经既当
-   * "用户标识"显示在关于页里，又被人以为是后端认的身份。
-   */
-  get token() { return localStorage.getItem("accessToken") || ""; },
-  set token(v) { v ? localStorage.setItem("accessToken", v) : localStorage.removeItem("accessToken"); },
-  get userId() { return localStorage.getItem("userId") || ""; },
-  set userId(v) { v ? localStorage.setItem("userId", v) : localStorage.removeItem("userId"); },
+  /* 令牌与 userId 不再是两个独立的键，它们是清单里当前那一条的两个字段。 */
+  get token() { return (currentEntry() || {}).token || ""; },
+  set token(v) { patchCurrent({ token: v || "" }); },
+  get userId() { return (currentEntry() || {}).userId || ""; },
   persona(sessionId) { return localStorage.getItem("persona:" + sessionId) || ""; },
   setPersona(sessionId, text) {
     text ? localStorage.setItem("persona:" + sessionId, text) : localStorage.removeItem("persona:" + sessionId);
@@ -41,6 +132,7 @@ const state = {
   pending: [],            // 待发送附件 [{id,name,kind,size,url}]
   streaming: false,
   registering: false,     // 注册请求在途：与 streaming 同一个套路，挡双击
+  switching: false,       // 切换在途：双击清单会并发跑两套"清屏 + 重取"，后到的盖住先到的
   controller: null,
   filter: "",
   memoryQuery: "",
@@ -408,8 +500,8 @@ function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden")
  *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
  *  叫用户手动刷新一次页面才算登录成功。 */
 async function afterAuth(res) {
-  pref.token = res.token;
-  pref.userId = res.user_id;
+  addIdentity(res);                 // 落地凭据并把这个人设为当前身份
+  resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
   $("authPass2").value = "";
   // 找回答案走的是和密码同一个慢哈希，它往往是个能猜的地名——同样清出去
@@ -439,6 +531,7 @@ async function loadWho() {
   try {
     state.me = await API.me();
     setStatus("");      // 认出人了：上一轮"还没登录/连不上"那句已经过期
+    touchIdentity(state.me);
   } catch (e) {
     state.me = null;
     // 401/403 是"这台设备还没登录"这一种正常状态；其余（连不上、服务端没配凭据
@@ -1197,7 +1290,7 @@ function openSetPage(name) {
   if (name === "providers") loadProviders();
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
-  if (name === "accounts") syncConnPane();
+  if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
 
 /** 账户页的两处回显。令牌输入框在管理员的「模型服务」页里，所以这一页
@@ -1207,6 +1300,111 @@ function syncConnPane() {
   $("whoInfo").textContent = state.me
     ? `当前身份：${state.me.username}（${isAdmin() ? "管理员" : "普通用户"}）`
     : "未登录";
+}
+
+/** 账户页：这台机器上认识谁。当前那条打一个标记，其余每人一个「退出」。
+ *  退出走 dropIdentity(userId)——它带的是**那个人**的令牌，不需要先切过去。 */
+function renderAccounts() {
+  const box = $("accountList");
+  box.innerHTML = "";
+  const here = (currentEntry() || {}).userId;
+  readIdentities().slice()
+    .sort((a, b) => (b.addedAt || "").localeCompare(a.addedAt || ""))
+    .forEach((x) => {
+      const row = document.createElement("div");
+      row.className = "set-row" + (x.userId === here ? " set-current" : "");
+      const name = document.createElement("span");
+      name.className = "set-lbl";
+      name.textContent = x.username || x.userId;
+      const tag = document.createElement("span");
+      tag.className = "set-val";
+      tag.textContent = x.userId === here ? "当前" : (x.stale ? "需要重新登录" : "");
+      row.append(name, tag);
+      if (x.userId !== here) {
+        const out = document.createElement("button");
+        out.className = "set-mini";
+        out.textContent = "退出";
+        out.onclick = async () => {
+          out.disabled = true;
+          if (await dropIdentity(x.userId)) renderAccounts();
+          else out.disabled = false;
+        };
+        row.append(out);
+      }
+      if (x.userId !== here) {
+        row.onclick = () => switchTo(x.userId);
+        row.classList.add("set-click");
+      }
+      box.append(row);
+    });
+  $("accountsVal").textContent = readIdentities().length + " 个已登录";
+}
+
+/** 切换前必须一次清掉的本机视图。
+ *  漏一项就是"界面写着 B、屏幕上画着 A 的对话"——用户据此判断「账号之间记忆共享」，
+ *  哪怕服务端从来没共享过。所以这 7 项列在一处，而不是散在切换路径里各清各的。 */
+function resetViewForIdentity() {
+  state.messages = [];
+  state.sessions = [];
+  state.pending = [];
+  state.memoryQuery = "";
+  state.filter = "";
+  $("input").value = "";
+  $("memoryList").innerHTML = "";
+  $("personaInput").value = "";
+  $("memoryQuery").value = "";
+  // 刻意不动 lastSessionId：setCurrent 之后 pref.sessionId 读到的就是新那个人自己
+  // 记着的那条。把上一个人的指针一起擦掉，切回来就变成"我刚才聊的呢？"（实测）。
+  renderMessages();
+  renderSessions();
+}
+
+/** 换到清单里的另一个人：换指针 → 清屏 → 重取。
+ *  顺序反了会出现"用 A 的视图渲染 B 的数据"。正在流式输出的那条回答直接掐断，
+ *  不弹提示——它与今天刷新页面丢掉的是同半截，不新增语义。 */
+async function switchTo(userId) {
+  if (state.switching) return;
+  const hit = readIdentities().find((x) => x.userId === userId);
+  if (!hit) return;
+  state.switching = true;
+  document.querySelectorAll("#accountList .set-row").forEach((r) => { r.style.pointerEvents = "none"; });
+  try {
+    if (state.controller) state.controller.abort();
+    state.controller = null;
+    state.streaming = false;
+    setCurrent(userId);
+    resetViewForIdentity();
+    closeSettings();
+    showAuthPending();
+    await loadWho();
+    if (!state.me) {
+      // 他那枚令牌已经不被认了：标出来，让人自己决定重登还是留着。刻意不悄悄退回
+      // 原来那个人——那会让人以为自己是 B。
+      markIdentityStale(userId);
+      showAuth("login");
+      return;
+    }
+    await loadServerData();
+    hideAuth();
+    renderMessages();
+  } catch (e) {
+    if (!needsAuth(e)) setStatus("切换失败：" + e.message, true);
+    hideAuth();
+  } finally {
+    state.switching = false;
+  }
+}
+
+function markIdentityStale(userId) { patchCurrent({ stale: true }); }
+
+/** 退出这台机器：作废当前这一枚，并把这个人从清单里去掉。
+ *  只删本机不撤销就是个假动作——那枚令牌在服务端还活着。 */
+async function logoutCurrent() {
+  const hit = currentEntry();
+  if (!hit) { showAuth("login"); return; }
+  if (!await dropIdentity(hit.userId)) return;
+  if (readIdentities().length) { setCurrent(readIdentities()[0].userId); await switchTo(readIdentities()[0].userId); }
+  else { resetViewForIdentity(); showAuth("register"); }
 }
 
 function emptyItem(text) {
@@ -1275,6 +1473,10 @@ function syncSetIdentity() {
   $("setAvatar").textContent = name ? name[0] : "·";
   $("setMe").textContent = name || "未登录";
   $("setRole").textContent = name ? (isAdmin() ? "管理员" : "普通用户") : "";
+  $("accountsVal").textContent = readIdentities().length + " 个已登录";
+  // 注册那句进度文字属于首层那一层弹层：层收起来之后它没有理由继续挂着，否则切回
+  // 上一个人时，账户页底部还写着「已登录为 别人」。
+  $("registerHint").textContent = "";
 }
 
 /* 角色只显示在设置那一页里：原先顶栏那颗 chip 是同一件事的第二个入口，
@@ -1470,6 +1672,7 @@ function bind() {
   // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
   // 所以先把层打开，再翻到找回那张。
   $("rowPassword").onclick = () => { closeSettings(); showAuth(); showAuthView("recover"); };
+  $("rowLogout").onclick = logoutCurrent;
 
   $("addProviderBtn").onclick = () => {
     state.editingProvider = null;
@@ -1511,7 +1714,12 @@ function bind() {
   };
 
   $("saveTokenBtn").onclick = () => {
-    pref.token = $("tokenInput").value.trim();
+    const token = $("tokenInput").value.trim();
+    if (!token) { setStatus("令牌那一格还是空的", true); return; }
+    // 必须建一条清单条目：pref.token 只改"当前那一条"，一台谁都没记过的机器上
+    // 没有当前条目，直接写就是静默无效。user_id 这里只能先占一个——重启后
+    // loadWho 认出他是谁，touchIdentity 再把名字与角色补上。
+    addIdentity({ user_id: "manual", username: "", role: "user", token });
     location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
   };
   $("openRegister").onclick = () => { closeSettings(); showAuth("register"); };
@@ -1575,7 +1783,9 @@ function setupKeyboardAware() {
 
 /* ---------------- 启动 ---------------- */
 async function restore() {
-  if (!pref.sessionId) return;
+  // 没有指针不等于"没什么可做的"：那正是上一个人的对话该消失的时刻。
+  // 原先这里直接 return，靠"拿旧 id 去 GET 会撞 404"才把消息清掉——那是运气。
+  if (!pref.sessionId) { state.messages = []; return; }
   try {
     const full = await API.getSession(pref.sessionId);
     state.messages = (full.messages || []).map((m) => ({
@@ -1597,6 +1807,7 @@ async function loadServerData() {
 }
 
 async function boot() {
+  migrateLegacyIdentity();   // 必须排第一：pref 现在从清单读，没迁就等于把有令牌的人当陌生人
   applyTheme();
   bind();
   setupKeyboardAware();

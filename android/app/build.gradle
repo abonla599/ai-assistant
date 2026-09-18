@@ -10,12 +10,13 @@ android {
         applicationId "xyz.fenever.assistant"
         minSdk 23
         targetSdk 34
-        versionCode 10
-        versionName "0.10"
+        versionCode 11
+        versionName "0.11"
 
         // 壳里只钉地址，不写任何口令：公开仓库的 Actions 产物任何人都能下载，
         // 把 ACCESS_TOKEN 编进来等于把助手的付费调用额度公开送人。
-        // 口令仍由用户在「设置 → 连接」里填一次，存 WebView 的 localStorage。
+        // 口令仍由用户在本机填一次（设置 → 模型服务，管理员那一页），存 WebView 的
+        // localStorage；普通人走的是注册/登录，用不到它。
         buildConfigField "String", "APP_URL", "\"https://ai.fenever.xyz/app/\""
     }
 

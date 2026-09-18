@@ -8,9 +8,14 @@ const API = (() => {
    * 它的语义在邀请码注册之后变了：不再是"共用一把访问口令"，而是服务端签发给
    * 这个人的个人令牌（管理员可单独撤销）。手工填口令那条路仍然通——那是
    * 本机直跑服务的管理员入口。
+   *
+   * 一律走 pref.token，不再直接读 localStorage：本机可能同时记着好几个人的令牌
+   * （见 app.js 的身份清单），绕过清单去读那个键就是第二个事实来源——清单已经
+   * 切到 B 而请求头还带着 A，是跨用户泄露的形状。pref 由 app.js 定义，脚本顺序
+   * （api.js 先、app.js 后）保证这里被调用时它已经在了。
    */
   function authHeaders() {
-    const token = localStorage.getItem("accessToken");
+    const token = pref.token;
     return token ? { Authorization: "Bearer " + token } : {};
   }
 
@@ -30,6 +35,18 @@ const API = (() => {
     const err = new Error(detail);
     err.status = res.status;
     return err;
+  }
+
+  /* 撤销**指定那一枚**令牌（不是当前这枚）。从本机清单里移除一个人时必须带着
+     他那枚令牌来调——先把他切成当前身份再退出，等于为了删除而把他的会话加载到
+     共用设备的屏幕上。所以这里显式构造请求头，不走 authHeaders()。 */
+  async function logout(token) {
+    const res = await fetch("/v1/auth/logout", {
+      method: "POST",
+      headers: token ? { Authorization: "Bearer " + token } : {},
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
   }
 
   async function request(path, { method = "GET", body, signal } = {}) {
@@ -141,6 +158,7 @@ const API = (() => {
       request("/v1/auth/reset", { method: "POST",
         body: { username, answers, new_password } }),
     me: () => request("/v1/auth/me"),
+    logout: (token) => logout(token),
 
     models: () => request("/v1/models"),
     upload,
