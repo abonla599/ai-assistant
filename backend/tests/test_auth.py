@@ -601,6 +601,41 @@ def test_answers_can_be_rotated_at_reset(store):
     assert store.login("丁", "third-correct-horse")[0].username == "丁"
 
 
+def test_a_reset_survives_a_restart(tmp_path):
+    """**终审 F2**：改密成功到底有没有落盘，此前**没有任何锁**。
+
+    终审实测：把 `reset_password` 末尾那句 `self._flush()` 删掉，`test_auth.py` 与
+    `test_auth_endpoints.py` 共 110 条全绿。后果是实的——`AuthStore` 是内存表，进程一重启
+    就以 users.json 为准，于是那份旧 `pw_hash` 与旧 `tokens` 赢回来：新密码登不进、
+    已经作废的每台设备又全部复活，而界面已经告诉过用户"其他设备需要重新登录一次"。
+    那是这条自救路径上唯一一处"界面说了、磁盘没做"的形状。
+
+    判据按 `test_flush_survives_reload` 的同族写法：换一个新的 `AuthStore` 实例去读同一个
+    文件（另起进程的样子），四件事都得成立。第四件（轮换过的答案在重加载后仍生效）顺带
+    钉住"answer_hashes 的轮换没落盘"——那一半坏起来和口令那一半一模一样：人以为换了答案，
+    重启之后旧答案又开门了。
+    """
+    path = str(tmp_path / "users.json")
+    store = AuthStore(path=path)
+    principal, token = store.register(username="重启后的人", password=PW, security_answers=ANS)
+    rotated = ["沙北", "hehai2025", "李建国"]
+    store.reset_password(username="重启后的人", answers=ANS, new_password=PW2,
+                         new_answers=rotated)
+
+    reloaded = AuthStore(path=path)
+    with pytest.raises(AuthError):
+        reloaded.login("重启后的人", PW)
+    assert reloaded.login("重启后的人", PW2)[0].user_id == principal.user_id, \
+        "新口令没落盘：重启之后赢回来的还是旧那道门"
+    assert reloaded.resolve(token) is None, \
+        "令牌作废没落盘：重启之后每台旧设备又都登录着"
+    with pytest.raises(AuthError):
+        reloaded.reset_password(username="重启后的人", answers=ANS, new_password=PW)
+    reloaded.reset_password(username="重启后的人", answers=rotated, new_password=PW)
+    assert reloaded.login("重启后的人", PW)[0].user_id == principal.user_id, \
+        "答案轮换没落盘：重加载之后旧答案又换得动别人的密码"
+
+
 def test_partial_new_answers_are_rejected_without_touching_anything(store):
     principal, token = store.register(username="戊", password="correct-horse-battery", security_answers=ANS)
     with pytest.raises(AuthError):

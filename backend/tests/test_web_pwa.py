@@ -1,10 +1,12 @@
 """PWA 静态托管、前端契约与会话消息替换端点测试。"""
+import inspect
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 # 前端契约用例拿它当尺子：界面上该有几道题、题面逐字是什么，都由后端这一条说了算。
@@ -22,8 +24,9 @@ def test_app_serves_html_shell():
     res = client.get("/app/")
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
-    body = res.text
-    assert "AI 智能助手" in body
+    # 判语料的尺子在这里一样要过：这句话写进 HTML 注释里，浏览器一个字都不渲染，
+    # 而原始文本断言照样绿。
+    assert "AI 智能助手" in _strip_html_comments(res.text)
 
 
 def test_static_assets_reachable():
@@ -58,7 +61,7 @@ def test_frontend_uses_relative_api_paths_only():
     """前端不得出现绝对服务地址，否则换网络/换设备即失效。"""
     offenders = []
     for name in JS_FILES:
-        src = (STATIC / name).read_text(encoding="utf-8")
+        src = _js(name)
         for m in re.finditer(r"""['"]https?://[^'"]+['"]""", src):
             offenders.append(f"{name}: {m.group(0)}")
     assert not offenders, f"前端出现绝对 URL: {offenders}"
@@ -66,7 +69,7 @@ def test_frontend_uses_relative_api_paths_only():
 
 def test_model_output_is_sanitized_before_html_render():
     """模型回复按 Markdown 渲染成 HTML，必须过 DOMPurify，否则可注入脚本。"""
-    src = (STATIC / "markdown.js").read_text(encoding="utf-8")
+    src = _js("markdown.js")
     assert "DOMPurify" in src, "渲染链路缺少净化步骤"
     assert "sanitize" in src
 
@@ -77,8 +80,8 @@ def test_all_js_element_ids_exist_in_html():
     引用已删除的元素会让 bind() 抛 TypeError，并静默打断其后所有事件绑定
     （设置页、模型服务全部失灵），而页面看上去仍正常加载，极难排查。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = _js()
+    html = _html()
     defined = set(re.findall(r'id="([^"]+)"', html))
     referenced = set(re.findall(r'\$\("([^"]+)"\)', js))
     missing = sorted(referenced - defined)
@@ -86,8 +89,13 @@ def test_all_js_element_ids_exist_in_html():
 
 
 def test_service_worker_does_not_cache_api():
-    src = client.get("/app/sw.js").text
-    assert "/v1/" in src
+    """sw.js 里必须真有一句"这是接口，别碰缓存"的判断。
+
+    走 _js() 而不是 client.get("/app/sw.js").text：那把尺子的理由是通用的——sw.js 顶上
+    那段注释里本来就写着 `/v1/*`，原始文本判断在"整段代码被删掉、只留那句注释"时照样绿。
+    静态资源能不能经 HTTP 取到由 test_static_assets_reachable 钉，两件事不必混在一条里。
+    """
+    assert "/v1/" in _js("sw.js")
 
 
 def test_root_still_reports_api_status():
@@ -143,7 +151,7 @@ def test_memory_wrappers_take_no_identity_parameter():
     一半：前端别再把它发出去，更别留一个"被忽略的前导身份形参"——那既骗人，
     又让调用点看起来已经接完。
     """
-    src = (STATIC / "api.js").read_text(encoding="utf-8")
+    src = _js("api.js")
     for name, expected in MEMORY_WRAPPERS.items():
         declared = _wrapper_params(src, name)
         assert declared == expected, f"{name} 的形参表必须是 {expected}，实际 {declared}"
@@ -152,8 +160,8 @@ def test_memory_wrappers_take_no_identity_parameter():
 
 def test_app_js_passes_no_identity_into_memory_calls():
     """app.js 不再把本机随机标识当身份传给任何记忆调用。"""
-    api_src = (STATIC / "api.js").read_text(encoding="utf-8")
-    app_src = (STATIC / "app.js").read_text(encoding="utf-8")
+    api_src = _js("api.js")
+    app_src = _js()
 
     total = 0
     for name in MEMORY_WRAPPERS:
@@ -279,7 +287,7 @@ def _handler_of(js: str, el: str, event: str = "onclick") -> str:
 
 
 def _strip_js_comments(src: str) -> str:
-    """把 JS 注释挖掉、换行留在原处：判语料之前先过这道。
+    r"""把 JS 注释挖掉、换行留在原处：判语料之前先过这道。
 
     两类事故都真出现过："某词在不在函数体里"这种断言，一句解释性的注释就能把它喂绿
     （留着 `// setAuthMode(mode);` 而把真调用删掉，38 条全绿）；反过来一条**出现次数**
@@ -287,6 +295,14 @@ def _strip_js_comments(src: str) -> str:
     字符串里的 `//` 不是注释，所以按字符扫并带一个引号状态机（漏了这一步，一句
     `"https://…"` 就会把其后整行吃掉）。它的判据见
     test_the_comment_ruler_needs_its_own_test。
+
+    状态机走到行尾必须把单/双引号关掉（反引号除外：模板字符串真能跨行）。不加这一步
+    它在这份文件上从来就没工作过：app.js 里 `safeFilename()` 那句
+    `.replace(/[\\/:*?"<>|\r\n]+/g, " ")` 的正则字面量带一个裸 `"`，引号状态一开着就
+    一路跨行带到文件尾，其后 1400 多行全被当成"还在字符串里"原样抄走。实测旧写法剥完
+    还剩 49 行整行注释与 53 行块注释续行，改完之后是 0 行，而真代码一处不少（1595 行、
+    `API.` 29 处、`$(` 246 处）——一把看起来在干活、实际上只剥了前 103 行的尺子，比没有
+    尺子更糟，因为写锁的人以为自己有牙。判据（含"不许退化成恒真"那一半）在同一条测试里。
     """
     out = []
     quote = ""
@@ -302,6 +318,8 @@ def _strip_js_comments(src: str) -> str:
                 continue
             if ch == quote:
                 quote = ""
+            elif ch == "\n" and quote != "`":
+                quote = ""      # 这一行没有闭合的引号不是字符串，是状态机被骗了
             i += 1
             continue
         if ch in "\"'`":
@@ -322,6 +340,52 @@ def _strip_js_comments(src: str) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+def _strip_html_comments(src: str) -> str:
+    r"""把 HTML 注释挖掉、换行留在原处：读 index.html 判事之前先过这道。
+
+    与 _strip_js_comments 同一个理由，只是换个语法：`<!-- 三道全对才改得动… -->` 在浏览
+    器里一个字都不渲染，在原始文本里却和真文案一模一样。终审实测把 index.html 那句安全
+    说明删掉、原地改写成 HTML 注释，判"在不在文本里"的锁照绿——而它锁的是"别把秘密说成
+    公开"（人会照着"反正大家一样"敷衍作答）。
+
+    换行必须留着：好几把锁按行/按位置判（`html.find(...) < row.start()`），吃掉换行就等于
+    把它们挪到别的地方去红。没闭合的 `<!--` 也当注释处理到文件尾——浏览器就是这么读的，
+    而"删掉结尾那两个字符"正是一条让整段真文案消失、又能骗过原始文本断言的改法。
+    判据见 test_the_html_comment_ruler_needs_its_own_test。
+    """
+    out = re.sub(r"<!--[\s\S]*?-->", lambda m: "\n" * m.group(0).count("\n"), src)
+    head, opened, tail = out.partition("<!--")       # 剩下这个一定没闭合
+    return head + "\n" * tail.count("\n") if opened else out
+
+
+def _js(*names: str) -> str:
+    """读前端 JS 当判据语料的**唯一**入口：一律先过剥注释那把尺子。
+
+    默认 app.js。写锁的人不该每次自己想起来要剥——上一轮就是"这一处记得剥、那一处忘了"，
+    而忘记的那处绿得和剥过的一样。收成一个入口之后，"绕过尺子读原始文本"这件事在本文件里
+    只剩 read_text 那一行，由 test_every_corpus_read_goes_through_a_ruler 钉住。
+    """
+    files = names or ("app.js",)
+    return _strip_js_comments("".join((STATIC / f).read_text(encoding="utf-8")
+                                      for f in files))
+
+
+def _html() -> str:
+    """读 index.html 当判据语料的唯一入口：先剥 HTML 注释。"""
+    return _strip_html_comments((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
+def _css() -> str:
+    """读 style.css 的唯一入口：**刻意不剥注释**，与上面两个相反。
+
+    用它的那条锁判的是"删掉的样式不许在表里留尸"（.auth-grid 这类），而一句
+    `/* .auth-grid { … } */` 就是尸体本身：注释掉一条规则不会让它停止占位，只会让下
+    一次改版的人读不出哪套还在用。这里剥了注释等于给那种改法放水，所以留着原始文本。
+    它是 test_every_corpus_read_goes_through_a_ruler 里那条例外的全部理由。
+    """
+    return (STATIC / "style.css").read_text(encoding="utf-8")
 
 
 # 没有闭合标签的元素：不能当祖先压进栈里，否则后面的 </div> 会错位
@@ -366,9 +430,11 @@ def _open_tags_to(html: str, container: str, el_id: str) -> list:
 def test_the_comment_ruler_needs_its_own_test():
     r"""剥注释这把尺子自己得有判据：它一坏，上面那些锁就退回"能不能被注释喂绿"。
 
-    钉四件事：行注释里的字样消失、真语句一条不少地留下、**跨行**块注释里的字样不算调用
+    钉六件事：行注释里的字样消失、真语句一条不少地留下、**跨行**块注释里的字样不算调用
     （`\n\s*setAuthMode(...)` 那种形状锁最怕的就是它——注释的第二行看起来就是一行代码）、
-    字符串里的 `//` 不被当成注释起点（否则那一行剩下的部分凭空消失，锁会绿在"没找到"上）。
+    字符串里的 `//` 不被当成注释起点（否则那一行剩下的部分凭空消失，锁会绿在"没找到"上）、
+    一个跨行都不配对的引号不许把其后整份文件判成字符串，以及在**真语料**上它今天确实剥掉了
+    注释（前四条全过、真文件上却一个字没剥，是这把尺子上一轮的实际状态）。
     """
     src = ('function f() {\n'
            '  // 上一版的 setAuthMode(x) 就在这里\n'
@@ -383,6 +449,97 @@ def test_the_comment_ruler_needs_its_own_test():
     assert '"https://example.com/v1"' in stripped, "字符串里的 // 被当成了注释起点"
     assert stripped.count("\n") == src.count("\n"), "换行被吃掉：行号错位会让按行的形状锁失真"
 
+    # 第五件：正则字面量里那个裸双引号把状态机骗开之后，"引号没闭合"必须有尽头。
+    # 这一小段就是 app.js 的 safeFilename() 那一行的形状。
+    tricky = ('const bad = /[:*?"<>|]+/g;\n'
+              '// authFail(""); 这一整行是注释，不许留在语料里\n'
+              'setUserError("");\n')
+    got = _strip_js_comments(tricky)
+    assert "authFail" not in got, (
+        f"未闭合的引号让尺子把其后所有内容当成字符串抄走了：{got!r}")
+    assert 'setUserError("");' in got, "修引号状态时把真语句也一起剥了"
+    assert got.count("\n") == tricky.count("\n")
+
+    # 第六件：在真语料上量一次。上面五条都对、这份文件上却一行没剥，是上一轮的实际状态。
+    raw = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert any(l.lstrip().startswith("//") for l in raw.splitlines()), \
+        "app.js 里已经没有整行注释了：这条判据退化成恒真，得换一种量法"
+    assert any(l.lstrip().startswith("*") for l in raw.splitlines()), \
+        "app.js 里已经没有多行块注释了：同上"
+    left = _strip_js_comments(raw)
+    lines = left.splitlines()
+    assert not [l for l in lines if l.lstrip().startswith("//")], "真文件里的整行注释没被剥掉"
+    assert not [l for l in lines if l.lstrip().startswith("*")], "真文件里的块注释续行没被剥掉"
+    # 反向：剥注释不许顺手吃掉真代码，否则所有锁都会红在"没找到"上
+    assert len(lines) == len(raw.splitlines()), "换行被吃掉：行号错位"
+    for needle in ('API.', '$('):
+        assert left.count(needle) == raw.count(needle), (
+            f"剥注释前后 {needle} 的数量变了（{raw.count(needle)} → {left.count(needle)}）："
+            "要么尺子吃掉了真调用（那是把尺子修没了），要么某句注释里写下了这个字样——"
+            "后者同样得改，因为那正是能把 in 判断喂绿的东西")
+
+
+def test_the_html_comment_ruler_needs_its_own_test():
+    """**新尺子的判据**：`<!-- -->` 在浏览器里什么都不渲染，在原始文本里却和真文案同形。
+
+    终审实测：把 index.html 那句"三道全对才改得动…"删掉、原地改写成 HTML 注释，判
+    `"…那三句" in html` 与那条 `re.search` 全绿——于是这把尺子必须自己先有牙。钉四件事：
+    注释里的字样消失、真文案一个字不少、换行留在原处（多把锁按位置判）、没闭合的 `<!--`
+    按浏览器的读法一路当注释到文件尾（"删掉结尾那两个字符"是同一类改法）。
+    """
+    src = ('<p class="auth-sub">回答这三道题，再设一个新密码。</p>\n'
+           '<!-- 上一版这里写着"三道全对才改得动"\n'
+           '     第二行看起来还是一句正文 -->\n'
+           '  <input id="rcAns1" placeholder="你的答案">\n'
+           '<!-- 没闭合的注释从这里开始，其后整段都不该再被当成正文\n'
+           '     <input id="ghost" placeholder="这一格其实不存在">\n')
+    stripped = _strip_html_comments(src)
+    assert "三道全对才改得动" not in stripped, f"注释里的字样还在：{stripped!r}"
+    assert "这一句正文" not in stripped, "跨行注释的第二行被当成了正文"
+    assert "回答这三道题，再设一个新密码。" in stripped, "真文案被一起吃掉了"
+    assert 'id="rcAns1"' in stripped and 'id="ghost"' not in stripped, \
+        f"没闭合的 <!-- 没当注释处理：{stripped!r}"
+    assert stripped.count("\n") == src.count("\n"), "换行被吃掉：按位置判的锁会挪到别处去红"
+
+    # 同样要在真语料上量一次，并先确认它不是恒真
+    raw = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "<!--" in raw, "index.html 里已经没有注释了：这条判据退化成恒真，换个量法"
+    assert "<!--" not in _strip_html_comments(raw), "真文件里还留着注释的开头"
+
+
+def test_every_corpus_read_goes_through_a_ruler():
+    """入口收口的收口：**除三处指定读者之外**，本文件里不许有人直接读原始语料。
+
+    上一轮的问题是"这一处记得剥、那一处忘了"，而忘了那处绿得和剥过的一样——所以这次不是
+    再加一处 `_strip_js_comments(...)`，而是把读文件收成 `_js()` / `_html()` / `_css()`
+    三个入口，再用这条锁钉住"只有这三个入口在读文件"。指定读者之外多一处 read_text 就红，
+    红话说的是"新加的那条锁绕过了尺子"，而不是某个不相干的断言失败。
+
+    两条尺子自己的判据是**故意**读原始文本的：不拿 raw 与剥完的作对照，就没法证明尺子真剥掉
+    了东西（app.js 那把旧的就是这么坏掉的）。反向锁的固有性质是"没人违反时它就是绿的"，
+    所以它的牙由变异验证给：临时加一处 raw 读取，它必须当场红。
+    """
+    designated = {"_js", "_html", "_css",
+                  # 这两条拿原始文本与剥完的作对照，它们本身就是尺子的判据
+                  "test_the_comment_ruler_needs_its_own_test",
+                  "test_the_html_comment_ruler_needs_its_own_test"}
+    bypassers = []
+    for name, fn in sorted(globals().items()):
+        # 只看本文件自己定义的函数：globals() 里还躺着 app（FastAPI 实例，可调用）、
+        # client 这些外来的东西，getsource 对它们抛的是 TypeError，而这条锁管的是
+        # "本文件里谁在读语料"，与外来对象无关。
+        if name in designated or not inspect.isfunction(fn) or fn.__module__ != __name__:
+            continue
+        try:
+            body = inspect.getsource(fn)
+        except OSError as e:      # 打进 EXE 时没有 .py 源文件：明说没跑成，别判红
+            pytest.skip(f"读不到 {name} 的源码，收口锁无从谈起：{e}")
+        if re.search(r"read_text\(", body):   # 正则里那个反斜杠不是装饰：写成字面量
+            bypassers.append(name)            # 会让这条判断咬到自己源码里的同一个词
+    assert not bypassers, (
+        f"这些函数绕开 _js()/_html()/_css() 直接读了语料原始文本：{bypassers}——"
+        "原始文本能被注释喂绿，那正是终审点名的两处假绿的成因")
+
 
 def test_registration_ui_elements_wired():
     """注册界面缺元素会让 app.js 的绑定静默失败，整块输入区失灵。
@@ -395,8 +552,8 @@ def test_registration_ui_elements_wired():
     被删掉的东西也必须真的没了：说明卡（authSide/authHost）、旧的 tab 入口、
     以及"自设一个问题"那一格的形状（authQuestion/authAnswer/rcQuestion/rcAnswer）。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = _js()
+    html = _html()
     defined = set(re.findall(r'id="([^"]+)"', html))
     for el in ("openRegister",
                "authModal", "authUser", "authPass", "authGo", "authHint", "authEye",
@@ -426,8 +583,8 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
     3. 头像取用户名首字母，未登录时不能留空格子。
     4. 「◐ 主题」从这一行搬走了，它得还在设置弹层里，别搬丢了。
     """
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = _html()
+    js = _js()
     row = re.search(r'<button class="who-row" id="whoRow"[\s\S]*?</button>', html)
     assert row, "侧栏底部没有 #whoRow 这一行"
     assert "<svg" in row.group(0), "齿轮没有自己的图标"
@@ -448,7 +605,7 @@ def test_auth_layer_is_one_column_with_no_dead_rules():
     留着的那几条不是样式，是"下一次改版不知道哪套还在用"的起点。就地错误
     （.field-err）是这次新加的信道，所以它得真有一条规则，不能靠默认颜色。
     """
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    css = _css()
     assert re.search(r"\.auth-inner \{[^}]*max-width: 420px", css), "登录层不是单列居中"
     assert ".field-err" in css and "--danger" in css, "就地红字没有自己的规则"
     for dead in (".auth-grid", ".auth-side", ".auth-host", ".auth-tabs", ".auth-tab",
@@ -467,7 +624,7 @@ def test_the_password_eye_reveals_only_that_field():
     翻错框等于把设置页的密码也亮出来；只翻 type 不改 value 才不会把已输入的
     密码清空——用户点一下眼睛是为了核对，不是为了重敲。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "toggleAuthPass")
     assert '$("authPass")' in body, f"眼睛动的是别的框：{body}"
     assert '"regPass"' not in body
@@ -495,7 +652,7 @@ def test_the_first_step_of_both_flows_asks_nothing_of_the_server():
     （字面仍是 `{ regNext(); return; }`）时 37 条全绿，可 `$("authGo").disabled = true`
     已经执行完了才 return——按钮从此点不动，第一步再也进不了第二步，比原来那条更狠。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     for name, required in (("regNext", ("authUser", "authPass", "authPass2")),
                            ("rcNext", ("rcUser",))):
         body = _function_body(js, name)
@@ -562,11 +719,17 @@ def test_the_recovery_questions_are_the_same_three_sentences_on_both_sides():
     顺手钉第二件事（M3）：**题面**固定不等于**答案**固定。找回第二步那句说明一旦把
     答案也写成"全站固定的那三道"，就是在安全流程里把秘密描述成公开的——人会照着
     "反正大家一样"敷衍作答（"随便填一个"），而一个敷衍的答案等于没有找回通道。
+
+    这第二件事终审实测过它的假绿：判据对的是 index.html 的**原始文本**，于是把那一句
+    安全说明删掉、原地改写成 `<!-- … -->`，39 条全绿（注释里那句还一字不差地留着）。
+    浏览器一个字都不渲染它，人也就读不到"答案是注册第二步留的那三句"这句劝告。
+    HTML 语料现在一律走 _html()（先过 _strip_html_comments），那把新尺子自己的判据见
+    test_the_html_comment_ruler_needs_its_own_test。
     """
     from app.core.auth import ANSWER_COUNT
 
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = _js()
+    html = _html()
     m = re.search(r"\bRECOVERY_QUESTIONS\s*=\s*\[([^\]]*)\]", js)
     assert m, "app.js 里读不到 RECOVERY_QUESTIONS 的数组字面量：题面大概被抄成了两份"
     front = re.findall(r'"([^"]+)"', m.group(1))
@@ -605,8 +768,8 @@ def test_the_answer_boxes_follow_the_backends_question_count():
     绕过 test_all_js_element_ids_exist_in_html 那把锁，引用到不存在的 id 时
     `$()` 返回 null，而 null.textContent 抛错发生在渲染函数里——整个首屏静默失灵。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = _js()
+    html = _html()
     defined = set(re.findall(r'id="([^"]+)"', html))
     for i in range(1, len(RECOVERY_QUESTIONS) + 1):
         for prefix in ("regAns", "rcAns", "regQ", "rcQ"):
@@ -648,8 +811,8 @@ def test_the_deleted_recovery_endpoint_is_gone_from_the_frontend_too():
     过时的绿——留着等于给一个不存在的路由背书。现在断的是反方向：封装、调用点、
     路径字面量全都不能出现。
     """
-    js = "".join((STATIC / f).read_text(encoding="utf-8") for f in JS_FILES)
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = _js(*JS_FILES)
+    html = _html()
     for gone in ("API.recovery", "/v1/auth/recovery", "recovery:"):
         assert gone not in js and gone not in html, f"{gone} 还在前端：那个端点已经删了"
 
@@ -666,7 +829,7 @@ def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
     4. 那句提示必须说出"其他设备需要重新登录一次"。这是令牌全清的**设计后果**，
        藏起来只会让人以为别的设备坏了。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "submitRecovery")
     assert "API.recovery" not in body, "找回第一步不该再问服务器要问题：那个端点已删"
     assert "API.resetPassword" in body
@@ -690,7 +853,7 @@ def test_the_recovery_flow_collects_everything_before_it_asks_the_server():
 
 
 def test_memory_calls_no_longer_send_user_id():
-    api = (STATIC / "api.js").read_text(encoding="utf-8")
+    api = _js("api.js")
     assert "user_id" not in api, "记忆接口已不接受客户端身份"
 
 
@@ -714,8 +877,8 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
     """
     from app.core.auth_router import RegisterRequest, ResetRequest
 
-    api = (STATIC / "api.js").read_text(encoding="utf-8")
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    api = _js("api.js")
+    js = _js()
 
     assert set(RegisterRequest.model_fields) == {"username", "password", "security_answers"}
     assert set(ResetRequest.model_fields) == {"username", "answers", "new_password",
@@ -759,8 +922,8 @@ def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
     以后新加管理员专属控件只要带上这条属性就自动纳入，不必再改 app.js，也
     不会"改了三处漏一处"。
     """
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = _html()
+    js = _js()
     marked = _ids_with_attr(html, "data-admin-only")
     assert {"navProviders", "tabProviders"} <= marked, f"模型服务的入口没标出来：{sorted(marked)}"
     assert 'querySelectorAll("[data-admin-only]")' in js, "app.js 没有统一按属性收口"
@@ -778,7 +941,7 @@ def test_admin_only_surfaces_start_hidden_in_the_html_itself():
     之后，特权入口只在**确认**是管理员时才出现，方向也从"漏出来再收"变成"收起
     再放"。这条断言只看 HTML，因此与 app.js 什么时候跑无关。
     """
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    html = _html()
     naked = []
     # 只扫真正的起始标签：注释里也会提到 data-admin-only 这个词，`<[^>]+>` 会把它
     # 当成一个元素读进来（`<!` 不匹配 `[a-zA-Z]`，正好被排除）
@@ -798,7 +961,7 @@ def test_boot_learns_the_role_before_loading_server_data():
     loadModels() 在没有可用模型时会直接把用户推进「设置 → 模型服务」，那条
     分支按角色分流；me 晚一步回来，普通用户就仍然被领进一个必然 403 的页签。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     boot = _function_body(js, "boot")
     assert "loadWho" in boot and "loadServerData" in boot
     assert boot.index("loadWho") < boot.index("loadServerData"), \
@@ -815,13 +978,13 @@ def test_memory_search_stays_inside_the_backends_own_cap():
     from app.memory.memory_router import SearchMemoryRequest
 
     cap = SearchMemoryRequest.model_json_schema()["properties"]["top_k"]["maximum"]
-    api = (STATIC / "api.js").read_text(encoding="utf-8")
+    api = _js("api.js")
     m = re.search(r"MEMORY_TOP_K_MAX\s*=\s*(\d+)", api)
     assert m, "api.js 未声明 MEMORY_TOP_K_MAX：上限散落在各调用点，迟早和后端对不上"
     assert int(m.group(1)) == cap, f"前端上限 {m.group(1)} ≠ 后端 le={cap}"
     assert re.search(r"Math\.min\s*\([^)]*MEMORY_TOP_K_MAX", api), "没有夹紧，超限照发"
 
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     calls = re.findall(r"API\.searchMemory\(([^)]*)\)", js)
     assert calls, "app.js 里的搜索调用点不见了"
     for args in calls:
@@ -835,7 +998,7 @@ def test_memory_stats_is_queried_only_for_admins():
     发出去的后果不是报错本身，而是那句"记忆服务不可用"——服务明明好着，只是
     他没权限，用户于是去重启后端，而重启完全治不了这件事。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "loadAbout")
     assert "memoryStats" in body, "关于页已经不读记忆统计了？那这条契约该删还是该改，得有人说清"
     assert "isAdmin()" in body and body.index("isAdmin()") < body.index("memoryStats"), \
@@ -848,7 +1011,7 @@ def test_a_stale_token_does_not_read_like_a_first_run():
     本机压根没存过令牌 = 首启，该引导他注册；存过却被拒 = 管理员撤销或轮换过，
     再说"请填写口令"就是让人反复重试同一个废令牌。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "needsAuth")
     assert "需要访问口令" not in js, "旧的合并文案还在，两种 401 仍是一句话"
     assert re.search(r"err\.status\s*[!=]==\s*401", body), "needsAuth 只该管 401：403 是身份够了、角色不够"
@@ -868,7 +1031,7 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
 
     入口现在有两处（首屏弹层与设置页），所以两处各验一遍：多一条路就多一处能双击。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     assert re.search(r"streaming: false,\s*\n\s*registering: false", js), \
         "state 里没有了 registering：在途闸门大概退回了只靠 disabled 一处"
 
@@ -916,7 +1079,7 @@ def test_leaving_a_flow_wipes_every_credential_from_the_boxes():
     ——那里钉的是"清空必须晚于令牌落库"。把它并进 setAuthMode 收口会牵动那条锁，不在本
     轮清单里。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     fields = (["authPass", "authPass2"]
               + [f"regAns{i}" for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
               + [f"rcAns{i}" for i in range(1, len(RECOVERY_QUESTIONS) + 1)]
@@ -979,7 +1142,7 @@ def test_a_background_401_while_the_layer_is_up_keeps_what_you_typed():
       「保留那一行、后面补一句 `else showAuth(authMode);`」是 38 条全绿的（评审实测），
       而回归恰恰就藏在 else 那一支里。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     # 判语料之前剥注释：这一层的注释提到 showAuth( 完全正常（函数上面那段就写着「showAuth
     # 那一路经过 setAuthMode」），钉出现次数会被它误判红；反过来它也能喂绿那条 in 判断。
     code = _strip_js_comments(_function_body(js, "needsAuth"))
@@ -1010,8 +1173,14 @@ def test_going_back_a_step_leaves_no_orphan_message():
     2. 改密成功那句是**好消息**，写在 #authHint 上，而 `.auth-hint.err` 是红色的
        （style.css）。上一次登录失败留下的 err 态不清掉，这句话就显示成错误色。
        顺序因此是硬约束：showAuth→setAuthMode 先复位提示与 err 态，成功文案后写。
+
+    终审实测过这条的假绿：判据拿的是 regBack 那一段的**原始文本**，于是把
+    `authFail(""); setUserError("");` 两处真调用删掉、原地留一句含同样字样的行注释，
+    39 条全绿——而后果正是这条锁写下的那句"第二步的红字会跟到第一步"。语料现在一律走
+    _js()（先剥注释），注释不再算一次调用；尺子自己的判据见
+    test_the_comment_ruler_needs_its_own_test。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     back = re.search(r'\$\("regBack"\)\.onclick = \(\) => \{([\s\S]*?)\};', js)
     assert back, "「上一步」的接线找不到了"
     assert 'authFail("");' in back.group(1) and 'setUserError("");' in back.group(1), \
@@ -1034,7 +1203,7 @@ def test_the_second_step_is_the_only_one_that_registers():
     后端 `security_answers` 是必填且条数必须正好等于题数（少一条存储层就抛），
     所以前端少读一格 = 每次注册都稳定失败，而界面只会说"注册失败：<指着题数那句>"。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "submitAuth")
     assert "registerAnswers()" in body and body.index("registerAnswers()") \
         < body.index("API.register"), "三条答案没在发请求之前收齐"
@@ -1053,7 +1222,7 @@ def test_a_taken_username_still_lands_under_the_username_field():
     把它混进表单末尾的通用提示，两句话同屏时人会先去改密码；而注册入口现在分了两步，
     第二步的屏幕上只剩答案格，红字再挂到末尾就等于让人摸黑回头找那一格。
     """
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = _js()
     body = _function_body(js, "submitAuth")
     assert re.search(r"if \(e\.status === 409\) \{[\s\S]{0,200}setUserError\(e\.message\)", body), \
         "撞名不再走 setUserError：那句话会被混进表单末尾的通用提示"
