@@ -437,6 +437,7 @@ function isAdmin() {
 async function loadWho() {
   try {
     state.me = await API.me();
+    setStatus("");      // 认出人了：上一轮"还没登录/连不上"那句已经过期
   } catch (e) {
     state.me = null;
     // 401/403 是"这台设备还没登录"这一种正常状态；其余（连不上、服务端没配凭据
@@ -477,6 +478,8 @@ async function loadModels() {
     } else {
       setStatus("服务端还没有可用的模型，请联系管理员配置模型服务", true);
     }
+  } else {
+    setStatus("");      // 有模型可用了：那句"没有服务"到此为止
   }
   /* "几个模型可用"这句现在有了正经落点：就写在选模型那一格下面，不再是侧栏
      底部那颗没人知道是什么意思的小圆点。 */

@@ -629,6 +629,27 @@ def test_a_backend_that_is_down_does_not_pretend_you_are_logged_out():
     assert "needsAuth(e)" in body, "401 仍然交给 needsAuth 弹层，没被这条分支吞掉"
 
 
+def test_success_erases_the_stale_red_line():
+    """状态条全仓 20 多处只在出事时写字，没有任何成功路径负责擦——于是注册成功、
+    令牌落地、模型也拿到了，屏幕上仍然挂着三分钟前那句红的「还没有登录…」。
+    实测（本机隔离实例）：boot 无令牌 → 红；afterAuth 成功 → 那句红一字未动。
+
+    修法刻意收成两个必经点，而不是在每个成功处补一句 setStatus("")：
+    后者会变成"谁想起来谁擦"，漏一处就是同一个 bug。冷启动、注册、登录、
+    以后切换账户全都必须过 loadWho 与 loadModels，所以擦这两处就够。
+    """
+    js = _js()
+    who = _function_body(js, "loadWho")
+    assert re.search(r'state\.me = await API\.me\(\);\s*setStatus\(""\);', who), \
+        "认出人之后没人擦那句红的"
+    models = _function_body(js, "loadModels")
+    assert re.search(r'\}\s*else\s*\{\s*setStatus\(""\);', models), \
+        "拿到可用模型之后没人擦那句红的"
+    # 反向：真没模型时那句实话必须还在，两分支按角色分开措辞也是
+    assert "请联系管理员配置模型服务" in models and "设置 → 模型服务" in models, \
+        "把实话一起擦掉了：零模型时用户该看见一句真话"
+
+
 def test_the_pending_cover_exists_and_hides_the_form():
     """中性层要有自己的 DOM 与样式，且它盖住的是表单不是整层（品牌行得留着）。"""
     html = _html()
