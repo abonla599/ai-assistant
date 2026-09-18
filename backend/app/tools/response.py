@@ -11,6 +11,3 @@ class ToolResponse:
         if self.success:
             return f"✓ {self.data}"
         return f"✗ 错误: {self.error}。建议: {self.hint}"
-
-    def to_dict(self):
-        return {"success": self.success, "data": self.data, "error": self.error, "hint": self.hint}

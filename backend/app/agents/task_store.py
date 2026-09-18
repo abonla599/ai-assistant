@@ -48,11 +48,6 @@ def get_task(task_id: str) -> Optional[Task]:
     return task_store.get(task_id)
 
 
-def save_task(task: Task) -> None:
-    """保存或更新任务"""
-    task_store[task.task_id] = task
-
-
 def delete_task(task_id: str) -> bool:
     """删除任务"""
     if task_id in task_store:
@@ -60,7 +55,3 @@ def delete_task(task_id: str) -> bool:
         return True
     return False
 
-
-def get_all_tasks() -> List[Task]:
-    """获取所有任务列表"""
-    return list(task_store.values())

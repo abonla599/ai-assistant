@@ -11,9 +11,8 @@ POST /v1/sessions/{id}/export-ticket 与 GET /v1/exports/{id}）。
 惰性剔除，不起后台线程——为一张几行的小表养一条常驻线程，换来的是每个测试进程
 里多一个关不掉的幽灵。
 
-渲染那半边与前端 app.js 的 exportCurrent()（titleOf + safeFilename + 同一种
-拼接）逐字对齐：同一份导出规则现在服务端与手机端各有一份，这个注释就是漂移时
-该被翻出来的那一页。
+渲染那半边是**唯一一份**导出格式：前端原先自己拼 Markdown（titleOf + safeFilename
++ blob 下载），已随一次性票据方案整个删掉，界面上不再有第二套口径可以漂移。
 """
 import re
 import secrets

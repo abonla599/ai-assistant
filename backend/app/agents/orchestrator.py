@@ -16,16 +16,6 @@ class Orchestrator:
         self.planner = Planner(model)
         self.executor = Executor(model)
 
-    def plan_only(self, goal: str) -> List[str]:
-        """
-        仅生成执行计划，不实际执行
-        Args:
-            goal: 用户目标
-        Returns:
-            子任务列表
-        """
-        return self.planner.plan(goal)
-
     def run(self, goal: str, task_id: Optional[str] = None) -> Dict[str, Any]:
         """
         执行任务的主方法
