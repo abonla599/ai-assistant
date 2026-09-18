@@ -13,11 +13,17 @@
 
 2026-09-18 密保换成全站固定三题之后，/v1/auth/reset 也是免凭据端点了，而它成功一次
 的代价比登录更大（名下每台设备都掉线）。于是多出一本**成功**账：同一来源一天最多
-重置 3 次。同一天的修复轮又把猜找回答案的**失败**拆成第四本账（_RESET_FAILS）：原本
-三本账共用 _FAILS 一个键，而 register 与 login 成功时都 `_FAILS.pop(ip)`——同一 IP 猜错
-四次、登进自己的号（或再注册一个小号）账就清零，无限续命。找回这本现在谁的成功都不清，
-"猜错 9 次 + 猜对 1 次"不再是每 10 分钟一次的免死金牌。下面那几条改密预算的锁就是钉
-这两本的。
+重置 3 次。同一天的修复轮又把猜找回答案的**失败**拆成第四本账（_RESET_FAILS）：拆开的
+理由是猜口令与猜三题是两种不同的猜测面（共用一格预算时，一个人猜错九次之后连自己的密码
+都不许再试），以及 429 要看得出挡的是哪一本。找回这本任何成功都不清，改密成功也不行
+（判据：test_no_other_success_pays_off_the_guessing_ledger、
+test_a_successful_reset_leaves_the_guessing_ledger_alone）。
+同一天的**终审 F3** 又把口径拉齐了：register 与 login 成功路径上的两处 `_FAILS.pop(ip)`
+被删掉，于是**没有任何成功还能还回预算**——旧契约实测是假的（同一 IP 穿插自己的号成功，
+撞名枚举 45 次 409 / 0 次 429）。钉这条的是本文件里那两条**反转过的**锁：
+test_a_correct_login_does_not_pay_back_the_failure_budget 与
+test_a_successful_register_does_not_pay_back_the_failure_budget。下面那几条改密预算的锁
+就是钉这两本的。
 """
 import sys
 from pathlib import Path
@@ -236,16 +242,32 @@ def test_x_forwarded_for_cannot_buy_a_fresh_budget():
     assert spoofed.status_code == 429, "伪造 XFF 换不来一个新桶"
 
 
-def test_a_success_resets_the_failure_budget():
-    """一次成功说明这来源确实是正当用户，别让他之前的手滑继续记账。"""
+def test_a_successful_register_does_not_pay_back_the_failure_budget():
+    """**反转的锁（终审 F3 裁定）**：成功不再还回预算，注册这一支也一样。
+
+    旧契约写的是"一次成功说明这来源确实是正当用户，别让他之前的手滑继续记账"。实测它
+    在产品上是假的：同一台机器、同一个 IP，穿插"自己的号注册成功"，撞名枚举跑到 **45 次
+    409 / 0 次 429**。理由很直白——"注册成功"这件事本身就是一个免凭据端点随手可得的
+    成功，谁都能开一个新号来清自己的账，于是它保护的不是真人，而是脚本。
+
+    新契约与 `_RESET_FAILS` 同口径：**任何成功都不许还回预算**，只有窗口自己过期才松。
+    代价如实写进 docs/安装部署指南.md：真人十分钟内打错 10 次要等窗口过去，话术已经是
+    "尝试次数过多，请稍后再试"。本项目的安全取舍一贯在安全侧（fail-closed、可撤销、
+    查无此人 404），这一条跟着那条走。
+    """
     from app.core.auth_router import MAX_FAILURES_PER_WINDOW
 
-    _register("独占预算", ip="192.0.2.42")
+    ip = "192.0.2.42"
+    _register("独占预算", ip=ip)
     for i in range(MAX_FAILURES_PER_WINDOW - 1):
-        assert _reg("独占预算").status_code == 409
+        assert _reg("独占预算", ip=ip).status_code == 409
     assert _budget_used() == MAX_FAILURES_PER_WINDOW - 1, "前提：撞名确实被记了下来"
-    assert _reg("重置者").status_code == 200
-    assert _budget_used() == 0, "成功后这来源的失败计数必须清零"
+    assert _reg("顺手注册个小号", ip=ip).status_code == 200
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW - 1, \
+        "注册成功把这个来源的失败账还回去了：撞名枚举于是没有上限"
+    assert _reg("独占预算", ip=ip).status_code == 409, "第十格照样要计费"
+    assert _reg("后面的正当用户", ip=ip).status_code == 429, \
+        "账满之后这个来源就该被挡在门外，中间那次成功不算数"
 
 
 def test_the_throttle_forgets_once_the_window_passes(monkeypatch):
@@ -304,7 +326,9 @@ def test_login_issues_a_working_token(client, enforced):
                       json={"username": "登录的人", "password": PW, **RECOVERY},
                       headers={"CF-Connecting-IP": "192.0.2.50"})
     assert res.status_code == 200, res.text
-    login = client.post("/v1/auth/login", json={"username": "登录的人", "password": PW, **RECOVERY},
+    # 登录体只有 username 与 password：这里别顺手带 **RECOVERY，那会让人以为登录也吃
+    # 找回凭据（RegisterRequest 才要那三条）。
+    login = client.post("/v1/auth/login", json={"username": "登录的人", "password": PW},
                         headers={"CF-Connecting-IP": "192.0.2.50"})
     assert login.status_code == 200, login.text
     hdrs = {"Authorization": "Bearer " + login.json()["token"]}
@@ -340,14 +364,27 @@ def test_login_failures_are_charged_per_source_and_not_globally():
         "锁的是这个来源，不是这个账号——否则停用别人账号只要拿他的用户名撞十次"
 
 
-def test_a_correct_login_resets_the_failure_budget():
+def test_a_correct_login_does_not_pay_back_the_failure_budget():
+    """**反转的锁（终审 F3 裁定）**：登进自己的号，也不许把猜口令的预算还给自己。
+
+    终审实测（同一 IP、一台机器）：口令猜测 36 次错 + 4 次自己的账号成功，**0 次 429**，
+    `_FAILS` 始终为 0。"密码对了就说明来路正当"这句在共用一本账的时代还有一层意思
+    （它会连带挡住撞名枚举），拆账之后它只剩下"给脚本发免死金牌"这一层作用了。
+
+    代价要认：同一个十分钟窗口里真人连续打错十次就要等窗口过去。这是裁定选的安全侧。
+    """
     from app.core.auth_router import MAX_FAILURES_PER_WINDOW
 
-    _register("手滑的人")
+    ip = "192.0.2.11"
+    _register("手滑的人", ip=ip)
     for i in range(MAX_FAILURES_PER_WINDOW - 1):
-        assert _login("手滑的人", "不对", ip="192.0.2.11").status_code == 401
-    assert _login("手滑的人", PW, ip="192.0.2.11").status_code == 200
-    assert _budget_used() == 0, "登进来就说明这来源是本人，别让他之前的手滑继续记账"
+        assert _login("手滑的人", "不对", ip=ip).status_code == 401
+    assert _login("手滑的人", PW, ip=ip).status_code == 200
+    assert _budget_used() == MAX_FAILURES_PER_WINDOW - 1, \
+        "登录成功把这个来源的失败账还回去了：猜口令的人只要偶尔猜对自己一次就永远限不住"
+    assert _login("手滑的人", "还是不对", ip=ip).status_code == 401
+    assert _login("手滑的人", "仍旧不对", ip=ip).status_code == 429, \
+        "第十一次猜测必须被挡：中间那次成功不算数"
 
 
 # ---------- 自助改密 ----------
@@ -456,12 +493,16 @@ def test_a_successful_reset_leaves_the_guessing_ledger_alone():
 def test_no_other_success_pays_off_the_guessing_ledger(success_path):
     """**新增锁（F2 主体）**：猜找回答案的失败预算独立成册，别的端点成功洗不掉它。
 
-    上一轮三本账（失败 / 注册成功 / 改密成功）里只有那本失败账是安全预算，而它只按来源
-    IP 一个键、被三个端点共用：register 与 login 成功时都执行 `_FAILS.pop(ip, None)`。
-    评审实测过那条洗白路径——同一 IP 猜错 4 次（budget=4）→ 用**自己的号**登录成功一次
-    → budget=0 → 继续 401 无限续命；再注册第二个号同样清零。本轮把 reset 变成免凭据
-    端点之后这条第一次变得致命：猜中一次口令、或随手建一个新号，都是伸手就有的"成功"。
-    判据照旧数账，并且两支都跑到 429：只断状态码的话，差一位置会藏住清账。
+    写下这条时的样子：三本账（失败 / 注册成功 / 改密成功）里只有那本失败账是安全预算，
+    而它只按来源 IP 一个键、被三个端点共用——register 与 login 成功时都执行
+    `_FAILS.pop(ip, None)`。评审实测过那条洗白路径：同一 IP 猜错 4 次（budget=4）→ 用
+    **自己的号**登录成功一次 → budget=0 → 继续 401 无限续命；再注册第二个号同样清零。
+    把 reset 变成免凭据端点之后这条第一次变得致命：猜中一次口令、或随手建一个新号，都是
+    伸手就有的"成功"。判据照旧数账，并且两支都跑到 429：只断状态码的话，差一位置会藏住清账。
+
+    终审 F3 之后那两处 pop 已经删了（见本文件顶部那段），所以"必须拆册"剩下的理由是
+    两种猜测面各记各的、以及 429 要说清挡的是哪一本。**这条锁一个字都不用改**——它断的
+    从来是"别的端点的成功清不到找回这本"，那在两种口径下都是要成立的事。
     """
     from app.core.auth_router import FAILURE_WINDOW_SECONDS, MAX_FAILURES_PER_WINDOW
 
@@ -472,8 +513,8 @@ def test_no_other_success_pays_off_the_guessing_ledger(success_path):
     for i in range(4):
         assert _reset(victim, WRONG, ip=ip).status_code == 401, f"第 {i} 次猜错"
     assert _guessing_budget_used() == 4, "前提：猜错确实进了找回那本账"
-    # 这句必须在下面那次成功**之前**：register 与 login 成功时都执行 _FAILS.pop(ip)，
-    # 放在成功之后它恒为真，什么也没断。放在这里它才是在说"猜找回的失败没进那本账"。
+    # 放在那次成功**之前**，说的是"猜找回的失败没进登录/注册那本账"。（终审 F3 之前这里
+    # 还多一层理由：pop 一删，放在成功之后就成了恒真；现在两处同样能断，位置照旧留着。）
     assert _budget_used() == 0, "猜找回答案的失败记在找回自己那本账，不占登录/注册的预算"
 
     if success_path == "login":
@@ -508,6 +549,33 @@ def test_a_partially_correct_answer_set_says_what_a_wrong_one_says():
     assert partial.text == all_wrong.text, \
         f"两种失败说得不一样：{partial.text!r} / {all_wrong.text!r}"
     assert partial.json()["detail"] == RESET_FAIL, "同形不等于说错了话：还得是那句"
+
+
+def test_the_reset_billing_follows_the_flag_not_the_wording(monkeypatch):
+    """**终审 F4**：计费挂在显式标记上，不挂在文案上。
+
+    旧写法是 `if e.reason == RESET_FAIL:`，正是 `AuthError` 的 docstring 自己警告过的形状：
+    第五种内部原因一旦新增（或者这句哪天换了措辞），它静默落到 else 那一支——**不计费**，
+    还把它原话回给一个免凭据端点。这里就模拟"将来换了措辞"：把常量改掉，一条猜错仍然要
+    扣一格、仍然是 401，回的还得是新那句（说旧那句就说明判的还是文案）。
+
+    反向那半同样要成立：存储层那句指着题数/长度的手滑 422 不许因为多了个 charge 字段
+    就被顺手计费——那正是"手滑不该烧预算"这条口径的另一半。
+    """
+    from app.core import auth as auth_module
+
+    ip = "192.0.2.80"
+    _register("换措辞的人", ip=ip)
+    monkeypatch.setattr(auth_module, "RESET_FAIL", "换了个说法的猜错")
+    res = _reset("换措辞的人", WRONG, ip=ip)
+    assert res.status_code == 401, f"换了措辞就掉进 422 那一支：{res.status_code} {res.text}"
+    assert res.json()["detail"] == "换了个说法的猜错", \
+        f"回的还是旧那句，说明判的是文案不是标记：{res.text}"
+    assert _guessing_budget_used() == 1, "计费静默消失：猜错一格都不扣，预算白送给猜的人"
+
+    typo = _reset("换措辞的人", ["不", "对", "啊"], ip=ip)      # 每题不足 2 个字符
+    assert typo.status_code == 422, f"手滑被说成了猜错：{typo.status_code} {typo.text}"
+    assert _guessing_budget_used() == 1, "手滑被计进预算：唯一的自救入口会被自己锁死"
 
 
 def test_a_missing_answer_at_register_is_a_free_typo():

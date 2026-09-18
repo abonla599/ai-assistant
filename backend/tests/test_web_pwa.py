@@ -1023,7 +1023,8 @@ def test_a_stale_token_does_not_read_like_a_first_run():
 def test_registration_locks_its_button_while_the_request_is_in_flight():
     """登录/注册没有在途闸门 = 手机双击发出第二个 POST。
 
-    第二下拿回的是"用户名已被占用"或一次多余的 401：界面于是把一个已经成功的
+    第二下拿回的是"该用户名已存在"（`auth.py` 里那句实话，措辞换过一次：从前写作"用户名
+    已被占用"）或一次多余的 401：界面于是把一个已经成功的
     人标成红色失败，两次调用还一起抢 pref.token 的写入与
     loadWho→loadServerData→renderMessages 的顺序。约定跟 send() 守 state.streaming
     一模一样——进门先挡、解锁放在 finally（失败也必须解，否则一次网络抖动就把唯一

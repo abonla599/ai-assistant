@@ -711,8 +711,13 @@ def test_reset_revokes_every_token_and_keeps_a_disabled_user_disabled(store):
         "改密也不许反过来把人关回去：他刚从停用里恢复，口令是他自己的"
 
 
-# 写 disabled 的三种写法。读（record.get("disabled")）不在其列——停用这一支本来
-# 就得判，那条判断由耗时测试与措辞测试分别看着。
+# 三条正则**认得**的三种写 disabled 的写法——注意这不等于"写 disabled 的一切写法"：
+# `record.setdefault("disabled", False)` 与 `record.pop("disabled", None)` 都认不出，
+# 换一个 helper 写也同样漏（task-1-report 里记为"结构锁的固有边界"）。这把锁挡的是
+# "顺手往成功路径里加一行"，不挡"成心换一种写法"——文本锁都这样，test_web_pwa.py 读
+# JS 文本同此。原理性限制本轮不动，只是别把它写成"堵死一切写法"。
+# 读（record.get("disabled")）不在其列——停用这一支本来就得判，那条判断由耗时测试与
+# 措辞测试分别看着。
 _DISABLED_WRITES = (
     re.compile(r"""\[\s*["']disabled["']\s*\]\s*=(?!=)"""),          # record["disabled"] = ...
     re.compile(r"""\bdel\b[^=\n]*\[\s*["']disabled["']\s*\]"""),     # del record["disabled"]
@@ -814,6 +819,9 @@ def test_every_wrong_answer_says_the_very_same_thing(store):
     """答案错、这个人没设找回答案、查无此人、账号被停用——四句必须一字不差。
 
     四条路都在免凭据端点上，多说一个字就是"哪个用户名真存在"的免费查询。
+    四句还必须**都**带着 charge=True 出来：HTTP 层靠这个标记决定要不要往找回的猜错账上
+    记一格（终审 F4 之前它判的是 reason 等于哪句文案，换措辞就静默不计费）。少一条带
+    标记的出口，就等于给那四种原因之一开了一条免费猜测的路。
     """
     principal, _ = _reg(store, username="开着的")
     store.register(username="没开的", password=PW)
@@ -827,6 +835,8 @@ def test_every_wrong_answer_says_the_very_same_thing(store):
         with pytest.raises(AuthError) as e:
             store.reset_password(username=args[0], answers=args[1], new_password=PW2)
         reasons[label] = str(e.value)
+        assert e.value.charge is True, \
+            f"{label} 这一支没带 charge：HTTP 层不会为它计费，那种原因就成了免费猜测"
     assert len(set(reasons.values())) == 1, f"四种失败说出了不同的话：{reasons}"
 
 
