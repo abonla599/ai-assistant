@@ -199,6 +199,35 @@ def test_session_token_list_is_bounded_and_evicts_the_oldest(store):
     assert store.resolve(issued[-1]).username == "刷令牌", "最新的必须还活着"
 
 
+def test_revoke_drops_only_that_one_token(store):
+    """退出这台机器只能踢掉这台机器的令牌。
+
+    清空整张令牌表是 rotate_token 的语义（"我怀疑密码泄露了"）。如果"退出"顺手
+    把别人的设备一起踢下线，那它就是一个能跨设备使坏的动作，没人敢点。
+    """
+    principal, phone = store.register(username="两台设备", password=PW)
+    _, laptop = store.login("两台设备", PW)
+    assert laptop != phone
+    store.revoke(laptop)
+    assert store.resolve(laptop) is None, "退出的那枚还能用：那「退出」就是个假动作"
+    assert store.resolve(phone).user_id == principal.user_id, "退出把另一台设备一起踢了"
+    # 重启后仍然是退出状态：只改内存不落盘，等于没退出
+    again = AuthStore(path=store.path)
+    assert again.resolve(laptop) is None, "revoke 没有落盘"
+    assert again.resolve(phone).user_id == principal.user_id
+
+
+def test_revoke_says_nothing_about_a_token_it_does_not_know(store):
+    """不存在的令牌与已摘掉的令牌走同一条路：不抛、不返回"在不在"。
+
+    返回值上的任何差别都是一个 oracle——外面可以拿它试探某枚令牌曾经有效过。
+    """
+    _, token = store.register(username="话少的人", password=PW)
+    assert store.revoke("显然不是系统发的那一枚") is None
+    assert store.revoke(token) is None
+    assert store.revoke(token) is None, "重复退出不该抛：它本来就是「没登进来」那个状态"
+
+
 def test_rotate_token_invalidates_every_previous_session(store):
     """多设备并存之后，"撤销"必须是清空整张令牌表。
 

@@ -441,6 +441,29 @@ class AuthStore:
                                  role=record.get("role", "user"))
         return None
 
+    def revoke(self, token: str) -> None:
+        """摘掉这一枚会话令牌——"退出这台机器"的全部含义。
+
+        刻意不清整张表：那是 `rotate_token` 的语义（怀疑口令泄露，把所有设备一起
+        踢掉）。"退出"如果顺手把别人设备也踢下线，它就是一个能跨设备使坏的动作，
+        没人敢点。
+
+        认不出这枚令牌时不抛、也不返回"在不在"：返回值上的任何差别都是一个
+        oracle，外面可以拿它试探某枚令牌是否曾经有效过。
+        """
+        if not token:
+            return
+        digest = hash_token(token)
+        with self._lock:
+            for record in self._users.values():
+                stored = record.get("tokens") or []
+                kept = [s for s in stored if not _token_matches(s, digest)]
+                if len(kept) == len(stored):
+                    continue
+                record["tokens"] = kept
+                self._flush()       # 不落盘的退出等于没退出：重启就又登得回来
+                return
+
     def disable_user(self, user_id: str) -> bool:
         with self._lock:
             record = self._users.get(user_id)

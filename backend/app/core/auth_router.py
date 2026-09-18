@@ -210,7 +210,7 @@ class ResetRequest(BaseModel):
 
 
 @router.post("/v1/auth/register")
-async def register(req: RegisterRequest, request: Request):
+def register(req: RegisterRequest, request: Request):
     """开放注册：用户名 + 自设密码，成功即发一枚会话令牌（注册即登录）。
 
     路由挂在精确路径上——authz.PUBLIC_PATHS 也是精确匹配，带斜杠的变体在
@@ -250,7 +250,7 @@ def _register_error(e: AuthError, ip: str) -> HTTPException:
 
 
 @router.post("/v1/auth/login")
-async def login(req: LoginRequest, request: Request):
+def login(req: LoginRequest, request: Request):
     """用户名 + 密码换一枚新的会话令牌；旧令牌继续有效（多设备并存）。"""
     ip = _client_ip(request)
     if _throttled(ip):
@@ -267,7 +267,7 @@ async def login(req: LoginRequest, request: Request):
 
 
 @router.post("/v1/auth/reset")
-async def reset(req: ResetRequest, request: Request):
+def reset(req: ResetRequest, request: Request):
     """三题全答对就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。
 
     这里没有"先把问题念给你听"那一步：三题是全站常量，前端自己渲染，服务器不为
@@ -308,7 +308,7 @@ async def reset(req: ResetRequest, request: Request):
 
 
 @router.get("/v1/auth/me")
-async def me(principal: Principal = CurrentPrincipal):
+def me(principal: Principal = CurrentPrincipal):
     """前端用它确认"我到底是谁"——凭据被解析成谁，只有这里说得准。"""
     return {"user_id": principal.user_id, "username": principal.username,
             "role": principal.role}
@@ -334,20 +334,36 @@ def _public_user(record: dict) -> dict:
     }
 
 
+@router.post("/v1/auth/logout")
+def logout(request: Request, principal: Principal = CurrentPrincipal):
+    """退出这台机器：只作废**调用方这一枚**令牌。
+
+    刻意不清这个人的整张令牌表——那是管理员 rotate 的语义（怀疑口令泄露）。
+    它还要能替"本机清单里的另一个人"退出：前端直接带上他那一枚来调就行，不必
+    先把他切成当前身份、把他的会话加载到屏幕上（共用设备上没这个必要）。
+
+    取凭据复用 authz._credential：它已经管好了方案名大小写与 x-access-token
+    兜底，这里再写一份 split 就是第二个事实来源——两边一漂移就会出现
+    "中间件认得这枚、退出说不认识"，而表现是退出没反应。
+    """
+    _store().revoke(authz._credential(request))
+    return {"status": "logged_out"}
+
+
 @router.get("/v1/admin/users")
-async def list_users(_: Principal = RequireAdmin):
+def list_users(_: Principal = RequireAdmin):
     return {"users": [_public_user(u) for u in _store().list_users()]}
 
 
 @router.post("/v1/admin/users/{user_id}/disable")
-async def disable_user(user_id: str, _: Principal = RequireAdmin):
+def disable_user(user_id: str, _: Principal = RequireAdmin):
     if not _store().disable_user(user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
     return {"status": "disabled", "user_id": user_id}
 
 
 @router.post("/v1/admin/users/{user_id}/enable")
-async def enable_user(user_id: str, _: Principal = RequireAdmin):
+def enable_user(user_id: str, _: Principal = RequireAdmin):
     # 轮换令牌不再顺手解除停用，因此撤销必须有对称的还原动作。
     if not _store().enable_user(user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -355,7 +371,7 @@ async def enable_user(user_id: str, _: Principal = RequireAdmin):
 
 
 @router.post("/v1/admin/users/{user_id}/rotate-token")
-async def rotate_user_token(user_id: str, _: Principal = RequireAdmin):
+def rotate_user_token(user_id: str, _: Principal = RequireAdmin):
     """强制全端重登：旧令牌全部作废，且停用状态原样保留。"""
     try:
         return {"token": _store().rotate_token(user_id)}
@@ -364,7 +380,7 @@ async def rotate_user_token(user_id: str, _: Principal = RequireAdmin):
 
 
 @router.delete("/v1/admin/users/{user_id}")
-async def remove_user(user_id: str, actor: Principal = RequireAdmin):
+def remove_user(user_id: str, actor: Principal = RequireAdmin):
     if user_id == actor.user_id:
         raise HTTPException(status_code=400, detail="不能删除自己")
     if not _store().delete_user(user_id):

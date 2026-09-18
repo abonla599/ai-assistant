@@ -335,6 +335,44 @@ def test_login_issues_a_working_token(client, enforced):
     assert client.get("/v1/auth/me", headers=hdrs).json()["username"] == "登录的人"
 
 
+def test_logout_revokes_only_the_calling_token(client, enforced):
+    """/v1/auth/logout 只作废**调用方这一枚**令牌。
+
+    必须在 enforced 下验：disabled 模式中间件不解析凭据，那枚头根本没人读，
+    在 disabled 里断言"退出之后 401"等于什么都没测。
+    """
+    import app.core.authz as authz
+
+    first = enforced("退出的人")
+    _, second = authz.auth_store.login("退出的人", "correct-horse-battery")
+    two = {"Authorization": "Bearer " + second}
+    assert client.get("/v1/auth/me", headers=first).status_code == 200
+    assert client.get("/v1/auth/me", headers=two).status_code == 200
+    out = client.post("/v1/auth/logout", headers=first)
+    assert out.status_code == 200, out.text
+    assert client.get("/v1/auth/me", headers=first).status_code == 401, "退出没作废这枚令牌"
+    assert client.get("/v1/auth/me", headers=two).status_code == 200, \
+        "退出把另一台设备一起踢下线了：那是管理员 rotate 的语义，不是退出"
+
+
+def test_logout_is_not_a_public_path_and_charges_nothing(client, enforced):
+    """它要凭据，且一次退出哪本账都不记。
+
+    免凭据的"退出"等于给外面一个"这枚令牌还有没有效"的探针；而把它记进登录那本
+    失败账更荒唐——退出是**少一个可用凭据**的动作，不是猜错一次。
+    必须在 enforced 下验：disabled 模式里没有凭据也算本机管理员，那两条 401 根本不存在。
+    """
+    from app.core.authz import PUBLIC_PATHS
+
+    assert "/v1/auth/logout" not in PUBLIC_PATHS, "它成了免凭据端点"
+    before, guessing = _budget_used(), _guessing_budget_used()
+    assert client.post("/v1/auth/logout").status_code == 401
+    assert client.post("/v1/auth/logout",
+                       headers={"Authorization": "Bearer not-a-token-the-system-issued"}).status_code == 401
+    assert _budget_used() == before and _guessing_budget_used() == guessing, \
+        "退出失败进了某本限流账：撤销凭据不该消耗别人的预算"
+
+
 def test_login_failure_is_the_same_sentence_for_every_cause():
     """查无此人 / 密码错 / 已停用，三句必须逐字节相同，整个响应体也一样。
 
