@@ -47,7 +47,7 @@ generate_docx.py
 .qoder/
 # 本地工具产物：cloudflared.exe、隧道 yml、启动脚本都不属于源码，整目录排除。
 # （这里曾经有一条 !tools/make-invite.bat 例外，随邀请码机制一起删除了。）
-tools/
+/tools/
 server.log
 tunnel.log
 PATH_backup_*.txt
