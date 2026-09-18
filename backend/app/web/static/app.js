@@ -55,13 +55,6 @@ function setStatus(text, isErr) {
   el.classList.toggle("err", !!isErr);
 }
 
-function setConn(ok, text) {
-  const dot = $("connDot");
-  dot.className = "conn-dot " + (ok === null ? "" : ok ? "ok" : "bad");
-  /* 侧栏底部这一行现在只放得下一个点：状态文字改挂到 title 上，悬停或长按看详情 */
-  dot.title = text || "服务状态";
-}
-
 function applyTheme() {
   document.documentElement.dataset.theme = pref.theme;
   const meta = document.querySelector('meta[name="theme-color"]');
@@ -463,7 +456,6 @@ async function loadModels() {
 
   const usable = state.providers.filter((p) => p.usable);
   if (!usable.length) {
-    setConn(false, "没有可用的模型服务");
     // 「模型服务」是管理员面：把普通用户推进那个页签，他只会对着 403 站着。
     if (isAdmin()) {
       setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
@@ -471,9 +463,11 @@ async function loadModels() {
     } else {
       setStatus("服务端还没有可用的模型，请联系管理员配置模型服务", true);
     }
-  } else {
-    setConn(true, `${usable.length} 个模型可用`);
   }
+  /* "几个模型可用"这句现在有了正经落点：就写在选模型那一格下面，不再是侧栏
+     底部那颗没人知道是什么意思的小圆点。 */
+  $("chatNote").textContent = usable.length
+    ? `${usable.length} 个模型可用` : "服务端还没有可用的模型";
 
   if (!usable.some((p) => p.id === pref.provider)) {
     const def = usable.find((p) => p.default) || usable[0];
@@ -847,7 +841,13 @@ async function newChat() {
 }
 
 /* ---------------- 渲染消息 ---------------- */
+function syncTopTitle() {
+  const s = state.sessions.find((x) => x.session_id === pref.sessionId);
+  $("topTitle").textContent = (s && s.title) || "新对话";
+}
+
 function renderMessages() {
+  syncTopTitle();          /* 换会话、改名、首条消息之后都从这里过一次，标题不会漏 */
   const host = $("messages");
   host.innerHTML = "";
   const inner = document.createElement("div");
@@ -874,7 +874,7 @@ function emptyState() {
   const p = document.createElement("p");
   p.textContent = "支持 Markdown 与代码高亮，可上传文本/代码和图片。"
     + (isAdmin() ? "模型在「设置 → 模型服务」里自行接入。"
-                 : "用哪个模型由管理员在「模型服务」里配好，您只管聊。");
+                 : "用哪个模型由管理员配好，您在「设置 → 当前会话」里挑。");
   el.append(img, h, p);
   return el;
 }
@@ -1248,10 +1248,10 @@ async function loadAbout() {
   });
 }
 
+/* 角色只显示在设置那一页里：原先顶栏那颗 chip 是同一件事的第二个入口，
+   而它写的"无角色"三个字并不告诉人点进去能干什么。 */
 function syncPersonaChip() {
-  const p = pref.persona(pref.sessionId);
-  $("personaChip").textContent = p ? titleOf(p) : "无角色";
-  $("personaInput").value = p;
+  $("personaInput").value = pref.persona(pref.sessionId);
 }
 
 function setAttachMenu(open) {
@@ -1393,7 +1393,6 @@ function bind() {
     setStatus("");
   };
   $("exportBtn").onclick = exportCurrent;
-  $("personaChip").onclick = () => openSettings("persona");
 
   $("chatForm").onsubmit = (e) => {
     e.preventDefault();
@@ -1575,18 +1574,20 @@ async function boot() {
   $("ctxRange").value = pref.contextWindow;
   $("ctxVal").textContent = pref.contextWindow;
 
+  /* 这个顺序就是这次改动的全部意义：本机有没有令牌是同步就知道的事，原先却要等
+     loadWho() 走一趟隧道拿回 401 才挡屏，中间那 0.5~2 秒用户看到的是空聊天界面
+     加一个空白模型框——"闪一下才出注册页"说的就是它。 */
+  if (!pref.token) showAuth("register");
   try {
     await loadWho();          // 先知道自己是谁：角色决定下面哪些面存在、哪些按钮该收起来
     await loadServerData();
   } catch (e) {
-    if (!needsAuth(e)) {
-      setConn(false, "无法连接后端");
-      setStatus("后端连接失败：" + e.message, true);
-    }
+    if (!needsAuth(e)) setStatus("后端连接失败：" + e.message, true);
   }
   // 认不出人才挡屏。放在 catch 之后是有意的：后端连不上（503/断网）时弹一个
   // 只会失败的登录框，等于把"服务没起来"伪装成"你没登录"。
-  if (!state.me) showAuth(pref.token ? "login" : "register");
+  if (state.me) hideAuth();          /* 令牌有效，含冷启动先弹了注册层那一路 */
+  else showAuth(pref.token ? "login" : "register");   /* 有令牌却被拒才换登录面；没令牌的仍停在注册 */
   renderMessages();
   syncPersonaChip();
 

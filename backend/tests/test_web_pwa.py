@@ -560,15 +560,69 @@ def test_registration_ui_elements_wired():
                "authSwitch", "authUserErr", "authPass2", "authPass2Row", "authPassRow",
                "regStep2", "regBack",
                "recoverForm", "rcUser", "rcStep2", "rcNew", "rcNew2", "rcGo", "rcHint",
-               "rcBack", "whoRow", "userName", "userAvatar"):
+               "rcBack", "whoRow", "userName", "userAvatar", "topTitle"):
         assert f'$("{el}")' in js, f"app.js 里没有 $({el})：这个元素要么没接线要么已删"
         assert el in defined, f"HTML 里没有 #{el}"
     for gone in ("authTab", "authSide", "authHost", "navSettings",
                   "regUsername", "regPass", "registerBtn", "registerFromSettings",
                   "authExtra", "authQuestion", "authAnswer",
                   "rcQuestion", "rcAnswer", "rcQuestionRow", "rcAnswerRow",
-                  "rcNewRow", "rcNew2Row"):
+                  "rcNewRow", "rcNew2Row",
+                  # 顶栏瘦身与底栏整合删掉的两件：那颗没有文字说明的小圆点，和那颗
+                  # 只是"进设置里角色那一页"的快捷入口。留着其中任何一件，就等于
+                  # 承认"再占一个位置"是有道理的。
+                  "connDot", "personaChip"):
         assert gone not in html and gone not in js, f"{gone} 还在：删剩的半套比没删更难读"
+
+
+def test_the_topbar_holds_only_the_sidebar_toggle_and_the_title():
+    """顶栏只剩「☰」与会话标题：模型选择、角色、导出全部搬进设置那一页。
+
+    反向断言是重点——这三件东西每一个都有活着的理由，所以将来一定有人想"顺手加回
+    顶栏"。它们回到顶栏的那一天，手机上那 4 个控件（其中一个在未登录时还是个空白
+    框）就又回来了，而这正是本次要解决的问题。
+    """
+    html = _html()
+    top = re.search(r'<header class="topbar"[\s\S]*?</header>', html)
+    assert top, "顶栏不在了"
+    block = top.group(0)
+    assert 'id="openSidebar"' in block and 'id="topTitle"' in block
+    for gone in ("modelSel", "personaChip", "exportBtn", '<select', 'class="chip"'):
+        assert gone not in block, f"{gone} 又回到顶栏了"
+    assert re.search(r'\$\("topTitle"\)\.textContent', _js()), "标题没人更新：它会一直写着「新对话」"
+
+
+def test_boot_shows_the_auth_layer_before_it_asks_the_server():
+    """冷启动不许先画聊天界面再闪成注册层。
+
+    原先的顺序是 `await loadWho()` → 拿到 401 → showAuth，中间那 0.5~2 秒（走隧道）
+    用户看到的是一个空聊天面 + 一个空白模型框。本地有没有令牌是**同步**就能知道的
+    事，所以它必须排在任何 await 之前；有令牌时才先画外壳，等服务端真拒绝再弹登录。
+    """
+    js = _js()
+    body = _function_body(js, "boot")
+    guard = re.search(r"if \(!pref\.token\)[\s\S]{0,80}showAuth\(\"register\"\)", body)
+    assert guard, "没有「本地没令牌就立刻弹注册层」这一步"
+    assert body.index("showAuth(\"register\")") < body.index("await loadWho()"), \
+        "showAuth 又排到 await 后面了：闪一下会原样回来"
+    assert "await loadWho()" in body and "hideAuth()" in body, \
+        "令牌有效时仍要收掉这层，否则登录过的人也被挡在外面"
+
+
+def test_the_settings_sheet_has_a_chat_pane_that_everyone_can_reach():
+    """模型选择搬进设置后，那一页必须对普通用户也开着。
+
+    它原先在顶栏，人人可用；而设置里唯一列模型的那页（模型服务）是管理员专属
+    （后端 7 条路由都要管理员）。搬过去却只对管理员可见，等于把普通用户换模型的
+    能力整个删掉——那不会报错，只会让人以为"这里没有模型可换"。
+    """
+    html = _html()
+    assert '<button class="tab" data-tab="chat">' in html, "设置里没有「当前会话」这一页签"
+    chat = re.search(r'<section class="pane" data-pane="chat">[\s\S]*?</section>', html)
+    assert chat, "找不到 data-pane=\"chat\" 那一页"
+    assert "data-admin-only" not in chat.group(0), "这一页对普通用户收起来了：他会没有模型可换"
+    assert 'id="modelSel"' in chat.group(0) and 'id="exportBtn"' in chat.group(0), \
+        "模型选择或导出没真的搬进来（只在顶栏删掉了）"
 
 
 
@@ -595,6 +649,13 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
     assert '$("userAvatar").textContent = name ? name[0]' in js, "头像没取首字母"
     about = re.search(r'data-pane="about"[\s\S]*?</section>', html).group(0)
     assert 'id="themeBtn"' in about, "主题按钮从侧栏搬走之后没落到设置弹层里"
+    # 手机上"设置不好点"与"齿轮旁边那个点是什么鬼"两件事的判据：整行要有 44px 的
+    # 可点高度，并且要**写出"设置"两个字**——一个没有文字的齿轮在手机上读起来像装饰。
+    css = _css()
+    foot = re.search(r"\.who-row\s*\{[^}]*\}", css)
+    assert foot and re.search(r"min-height:\s*(4[4-9]|[5-9][0-9])px", foot.group(0)), \
+        ".who-row 的点击高度不到 44px"
+    assert "设置" in row.group(0), "齿轮旁边没有「设置」二字：整行可点这件事没人看得出来"
 
 
 

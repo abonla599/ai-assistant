@@ -44,9 +44,9 @@
         <button class="who-row" id="whoRow" title="打开设置">
           <span class="avatar" id="userAvatar">·</span>
           <span class="who-name" id="userName">未登录</span>
-          <span class="conn-dot" id="connDot" title="服务状态"></span>
+          <span class="who-cta">设置</span>
           <span class="who-gear">
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
               <circle cx="12" cy="12" r="5.6" fill="none" stroke="currentColor" stroke-width="3"/>
               <g fill="currentColor">
                 <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7"/>
@@ -67,12 +67,12 @@
 
     <!-- 主区 -->
     <main class="main">
+      <!-- 顶栏只有两样：开侧栏，和"我在哪段对话里"。模型选择、角色设定、导出原先
+           挤在这一行，现在都在设置的「当前会话」那一页——未登录时那个模型框还是个
+           空白框，占着首屏最贵的位置却什么都不能说。 -->
       <header class="topbar">
         <button class="icon-btn only-mobile" id="openSidebar" aria-label="打开侧栏">☰</button>
-        <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
-        <span class="spacer"></span>
-        <button class="chip" id="personaChip" title="角色设定">无角色</button>
-        <button class="icon-btn" id="exportBtn" title="导出当前会话" aria-label="导出">⇩</button>
+        <span class="top-title" id="topTitle">新对话</span>
       </header>
 
       <section class="messages" id="messages" aria-live="polite"></section>
@@ -135,6 +135,7 @@
       <div class="modal-head">
         <div class="tabs" id="settingsTabs">
           <button class="tab hidden" id="tabProviders" data-tab="providers" data-admin-only>模型服务</button>
+          <button class="tab" data-tab="chat">当前会话</button>
           <button class="tab" data-tab="memory">长期记忆</button>
           <button class="tab" data-tab="persona">角色设定</button>
           <button class="tab" data-tab="conn">连接</button>
@@ -180,6 +181,18 @@
               <input type="range" id="ctxRange" min="2" max="40" step="2" value="10">
               <em>每次请求附带的历史消息数量，过长会超出模型上下文窗口</em>
             </label>
+          </div>
+        </section>
+
+        <!-- 当前会话：模型选择与导出从顶栏搬进来。这一页**不是**管理员页——
+             「模型服务」那一页要管理员权限（后端 7 条路由都是），普通用户换模型
+             只能靠这里，收起来就等于把他的能力删了。 -->
+        <section class="pane" data-pane="chat">
+          <p class="pane-note">这一段对话用哪个模型、要不要角色设定，都在这里改。模型由管理员配好，您只管挑。</p>
+          <select id="modelSel" class="model-sel" aria-label="选择模型"></select>
+          <p class="pane-note" id="chatNote"></p>
+          <div class="row">
+            <button class="btn" id="exportBtn">导出当前会话</button>
           </div>
         </section>
 

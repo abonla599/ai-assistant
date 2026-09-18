@@ -97,7 +97,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 /* 侧栏底部这一行同时是"我是谁"与"进设置"：整行可点，所以它是个 button。
    主题按钮是低频动作，已经挪进设置弹层，不占这里。 */
 .sb-foot { padding-top: 10px; border-top: 1px solid var(--line); }
-.who-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 4px;
+.who-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 44px;
+           padding: 8px 6px;
            border: 0; border-radius: 10px; background: transparent; color: var(--text-2);
            font-size: 13px; cursor: pointer; text-align: left; }
 .who-row:hover { background: var(--bg-hover); color: var(--text); }
@@ -107,9 +108,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .who-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
             white-space: nowrap; color: var(--text); }
 .who-gear { display: flex; flex: none; color: var(--text-3); }
-.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
-.conn-dot.ok { background: var(--accent); }
-.conn-dot.bad { background: var(--danger); }
+/* 侧栏底部那颗"服务状态"圆点删了：它没有文字说明，hover 才有 title，手机上永远
+   读不出来；连接问题本来就会在输入框上方那行状态里说人话。 */
+.who-cta { margin-left: auto; font-size: 13px; color: var(--text-2); flex: none; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 
@@ -118,7 +119,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
   padding: calc(10px + var(--safe-top)) 12px 10px;
   border-bottom: 1px solid var(--line); background: var(--bg);
 }
-.model-sel {
+.top-title { font-size: 15px; font-weight: 600; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+/* 顶栏只剩开关与标题；模型下拉搬进设置那一页，宽度跟着容器走。 */
+.model-sel { width: 100%;
   border: 1px solid var(--line); background: var(--surface);
   border-radius: 9px; padding: 6px 9px; font-size: 13px; max-width: 46vw;
 }
