@@ -592,21 +592,55 @@ def test_the_topbar_holds_only_the_sidebar_toggle_and_the_title():
     assert re.search(r'\$\("topTitle"\)\.textContent', _js()), "标题没人更新：它会一直写着「新对话」"
 
 
-def test_boot_shows_the_auth_layer_before_it_asks_the_server():
-    """冷启动不许先画聊天界面再闪成注册层。
+def test_boot_covers_the_shell_before_it_asks_the_server():
+    """冷启动的第一屏只能是"正在确认身份"，不能是聊天外壳。
 
-    原先的顺序是 `await loadWho()` → 拿到 401 → showAuth，中间那 0.5~2 秒（走隧道）
-    用户看到的是一个空聊天面 + 一个空白模型框。本地有没有令牌是**同步**就能知道的
-    事，所以它必须排在任何 await 之前；有令牌时才先画外壳，等服务端真拒绝再弹登录。
+    原先的顺序是 `await loadWho()` → 拿回 401 → showAuth，中间那 0.5~2 秒（走隧道）
+    用户看到一个空聊天界面加一个空白模型框——手机上 1→3→2 那个顺序就是它。
+    上一轮只挡了"本机没令牌"那一路，**存过令牌的人仍然先看外壳**，所以这次把
+    盖外壳这件事与有没有令牌脱钩：先盖一层中性状态，再按结果决定露出什么。
     """
     js = _js()
     body = _function_body(js, "boot")
-    guard = re.search(r"if \(!pref\.token\)[\s\S]{0,80}showAuth\(\"register\"\)", body)
-    assert guard, "没有「本地没令牌就立刻弹注册层」这一步"
-    assert body.index("showAuth(\"register\")") < body.index("await loadWho()"), \
-        "showAuth 又排到 await 后面了：闪一下会原样回来"
-    assert "await loadWho()" in body and "hideAuth()" in body, \
-        "令牌有效时仍要收掉这层，否则登录过的人也被挡在外面"
+    assert re.search(r"showAuthPending\(\);", body), "没有先盖中性层这一步"
+    assert body.index("showAuthPending()") < body.index("await loadWho()"), \
+        "盖层又排到 await 后面了：闪一下会原样回来"
+    # 三条出路都得把中性层摘掉，否则"正在确认身份…"会变成第二块砖
+    tail = body[body.index("await loadWho()"):]
+    assert "hideAuth()" in tail and "showAuth(" in tail, "确认完没人收这层或没人换成表单"
+    assert "clearAuthPending()" in _function_body(js, "showAuth"), \
+        "showAuth 不清中性层：露出表单时那句「正在确认身份…」会一起挂着"
+    assert "clearAuthPending()" in _function_body(js, "hideAuth"), \
+        "hideAuth 不清中性层：下次再弹这层会直接停在「正在确认身份…」"
+
+
+def test_a_backend_that_is_down_does_not_pretend_you_are_logged_out():
+    """连不上后端时要露出外壳 + 那句人话，而不是把人锁在登录层或"确认中"里。
+
+    这条不变量从上一轮就有（弹一个只会失败的登录框等于把"服务没起来"伪装成
+    "你没登录"）。这次多了一个新的失败形状：中性层不摘掉，用户会永远盯着
+    「正在确认身份…」——所以它得跟"登录层不许弹"一起钉住。
+    """
+    js = _js()
+    body = _function_body(js, "boot")
+    guard = re.search(r"else if \(unreachable\) (\w+)\(\);", body)
+    assert guard, "后端连不上那一路没有分支处理"
+    assert guard.group(1) == "hideAuth", "连不上时没收中性层，收的是：" + guard.group(1)
+    assert "needsAuth(e)" in body, "401 仍然交给 needsAuth 弹层，没被这条分支吞掉"
+
+
+def test_the_pending_cover_exists_and_hides_the_form():
+    """中性层要有自己的 DOM 与样式，且它盖住的是表单不是整层（品牌行得留着）。"""
+    html = _html()
+    css = _css()
+    assert 'id="authPending"' in html, "没有 #authPending 这一句"
+    # 收起来的是表单容器：.auth-grid 在删掉登录说明卡那一轮就没了，
+    # authForm 与 recoverForm 现在共用 .auth-form，所以钉这个才是真的那两层。
+    assert re.search(r"\.auth\.pending \.auth-form\s*\{[^}]*display:\s*none", css), \
+        "pending 态没把表单收起来"
+    assert re.search(r"\.auth-pending\s*\{[^}]*display:\s*none", css), "中性层默认就该不显示"
+    assert re.search(r"\.auth\.pending \.auth-pending\s*\{[^}]*display:\s*block", css), \
+        "pending 态没把那句「正在确认身份…」亮出来"
 
 
 def test_the_settings_sheet_has_a_chat_pane_that_everyone_can_reach():

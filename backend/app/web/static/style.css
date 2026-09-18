@@ -394,6 +394,13 @@ button, input, textarea, select { font: inherit; color: inherit; }
               font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: .5px; }
 .auth-brand img { width: 30px; height: 30px; border-radius: 8px; }
 .auth-form { display: flex; flex-direction: column; gap: 12px; }
+/* 冷启动中性态：整层只留品牌行 + 一句「正在确认身份…」，两张表单一起收起来。
+   没有它时第一屏先画出聊天外壳，等 loadWho() 拿回 401 才弹登录层——手机上
+   看到的就是「先进 app 界面、闪一下、才出注册页」。 */
+.auth-pending { display: none; margin: 0; text-align: center; font-size: 13.5px;
+                line-height: 1.5; color: var(--text-2); }
+.auth.pending .auth-form { display: none; }
+.auth.pending .auth-pending { display: block; }
 /* 注册第二步与找回第二步那一整块：与表单同宽、内部同样 12px 间距。
    hidden 由 .hidden{display:none!important} 收，这里只定"露出来时长什么样"。 */
 .auth-step { display: flex; flex-direction: column; gap: 12px; }

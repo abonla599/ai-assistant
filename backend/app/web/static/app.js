@@ -227,7 +227,21 @@ function showAuthView(which) {
   }
 }
 
+/** 冷启动的中性第一态：整层盖住外壳，但只露品牌行和那句「正在确认身份…」。
+ *  令牌是本机同步就读得到的，可"这枚令牌还有效吗"必须问服务端一趟；不问完就露出
+ *  表单或外壳，用户看到的都是一次闪变。三条出路——认出人、要凭据、连不上——
+ *  分别由 hideAuth / showAuth 收掉这一态，所以那两个函数里各清一次。
+ */
+function showAuthPending() {
+  const modal = $("authModal");
+  modal.classList.add("pending");
+  modal.classList.remove("hidden");
+}
+
+function clearAuthPending() { $("authModal").classList.remove("pending"); }
+
 function showAuth(mode) {
+  clearAuthPending();
   setAuthMode(mode || authMode);
   showAuthView("auth");
   $("authModal").classList.remove("hidden");
@@ -387,7 +401,7 @@ async function submitRecovery() {
   }
 }
 
-function hideAuth() { $("authModal").classList.add("hidden"); }
+function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden"); }
 
 /** 拿到令牌之后的固定动作：落地凭据、重取身份与数据、收起这层。
  *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
@@ -1574,19 +1588,25 @@ async function boot() {
   $("ctxRange").value = pref.contextWindow;
   $("ctxVal").textContent = pref.contextWindow;
 
-  /* 这个顺序就是这次改动的全部意义：本机有没有令牌是同步就知道的事，原先却要等
-     loadWho() 走一趟隧道拿回 401 才挡屏，中间那 0.5~2 秒用户看到的是空聊天界面
-     加一个空白模型框——"闪一下才出注册页"说的就是它。 */
-  if (!pref.token) showAuth("register");
+  /* 第一屏只能是中性层：本机有没有令牌是同步就知道的事，但"这枚令牌还有效吗"
+     必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
+     先看到空聊天外壳加一个空白模型框，等 401 回来才弹层——手机上那个
+     「1 → 3 → 2」的闪序就是它。现在不问完不露任何东西。 */
+  showAuthPending();
+  let unreachable = false;
   try {
     await loadWho();          // 先知道自己是谁：角色决定下面哪些面存在、哪些按钮该收起来
     await loadServerData();
   } catch (e) {
-    if (!needsAuth(e)) setStatus("后端连接失败：" + e.message, true);
+    if (!needsAuth(e)) {
+      unreachable = true;
+      setStatus("后端连接失败：" + e.message, true);
+    }
   }
-  // 认不出人才挡屏。放在 catch 之后是有意的：后端连不上（503/断网）时弹一个
-  // 只会失败的登录框，等于把"服务没起来"伪装成"你没登录"。
-  if (state.me) hideAuth();          /* 令牌有效，含冷启动先弹了注册层那一路 */
+  // 认不出人才挡屏。连不上（503/断网）时弹一个只会失败的登录框，等于把
+  // "服务没起来"伪装成"你没登录"——所以那一路露出外壳和上面那句话。
+  if (state.me) hideAuth();          /* 令牌有效，含冷启动先盖了中性层那一路 */
+  else if (unreachable) hideAuth();
   else showAuth(pref.token ? "login" : "register");   /* 有令牌却被拒才换登录面；没令牌的仍停在注册 */
   renderMessages();
   syncPersonaChip();

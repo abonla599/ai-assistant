@@ -280,6 +280,10 @@
     <div class="auth-inner">
       <div class="auth-brand"><img src="icon.png" alt=""><span>AI 助手</span></div>
 
+      <!-- 冷启动的第一句：先问服务端「我是谁」，中间那半秒到两秒既不露表单也不露
+           聊天外壳。三条出路（认出人 / 要凭据 / 连不上）都会摘掉这一态。 -->
+      <p class="auth-pending" id="authPending">正在确认身份…</p>
+
       <form class="auth-form" id="authForm" autocomplete="on">
         <p class="auth-sub" id="authSub">登录后继续；还没有账号就点下面的「立即注册」。</p>
         <div class="auth-field">
