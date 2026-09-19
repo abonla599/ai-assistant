@@ -32,6 +32,55 @@ def test_calculator_forbidden():
     assert "禁止" in result or "✗" in result
 
 
+def test_calculator_does_not_eval_the_expression():
+    """结构锁：表达式不许交给 eval。
+
+    黑名单是按子串砍的（`__`/`os`/`sys`…），而解释器看到的却是整条字符串——这种
+    "过滤与执行不对称"的写法每加一个合法需求就要再赌一次。AST 白名单把赌局取消：
+    不认识的节点一律拒，默认拒绝而不是默认允许。
+    """
+    import ast as _ast
+    import inspect
+
+    from app.tools import builtin_tools
+
+    src = inspect.getsource(builtin_tools.calculator)
+    used = {n.func.id for n in _ast.walk(_ast.parse(src))
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)}
+    assert "eval" not in used and "exec" not in used, "calculator 又回到 eval 了"
+
+
+def test_calculator_supports_power_operator():
+    """`2**10` 是数学，不是危险字符。旧实现那条"禁止连续运算符"的正则把它砍了。"""
+    result = execute_tool("calculator", {"expression": "2**10"})
+    assert "✓" in result, result
+    assert "1024" in result
+
+
+def test_calculator_allows_math_names_that_happen_to_contain_blocked_substrings():
+    """`math.cos` 里含 "os"，于是被子串黑名单误杀——而 hint 明说支持 math 函数。
+
+    白名单按"节点是什么"判断，就不会因为一个函数名里恰好有两个字母而说谎。
+    """
+    result = execute_tool("calculator", {"expression": "math.cos(0)"})
+    assert "✓" in result, result
+    assert "1.0" in result
+
+
+def test_calculator_refuses_work_that_would_blow_up_the_context():
+    """`math.factorial(200000)` 能算，但结果约 98 万位数字，会整块塞进模型上下文。
+
+    限制必须落在**求值之前**（看参数大小），不能算完再嫌大——那样 CPU 已经付过了。
+    今天这条是红的，但不是因为没拦住：CPython 3.11 的 int→str 4300 位上限在
+    `str(result)` 时替我们抛了 ValueError，属于"意外正确"。所以断言要求一句
+    点名上限的拒绝，而不是任何一句报错。
+    """
+    result = execute_tool("calculator", {"expression": "math.factorial(200000)"})
+    assert "✗" in result, f"超大参数没有被拒绝：{result[:80]}"
+    assert "上限" in result or "过大" in result, f"拒绝的理由不是参数上限：{result[:80]}"
+    assert len(result) < 500, "结果本身变成了上下文炸弹"
+
+
 @pytest.mark.skip(reason="依赖公网 DDGS 且搜索结果不确定，不适合当回归锁")
 def test_web_search():
     result = execute_tool("web_search", {"query": "Python"})

@@ -8,7 +8,9 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from app.sandbox.sandbox_manager import SandboxManager
+import ast
 import math
+import operator
 import re
 import time
 from app.tools.registry import register_tool, tools_registry
@@ -32,26 +34,85 @@ sandbox = SandboxManager()
 )
 
 def calculator(expression: str) -> ToolResponse:
-    # 允许的字符和模式检查
-    allowed_chars = set("0123456789+-*/().% ^<>=!|&")
-    
-    # 简单过滤危险内置函数
-    if any(forbidden in expression for forbidden in ['__', 'import', 'os', 'sys', 'subprocess']):
-        return ToolResponse(False, error="表达式包含禁止的操作", hint="仅支持基本数学运算和 math 函数")
-
-    # 预检查：不允许连续的运算符（如 ++, --, +-, etc.）
-    if re.search(r'[+\-*/%]\s*[+\-*/%]', expression):
+    # 连续运算符：`2++3` 在 Python 里其实合法（等于 5），模型写成这样几乎总是它自己
+    # 也没想清楚，与其替它猜不如退回重写。`**` 不在这条规则里——那是乘方。
+    if re.search(r"[+\-/%]\s*[+\-/%]", expression):
         return ToolResponse(False, error="语法错误", hint="请提供合法的数学表达式，如 2+3*4")
 
     try:
-        import math
-        safe_dict = {"__builtins__": None, "math": math}
-        result = eval(expression, safe_dict, {})
-        return ToolResponse(True, data=result)
+        tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         return ToolResponse(False, error="语法错误", hint="请提供合法的数学表达式，如 2+3*4")
-    except Exception as e:
-        return ToolResponse(False, error=str(e), hint="检查表达式或尝试简化")
+
+    try:
+        return ToolResponse(True, data=_value_of(tree.body))
+    except _Refusal as e:
+        return ToolResponse(False, error=str(e),
+                            hint="仅支持四则运算、乘方，以及白名单内的 math 函数")
+
+
+class _Refusal(ValueError):
+    """表达式里有白名单之外的东西。拒绝是默认分支，不是例外分支。"""
+
+
+_MATH_FUNCTIONS = {"sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt",
+                   "log", "log2", "log10", "exp", "pow", "factorial", "ceil", "floor"}
+_MATH_CONSTANTS = {"pi", "e", "tau", "inf"}
+_BIN_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+            ast.Mod: operator.mod, ast.Pow: operator.pow}
+
+# 上限落在求值之前。算完再嫌大，CPU 已经付过了；而一个百万位的整数即使能算出来，
+# 也会整块进模型上下文。
+_MAX_ARG = 1000
+_MAX_EXPONENT = 64
+
+
+def _value_of(node):
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return node.value
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _value_of(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _value_of(node.left), _value_of(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > _MAX_EXPONENT:
+            raise _Refusal(f"指数过大：上限是 {_MAX_EXPONENT}")
+        try:
+            return _BIN_OPS[type(node.op)](left, right)
+        except ZeroDivisionError:
+            raise _Refusal("除数为零")
+        except OverflowError:
+            raise _Refusal("结果溢出")
+
+    if isinstance(node, ast.Attribute):
+        if not (isinstance(node.value, ast.Name) and node.value.id == "math"):
+            raise _Refusal("只能读 math 模块下的常量")
+        if node.attr not in _MATH_CONSTANTS:
+            raise _Refusal(f"math.{node.attr} 不在白名单里")
+        return getattr(math, node.attr)
+
+    if isinstance(node, ast.Call):
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
+                and fn.value.id == "math"):
+            raise _Refusal("只能调用 math 模块下的函数")
+        if fn.attr not in _MATH_FUNCTIONS:
+            raise _Refusal(f"math.{fn.attr} 不在白名单里")
+        if node.keywords:
+            raise _Refusal("不支持关键字参数")
+        args = [_value_of(a) for a in node.args]
+        for arg in args:
+            if abs(arg) > _MAX_ARG:
+                raise _Refusal(f"参数过大：math.{fn.attr} 的数值上限是 {_MAX_ARG}")
+        try:
+            return getattr(math, fn.attr)(*args)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise _Refusal(f"math.{fn.attr} 调用失败：{e}")
+
+    raise _Refusal("表达式包含不支持的写法")
 
 # ---------- 搜索引擎工具 ----------
 @register_tool(
