@@ -74,4 +74,68 @@ public class ShellEventsTest {
                 ShellEvents.fromOpenUri("assistant://open/reminder:r-abc12345678"));
         assertNull(ShellEvents.fromOpenUri("assistant://open/reminder:hacked'));x();//"));
     }
+
+    /* ---------------------------------------------------------------- 拒绝原因交给网页
+     * Theme.NoDisplay 的 activity 全程没有窗口，Android 12 起这类进程的 Toast 可能整个不显示，
+     * 而"分享 >10MB 要有明确拒绝提示"（spec §9 第 6 条）不能只靠一条可能被掐的 Toast。
+     * 于是拒绝走桥：事件里只有 SharePolicy 枚举出来的那几个固定值，没有外部文本。 */
+
+    @Test public void rejectionEventsCarryOnlyTheFixedCodes() {
+        assertEquals("{\"type\":\"share_rejected\",\"id\":\"too_large\"}",
+                ShellEvents.shareRejected("too_large"));
+        assertEquals("{\"type\":\"share_rejected\",\"id\":\"text_too_large\"}",
+                ShellEvents.shareRejected("text_too_large"));
+        assertEquals("{\"type\":\"share_rejected\",\"id\":\"unsupported_mime\"}",
+                ShellEvents.shareRejected("unsupported_mime"));
+        assertEquals("{\"type\":\"share_rejected\",\"id\":\"no_stream\"}",
+                ShellEvents.shareRejected("no_stream"));
+        assertEquals("{\"type\":\"share_rejected\",\"id\":\"read_failed\"}",
+                ShellEvents.shareRejected("read_failed"));
+    }
+
+    /** 白名单之外没有第二种码：文件名、正文、URI 这些外部字符串一律进不来。 */
+    @Test public void refusalCarriesNothingAnOutsideAppCouldWrite() {
+        assertNull(ShellEvents.shareRejected(null));
+        assertNull(ShellEvents.shareRejected(""));
+        assertNull(ShellEvents.shareRejected("ok"));                       // 收下不是拒绝
+        assertNull(ShellEvents.shareRejected("TOO_LARGE"));                // 大小写不算同一个码
+        assertNull(ShellEvents.shareRejected("'));alert(1;//xxxxxxxx"));
+        assertNull(ShellEvents.shareRejected("../../etc/passwd"));
+        assertNull(ShellEvents.shareRejected("我的合同.pdf"));              // 外部文本再合法也不是码
+    }
+
+    /* ---------------------------------------------------------------- 两条入口形状一个判据
+     * 通知/桌面组件走 extra open_from，静态快捷方式只能走 android:data。
+     * data 能不能被系统的 XML 解析器读出来尚未实机验证，所以两条都要认，
+     * 而且认的还是同一套白名单——不在 URI 那侧另立规矩。 */
+
+    @Test public void launchExtrasFoldBothShapesIntoOneJudge() {
+        assertEquals("{\"type\":\"open\",\"id\":\"camera\"}",
+                ShellEvents.fromLaunchExtras("camera", null));
+        assertEquals("{\"type\":\"open\",\"id\":\"camera\"}",
+                ShellEvents.fromLaunchExtras(null, "assistant://open/camera"));
+        // 两个形状同时在场时 extra 优先（那是我们自己写的 PendingIntent，更可信）
+        assertEquals("{\"type\":\"open\",\"id\":\"new_chat\"}",
+                ShellEvents.fromLaunchExtras("new_chat", "assistant://open/camera"));
+        assertNull(ShellEvents.fromLaunchExtras(null, null));
+        assertNull(ShellEvents.fromLaunchExtras("", ""));
+        assertNull(ShellEvents.fromLaunchExtras("settings", "assistant://open/settings"));
+        assertNull(ShellEvents.fromLaunchExtras("'));alert(1;//", "assistant://open/'));alert(1;//"));
+    }
+
+    /** 启动器/ROM 在 URI 尾部加点东西（尾斜杠、query）不该让整条快捷方式失效。 */
+    @Test public void trailingSlashOrQueryOnTheDataUriDoesNotKillTheShortcut() {
+        assertEquals("{\"type\":\"open\",\"id\":\"camera\"}",
+                ShellEvents.fromOpenUri("assistant://open/camera/"));
+        assertEquals("{\"type\":\"open\",\"id\":\"new_chat\"}",
+                ShellEvents.fromOpenUri("assistant://open/new_chat?from=icon"));
+        assertEquals("{\"type\":\"open\",\"id\":\"camera\"}",
+                ShellEvents.fromOpenUri("assistant://open/camera#icon"));
+        assertEquals("{\"type\":\"open\",\"id\":\"camera\"}",
+                ShellEvents.fromOpenUri("  assistant://open/camera  "));
+        // 折完还是走同一个白名单：多一段路径也不是"认识的值"
+        assertNull(ShellEvents.fromOpenUri("assistant://open/camera/extra"));
+        assertNull(ShellEvents.fromOpenUri("assistant://open/"));
+        assertNull(ShellEvents.fromOpenUri("assistant://open"));
+    }
 }

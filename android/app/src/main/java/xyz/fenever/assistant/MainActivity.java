@@ -174,6 +174,16 @@ public class MainActivity extends Activity {
         // 因此即便 targetSdk 34 也不必给 registerReceiver 传 RECEIVER_EXPORTED 标志。
         registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
 
+        // 静态快捷方式那条 XML 链路（android:data 能不能被系统解析器读出来）本机没实机可证，
+        // 所以冷启动自检一次：读不出参数就用 Java 建的动态快捷方式补上。那是几次 binder 调用，
+        // 扔后台线程——首屏时间不该由长按菜单里那两个入口买单。
+        final Context appContext = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                ShortcutFallback.verifyAndRepair(appContext);
+            }
+        }, "shortcut-check").start();
+
         webview.loadUrl(BuildConfig.APP_URL);
     }
 

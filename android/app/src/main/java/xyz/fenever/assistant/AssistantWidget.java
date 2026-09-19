@@ -46,11 +46,16 @@ public class AssistantWidget extends AppWidgetProvider {
      * 它的 onReceive 只把 ACTION_APPWIDGET_* 转成回调，其余动作直接丢掉。
      * 所以清单里声明 ACTION_DATE_CHANGED / TIME_CHANGED / TIMEZONE_CHANGED 只解决了投递，
      * 接住它必须在这里自己写——不然早上八点之后组件上还挂着昨天的那一列。
+     *
+     * <p>空意图在调 super【之前】就挡掉：父类实现的第一句就是 {@code intent.getAction()}，
+     * 传 null 进去是它抛 NPE，我们这一侧的 {@code action == null} 判断根本轮不到。
+     * 空意图也没有任何动作可转，直接返回不影响 APPWIDGET_UPDATE 那条正常链路。
      */
     @Override
     public void onReceive(Context context, Intent intent) {
+        if (intent == null) return;
         super.onReceive(context, intent);              // ACTION_APPWIDGET_UPDATE 由它转成 onUpdate
-        String action = intent == null ? null : intent.getAction();
+        String action = intent.getAction();
         if (Intent.ACTION_DATE_CHANGED.equals(action)
                 || Intent.ACTION_TIME_CHANGED.equals(action)
                 || Intent.ACTION_TIMEZONE_CHANGED.equals(action)) {

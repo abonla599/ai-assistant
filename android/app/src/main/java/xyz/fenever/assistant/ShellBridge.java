@@ -112,16 +112,19 @@ public final class ShellBridge {
         });
     }
 
-    /** 冷启动带来的 extra（pending_share / open_from）转成事件；非法输入静默丢。 */
+    /** 冷启动带进来的 extra（点通知、从分享面板进来、分享被拒）转成事件；非法输入静默丢。 */
     public void queueStartupEvent(Intent intent) {
         if (intent == null) return;
         event(ShellEvents.share(intent.getStringExtra("pending_share")));
+        // 拒绝原因走桥交给网页画：ShareActivity 是 NoDisplay、没有窗口，Android 12+ 的
+        // 文字 Toast 对这种进程可能被系统掐掉，不能只靠那一条。值只有 SharePolicy 那五个
+        // 固定码，别的 App 想塞文件名进来也塞不进（ShellEvents.shareRejected 不认）。
+        event(ShellEvents.shareRejected(intent.getStringExtra(ShareActivity.EXTRA_SHARE_REFUSED)));
         // open_from 有两种形状：通知/桌面组件用 extra（Java 侧建的 PendingIntent，想放什么都有），
         // 静态快捷方式只能放 android:data（见 res/xml/shortcuts.xml 的注释）。两种都折进
         // 同一个白名单，谁也不给第二条放行规则。
-        String open = ShellEvents.fromOpenFrom(intent.getStringExtra("open_from"));
-        if (open == null) open = ShellEvents.fromOpenUri(intent.getDataString());
-        event(open);
+        event(ShellEvents.fromLaunchExtras(
+                intent.getStringExtra("open_from"), intent.getDataString()));
     }
 
     /** 页面没加载完就 evaluateJavascript 会静默丢失，所以先攒着（Task 5 的「排队」）。 */

@@ -1,10 +1,12 @@
 package xyz.fenever.assistant.core;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -15,6 +17,10 @@ import java.util.regex.Pattern;
 
 /**
  * 系统分享进来的文件队列：字节落 {@code dir/<id>}，元数据落 {@link Io}（生产是 SharedPreferences）。
+ *
+ * <p>两类件走同一套规则：{@link #put} 收别人给的文件流，{@link #putText} 把一段纯文本
+ * 也落成一个小文件。id、30 分钟 TTL、孤儿认领、consume 即删、512KB 分块对两者完全相同，
+ * 所以网页只有一套代码。
  *
  * <p>不 import 任何 {@code android.*}，所以能在 CI 里跑真 JVM 单测。{@code dir} 由调用方给
  * （生产传 {@code context.getCacheDir()/shares}），路径永远是自己拼的，绝不接受外部路径片段。
@@ -41,6 +47,16 @@ public final class ShareInbox {
      * 迟早有一处会漂，漂了就成了「入口收得下、队列说太大」这种只在真机上半夜出现的错。
      */
     public static final long MAX_BYTES = 10L * 1024 * 1024;
+
+    /**
+     * 纯文本分享的闸门，对齐 backend/app/core/uploads.py:26 的 {@code MAX_TEXT_BYTES = 1MB}
+     * ——文本/代码那条通道就收 1MB，给到 10MB 只会让一段超长笔记在服务端被截断或拒收，
+     * 而拒收发生在上传那一步时，用户看到的是「发了个附件然后报错」。
+     */
+    public static final long MAX_TEXT_BYTES = 1024L * 1024L;
+
+    /** 文本件的类型：与清单 intent-filter 里那一条 {@code text/plain} 同一个字面值。 */
+    public static final String TEXT_MIME = "text/plain";
 
     /** 分享件 30 分钟即弃：没登录就被分享进来、或用户切走了不看，都不该一直占着 cache。 */
     private static final long TTL_MILLIS = 30L * 60_000L;
@@ -146,6 +162,29 @@ public final class ShareInbox {
 
     public boolean put(String id, InputStream in, String name, String mime, long size) {
         return put(id, in, name, mime, size, System.currentTimeMillis());
+    }
+
+    /**
+     * 纯文本分享：把一段 {@code EXTRA_TEXT} 落成一个 text/plain 小文件。
+     *
+     * <p>别的 App 分享文字时基本只给 {@code EXTRA_TEXT}、不给 {@code EXTRA_STREAM}，
+     * 走 {@link #put} 那条路等于把这类分享全拒了。这里刻意【不另开一条只读文本的旁路】：
+     * 转成字节后交给同一个 {@code put}，于是 id 白名单、30 分钟 TTL、孤儿认领、
+     * consume 即删、分块读这些规则对文本与图片是同一套，网页那边也一套代码。
+     *
+     * <p>按 UTF-8 的【字节数】把 1MB 这道闸（{@link #MAX_TEXT_BYTES}），不是按 char 数：
+     * 汉字 3 字节，后端截断与拒收看的都是字节。
+     */
+    public boolean putText(String id, String text, String name) {
+        return putText(id, text, name, System.currentTimeMillis());
+    }
+
+    /** 返回 false = 文本为空、字节数超 1MB、或 id 非法（{@link #put} 那套判据一个不落地都用上）。 */
+    public synchronized boolean putText(String id, String text, String name, long addedAt) {
+        if (text == null) return false;
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length == 0 || bytes.length > MAX_TEXT_BYTES) return false;
+        return put(id, new ByteArrayInputStream(bytes), name, TEXT_MIME, bytes.length, addedAt);
     }
 
     /** 返回 false = id 非法、声明体积超 10MB、或流本身读不完/读超。失败不留半成品文件。 */

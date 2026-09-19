@@ -11,7 +11,12 @@
 
      android:targetPackage / targetClass 把 applicationId 与包名【第二次】写了一遍：
      改包名时这里要同步改，漏了的表现是"点了快捷方式没反应"，不崩也不报错。
-     留字面量是因为 shortcuts.xml 没有 BuildConfig 那种派生渠道。 -->
+     留字面量是因为 shortcuts.xml 没有 BuildConfig 那种派生渠道。
+
+     这个文件仍然是一次赌注（本机没有实机可证 android:data 被不被解析），所以 v0.13 之后
+     加了不依赖它的两道兜底：接收侧 ShellEvents.fromLaunchExtras 把 extra 与 data 两种形状
+     折进同一个白名单判据；冷启动时 ShortcutFallback 读回系统解析结果，发现参数丢了
+     （或整个文件被拒）就用 Java 建的动态快捷方式补上缺的那几条。两条都不经过这个 XML。 -->
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
         android:shortcutId="open_camera"

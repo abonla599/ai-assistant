@@ -160,4 +160,82 @@ public class ShareInboxTest {
         inbox.put("s0123456789ab", data("x"), "   ", "image/png", 1);
         assertEquals("shared", inbox.pending().get(0).get("name"));
     }
+
+    /* ---------------------------------------------------------------- 纯文本分享
+     * 别的 App 分享文字时通常只给 EXTRA_TEXT、不给 EXTRA_STREAM，所以文本要能落成一个小文件，
+     * 走【同一套】id、TTL 与消费规则（而不是另开一条只读文本的旁路）。
+     * 体积上限跟的是 backend/app/core/uploads.py:26 的 MAX_TEXT_BYTES = 1MB，不是那 10MB。 */
+
+    @Test public void textBecomesAPlainFileUnderTheSameIdAndCleanupRules() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+        byte[] utf8 = "第一段笔记".getBytes(StandardCharsets.UTF_8);
+
+        assertTrue(inbox.putText("s0123456789ab", "第一段笔记", "shared-note.txt"));
+
+        assertEquals(1, inbox.pending().size());
+        Map<String, Object> row = inbox.pending().get(0);
+        assertEquals("shared-note.txt", row.get("name"));
+        assertEquals("text/plain", row.get("mime"));
+        // 记的是 UTF-8 字节数：后端按字节截断，按 char 数记会让附件条显示的大小与实际不符
+        assertEquals((long) utf8.length, row.get("size"));
+        assertArrayEquals(utf8, inbox.chunk("s0123456789ab", 0, 100));
+
+        // 与文件件共用同一条消费路径：读完即删，磁盘上不留残件
+        assertTrue(inbox.consume("s0123456789ab"));
+        assertEquals(0, dir.listFiles().length);
+    }
+
+    @Test public void textSharesExpireOnTheSameThirtyMinuteClock() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+        long t0 = 1_700_000_000_000L;
+        assertTrue(inbox.putText("s0123456789ab", "等会被读走的笔记", "n.txt", t0));
+        inbox.sweepExpired(t0 + 31L * 60_000L);
+        assertTrue(inbox.pending().isEmpty());
+        assertEquals(0, dir.listFiles().length);
+    }
+
+    /** 未登录时分享的文本与图片同命：先当孤儿，第一个 setOwner 的人认领（spec §4 改判）。 */
+    @Test public void orphanTextIsClaimedByTheFirstOwnerJustLikeOrphanFiles() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        assertTrue(inbox.putText("s0123456789ab", "登录前分享的笔记", "n.txt"));
+        assertTrue(inbox.pending().isEmpty());
+        inbox.setOwner("alice");
+        assertEquals(1, inbox.pending().size());
+    }
+
+    @Test public void textIdsGoThroughTheSameWhitelistAndEmptyTextIsNoContent() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+        assertFalse(inbox.putText("../etc/passwd", "x", "n.txt"));
+        assertFalse(inbox.putText("short", "x", "n.txt"));
+        assertFalse(inbox.putText("s0123456789ab", null, "n.txt"));
+        assertFalse(inbox.putText("s0123456789ac", "", "n.txt"));
+        assertEquals(0, dir.listFiles().length);
+        assertTrue(inbox.pending().isEmpty());
+    }
+
+    /** 1MB 这条线：正好收、超一个字节拒，并且拒了不许留下半份文件。
+     *  汉字按 3 字节计，所以「字数没超、字节超」那种情况也必须拦下。 */
+    @Test public void textIsCappedAtTheOnesizeTheBackendAccepts() {
+        assertEquals(1024L * 1024L, ShareInbox.MAX_TEXT_BYTES);
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+
+        assertTrue(inbox.putText("s0123456789ab", repeat('x', (int) ShareInbox.MAX_TEXT_BYTES), "a.txt"));
+        assertFalse(inbox.putText("s0123456789ac", repeat('x', (int) ShareInbox.MAX_TEXT_BYTES + 1), "b.txt"));
+        // 40 万汉字 = 1.2MB 字节，char 数看着还远不到 1MB
+        assertFalse(inbox.putText("s0123456789ad", repeat('笔', 400_000), "c.txt"));
+
+        assertEquals(1, inbox.pending().size());
+        assertEquals("a.txt", inbox.pending().get(0).get("name"));
+        assertEquals(1, dir.listFiles().length);
+    }
+
+    private static String repeat(char c, int times) {
+        StringBuilder sb = new StringBuilder(times);
+        for (int i = 0; i < times; i++) sb.append(c);
+        return sb.toString();
+    }
 }

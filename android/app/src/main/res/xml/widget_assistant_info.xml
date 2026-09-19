@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- AppWidgetProviderInfo（spec §5）。
 
-     updatePeriodMillis=0：系统本来就把它夹到 30 分钟，靠轮询换"今日"既不可靠也白耗电。
-     真正驱动刷新的是三处写入（增/删/到点推进）加开机、跨天、换时区那几条广播，
-     见 AssistantWidget.onReceive 的注释。
+     updatePeriodMillis=1800000（30 分钟，系统允许的最小值；写更小的数也会被夹到这里）。
+     它【不是】"今日"的主要驱动——主要驱动是三处写入（增/删/到点推进）、开机、跨天与
+     换时区那几条广播，见 AssistantWidget.onReceive。30 分钟轮询只当一条兜底：
+     那几条系统广播在个别 ROM 上到底投不投递没在实机上证过，最坏情况是组件上的"今日"
+     晚 30 分钟换新，而不是永远挂着昨天那一列。
+     初稿这里写的是 0（"轮询白费劲"），那是把"没证到的广播"当成了可靠依赖，改掉了。
 
      previewImage 用应用图标：没有它，Android 12 之前的组件选择器里是一片空白。
      不写 previewLayout（那是 API 31 的属性）、也不写 targetCellWidth/Height（API 31）——
@@ -12,7 +15,7 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="180dp"
     android:minHeight="140dp"
-    android:updatePeriodMillis="0"
+    android:updatePeriodMillis="1800000"
     android:initialLayout="@layout/widget_assistant"
     android:previewImage="@mipmap/ic_launcher"
     android:description="@string/widget_description"

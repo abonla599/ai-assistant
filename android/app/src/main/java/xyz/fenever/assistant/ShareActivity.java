@@ -14,11 +14,19 @@ import xyz.fenever.assistant.core.ShareInbox;
 import xyz.fenever.assistant.core.SharePolicy;
 
 /**
- * 系统分享入口（spec §4）：相册/文件里点「分享 → AI 助手」时系统拉起的跳板。
+ * 系统分享入口（spec §4）：相册/文件/别的 App 里点「分享 → AI 助手」时系统拉起的跳板。
  *
  * <p>它自己【不出界面】（清单里是 {@code Theme.NoDisplay}），做完三件事就 finish：
  * 把字节抄进 {@code cacheDir/shares/<新 id>} → 启动 {@link MainActivity} 并带上
  * {@code pending_share=<id>} → 交给网页分块读走。
+ *
+ * <p>两条入口，落进同一个队列、同一套 id 与清理规则：
+ * <ul>
+ *   <li>{@code EXTRA_STREAM}（图片/PDF/文件）→ 流式复制，10MB 闸门；</li>
+ *   <li>只有 {@code EXTRA_TEXT}（分享一段文字时几乎都只给这一条）→ 落成 UTF-8 小文件，
+ *       1MB 闸门（{@code backend/app/core/uploads.py:26} 的文本上限）。
+ *       v0.13 只认上一条，于是清单里声明的 {@code text/plain} 基本白声明。</li>
+ * </ul>
  *
  * <p>为什么字节不直接递给网页：桥只传 id 不传内容（spec §2 铁律①）。分享来的文件名是
  * 外部可控字符串，一旦拼进 {@code evaluateJavascript} 就是一段 JS 注入。
@@ -27,7 +35,7 @@ import xyz.fenever.assistant.core.SharePolicy;
  * <ul>
  *   <li>只接 {@code ACTION_SEND} 的【单条】 EXTRA_STREAM —— {@code SEND_MULTIPLE} 连清单都没声明，
  *       这里再判一次 action 兜住绕进来的调用；</li>
- *   <li>mime 白名单与 10MB 闸门在 {@link SharePolicy}（那部分有 JVM 单测）；</li>
+ *   <li>mime 白名单与体积闸门在 {@link SharePolicy}（那部分有 JVM 单测）；</li>
  *   <li>拷贝走 {@link ShareInbox#put} 的 8KB 缓冲【流式】写：不把整块读进内存，
  *       失败也不留半成品文件。</li>
  * </ul>
@@ -37,6 +45,9 @@ import xyz.fenever.assistant.core.SharePolicy;
  * SecurityException。代价是一个特别慢的 Provider 理论上能把这里卡住。
  */
 public class ShareActivity extends Activity {
+
+    /** 交给网页的 extra 名：值只会是 {@link SharePolicy#code} 那五个固定码之一。 */
+    static final String EXTRA_SHARE_REFUSED = "share_refused";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,9 +73,17 @@ public class ShareActivity extends Activity {
         } catch (RuntimeException notAUri) {
             stream = null;                    // 分享方塞了个不是 Uri 的 Parcelable
         }
+        if (stream != null) {
+            intakeStream(mime, stream);
+            return;
+        }
+        intakeText(mime, textOf(intent));
+    }
 
-        Meta meta = stream == null ? new Meta() : readMeta(stream);
-        SharePolicy.Intake decision = SharePolicy.accept(mime, meta.size, stream != null);
+    /** 文件那一路：查列拿声明体积 → 流式复制进队列 → 带 id 去叫主界面。 */
+    private void intakeStream(String mime, Uri stream) {
+        Meta meta = readMeta(stream);
+        SharePolicy.Intake decision = SharePolicy.accept(mime, meta.size);
         if (decision != SharePolicy.Intake.OK) {
             refuse(decision);
             return;
@@ -87,17 +106,63 @@ public class ShareActivity extends Activity {
             closeQuietly(in);
         }
         if (!stored) {
-            // 走到这里基本只剩两种原因：实际字节超过声明值所暗示的 10MB，或目录建不出来
-            toast("没能收下这个文件，请再分享一次");
-            finish();
+            // 走到这里只剩两种原因：实际字节超过声明值所暗示的 10MB，或目录建不出来
+            refuse(SharePolicy.Intake.READ_FAILED);
             return;
         }
-        openMain(id);
+        if (!openMainWith("pending_share", id)) {
+            toast("文件已经收下了，在助手里打开对话附件区就能看到");   // 队列里的件 30 分钟内不丢
+        }
+        finish();
     }
 
-    /** 带着 id 去叫主界面，然后收掉自己这个不出界面的跳板。 */
-    private void openMain(String id) {
-        Intent open = new Intent(this, MainActivity.class).putExtra("pending_share", id);
+    /**
+     * 纯文本那一路：{@code EXTRA_TEXT} 转成 UTF-8 字节后交给同一个队列。
+     *
+     * <p>不给它一条单独的"文本直达网页"通道是刻意的：走 {@link ShareInbox#putText} 之后，
+     * id 白名单、30 分钟 TTL、孤儿认领、consume 即删、512KB 分块这些规则对文字与图片
+     * 完全同一套，网页也一套代码（拿到 text/plain 的 Blob 走现有 {@code POST /v1/uploads}）。
+     */
+    private void intakeText(String mime, String text) {
+        SharePolicy.Intake decision = SharePolicy.acceptText(mime, text);
+        if (decision != SharePolicy.Intake.OK) {
+            refuse(decision);
+            return;
+        }
+        String id = SharePolicy.newId();
+        String name = SharePolicy.displayName(null, ShareInbox.TEXT_MIME, System.currentTimeMillis());
+        ShareInbox inbox = new ShareInbox(new File(getCacheDir(), "shares"), PrefsIo.shares(this));
+        if (!inbox.putText(id, text, name)) {
+            refuse(SharePolicy.Intake.READ_FAILED);
+            return;
+        }
+        if (!openMainWith("pending_share", id)) {
+            toast("文字已经收下了，在助手里打开对话附件区就能看到");
+        }
+        finish();
+    }
+
+    /**
+     * {@code EXTRA_TEXT} 可能是 {@code SpannedString} 而不是 {@code String}：
+     * {@code getStringExtra} 对前者直接回 null（等于把能收的分享判成没内容），
+     * 所以按 CharSequence 取再转字符串。
+     */
+    private String textOf(Intent intent) {
+        try {
+            CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            return text == null ? null : text.toString();
+        } catch (RuntimeException weird) {
+            return null;                        // 分享方给了个读不动的 Parcelable
+        }
+    }
+
+    /**
+     * 带着一条 extra 去叫主界面，然后收掉自己这个不出界面的跳板。
+     *
+     * @return false 表示根本没叫开——这时网页那侧的提示也送不到，只剩 Toast 那一条路
+     */
+    private boolean openMainWith(String key, String value) {
+        Intent open = new Intent(this, MainActivity.class).putExtra(key, value);
         // NEW_TASK：从别的 App 的任务栈里进来，没有它 startActivity 直接抛；
         // CLEAR_TOP + SINGLE_TOP：助手已经开着时复用那个 WebView——重建它等于把正聊到
         // 一半的对话、正在流式输出的回答整个丢掉，extras 改走 MainActivity.onNewIntent。
@@ -106,26 +171,28 @@ public class ShareActivity extends Activity {
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         try {
             startActivity(open);
+            return true;
         } catch (Exception cannotOpen) {
-            toast("文件已经收下了，在助手里打开对话附件区就能看到");   // 队列里的件 30 分钟内不丢
+            return false;
         }
-        finish();
-    }
-
-    private void refuse(SharePolicy.Intake reason) {
-        toast(message(reason));
-        finish();
     }
 
     /**
-     * 用 Toast 而不是弹框：这个 activity 按硬约束不出界面。
+     * 拒绝走【两条互不依赖】的路：Toast 即时一句，同时把固定码交给网页画。
      *
-     * <p>残余风险如实写在这里：Android 12 起系统会掐掉【后台应用】的文字 Toast，而
-     * NoDisplay 的 activity 全程没有窗口——这条提示在 12+ 上有可能根本不显示。
-     * 真机验收清单 spec §9 第 6 条（分享 >10MB 要有明确拒绝提示）就是冲着一句"应该能显示"
-     * 来的：在那台机器上点一次才知道成不成立，不成立就要把拒绝改成一个真正有界面的
-     * activity（或让 MainActivity 带一个固定枚举的提示 extra 过去，但那要网页侧配合）。
+     * <p>为什么要补第二条：Android 12 起重绘了 Toast，且官方文档写明文字 Toast 只在
+     * 【应用处于前台】时显示——而这个 activity 按硬约束全程没有窗口，正落在"可能被掐"的那一侧。
+     * 本机没有实机可证它到底显不显示，所以两条都留着：12+ 上 Toast 若被掐，网页那条还在；
+     * 网页还没接这个事件类型时（当前 {@code onShellEvent} 忽略未知 type），11 及以下的
+     * Toast 还在。剩下的那一半只能实机验（spec §9 第 6 条）。
      */
+    private void refuse(SharePolicy.Intake reason) {
+        toast(message(reason));
+        String code = SharePolicy.code(reason);
+        if (code != null) openMainWith(EXTRA_SHARE_REFUSED, code);
+        finish();
+    }
+
     private void toast(String text) {
         Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
     }
@@ -136,8 +203,13 @@ public class ShareActivity extends Activity {
             case TOO_LARGE:
                 return "太大了，助手的单个附件上限是 "
                         + (ShareInbox.MAX_BYTES / (1024L * 1024L)) + "MB";
+            case TEXT_TOO_LARGE:
+                return "这段文字超过 " + (ShareInbox.MAX_TEXT_BYTES / (1024L * 1024L))
+                        + "MB，助手收不下；请截短后再分享";
+            case READ_FAILED:
+                return "没能收下这次分享的内容，请再分享一次";
             case NO_STREAM:
-                return "这条分享里只有文字、没有文件；要发文字请直接粘贴到输入框";
+                return "这条分享里既没有文件也没有文字；要发文字请直接粘贴到输入框";
             case UNSUPPORTED_MIME:
             default:
                 return "助手收文字、图片和 PDF，这一种格式收不下";

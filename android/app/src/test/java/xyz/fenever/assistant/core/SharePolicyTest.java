@@ -1,7 +1,9 @@
 package xyz.fenever.assistant.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.HashSet;
@@ -130,5 +132,90 @@ public class SharePolicyTest {
         assertTrue(name.indexOf('/') < 0);
         assertTrue(name.indexOf('\\') < 0);
         assertNotEquals("shared-7.", name.substring(name.length() - 1));
+    }
+
+    /* ---------------------------------------------------------------- EXTRA_TEXT 那一路
+     * 只给 EXTRA_TEXT、不给 EXTRA_STREAM 才是"分享一段文字"的常态，所以判据要认这条；
+     * 而 1MB 这个数字跟的是 backend/app/core/uploads.py:26，不是图片那 10MB。 */
+
+    @Test public void plainTextWithoutAStreamIsAValidShare() {
+        assertEquals(SharePolicy.Intake.OK, SharePolicy.acceptText("text/plain", "一段笔记"));
+        assertEquals(SharePolicy.Intake.OK, SharePolicy.acceptText("TEXT/PLAIN; charset=utf-8", "x"));
+        // 有的 App 连类型都不填（mime 为 null 或空串），那时 EXTRA_TEXT 就是全部内容
+        assertEquals(SharePolicy.Intake.OK, SharePolicy.acceptText(null, "x"));
+        assertEquals(SharePolicy.Intake.OK, SharePolicy.acceptText("", "x"));
+        assertEquals(SharePolicy.Intake.OK, SharePolicy.acceptText("   ", "x"));
+    }
+
+    @Test public void textSharesStillHonourTheMimeWhitelist() {
+        // 类型说是图片却没给流：那条分享本身是坏的，不要拿文字去顶一个图片附件
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("image/png", "x"));
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("application/pdf", "x"));
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("text/html", "x"));
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("text/uri-list", "x"));
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("*/*", "x"));
+    }
+
+    @Test public void blankOrMissingTextIsStillNoContent() {
+        assertEquals(SharePolicy.Intake.NO_STREAM, SharePolicy.acceptText("text/plain", null));
+        assertEquals(SharePolicy.Intake.NO_STREAM, SharePolicy.acceptText("text/plain", ""));
+        assertEquals(SharePolicy.Intake.NO_STREAM, SharePolicy.acceptText("text/plain", "  \n\t "));
+        // 类型不认识排在内容之前：给 video/mp4 配一段文字，问题出在类型上
+        assertEquals(SharePolicy.Intake.UNSUPPORTED_MIME, SharePolicy.acceptText("video/mp4", null));
+    }
+
+    @Test public void textIsCappedAtOneMegabyteAndCountedInUtf8Bytes() {
+        assertEquals(1024L * 1024L, ShareInbox.MAX_TEXT_BYTES);
+        // 与后端一致：按 UTF-8 字节数算，不按 char 数
+        assertEquals(12L, SharePolicy.utf8Bytes("四个汉字"));
+        assertEquals(1L, SharePolicy.utf8Bytes("x"));
+        assertEquals(0L, SharePolicy.utf8Bytes(""));
+        assertEquals(0L, SharePolicy.utf8Bytes(null));
+        assertEquals(SharePolicy.Intake.OK,
+                SharePolicy.acceptText("text/plain", textOfBytes((int) ShareInbox.MAX_TEXT_BYTES)));
+        assertEquals(SharePolicy.Intake.TEXT_TOO_LARGE,
+                SharePolicy.acceptText("text/plain", textOfBytes((int) ShareInbox.MAX_TEXT_BYTES + 1)));
+    }
+
+    private static String textOfBytes(int bytes) {
+        StringBuilder sb = new StringBuilder(bytes);
+        for (int i = 0; i < bytes; i++) sb.append('x');   // 一个 ASCII 一个字节
+        return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- 交给网页的固定枚举
+
+    /**
+     * Theme.NoDisplay 的 Toast 在 Android 12+ 可能整个不显示（无窗口的进程算后台），
+     * 所以拒绝原因要经桥交给网页画——而事件里只能出现这几个固定值（spec §2 铁律①）。
+     */
+    @Test public void everyRefusalMapsToOneFixedBridgeCode() {
+        assertEquals("too_large", SharePolicy.code(SharePolicy.Intake.TOO_LARGE));
+        assertEquals("text_too_large", SharePolicy.code(SharePolicy.Intake.TEXT_TOO_LARGE));
+        assertEquals("unsupported_mime", SharePolicy.code(SharePolicy.Intake.UNSUPPORTED_MIME));
+        assertEquals("no_stream", SharePolicy.code(SharePolicy.Intake.NO_STREAM));
+        assertEquals("read_failed", SharePolicy.code(SharePolicy.Intake.READ_FAILED));
+        // 收下了就不是拒绝：那条链路走的是 pending_share，不该同时报"被拒"
+        assertNull(SharePolicy.code(SharePolicy.Intake.OK));
+        assertNull(SharePolicy.code(null));
+    }
+
+    @Test public void theCodeWhitelistIsExactlyTheRefusalSet() {
+        for (SharePolicy.Intake reason : SharePolicy.Intake.values()) {
+            String code = SharePolicy.code(reason);
+            if (reason == SharePolicy.Intake.OK) {
+                assertFalse("OK 不是拒绝原因", SharePolicy.isCode(code));
+                continue;
+            }
+            assertTrue("码没过 IDs 白名单: " + code, SharePolicy.isCode(code));
+            assertTrue("码要能安全拼进事件与路径: " + code, IDs.valid(code));
+        }
+        assertFalse(SharePolicy.isCode(null));
+        assertFalse(SharePolicy.isCode(""));
+        assertFalse(SharePolicy.isCode("ok"));
+        // 外部可控的东西一律不算码
+        assertFalse(SharePolicy.isCode("'));alert(1;//xxxx"));
+        assertFalse(SharePolicy.isCode("text/plain"));
+        assertFalse(SharePolicy.isCode("TOO_LARGE"));
     }
 }

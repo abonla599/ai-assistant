@@ -41,12 +41,16 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
-        <!-- 系统分享入口（spec §4）：相册/文件里「分享 → AI 助手」落在这里。
+        <!-- 系统分享入口（spec §4）：相册/文件/别的 App 里「分享 → AI 助手」落在这里。
              NoDisplay 意味着它全程不出界面，所以 onCreate 的每条路径都要 finish()。
              exported=true 是功能要求——启动它的是别的 App，Android 12 起缺这个属性
              隐式启动直接被拒。
              只声明 ACTION_SEND：SEND_MULTIPLE 不接（一次一条既够用户表达，也免得一次
-             把 10MB 的队列塞满；真要发多张就分享三次，每次各带一个 id）。 -->
+             把 10MB 的队列塞满；真要发多张就分享三次，每次各带一个 id）。
+             text/plain 这一条走的是 EXTRA_TEXT（别的 App 分享文字时几乎不给 EXTRA_STREAM）：
+             入口把它落成 1MB 以内的 UTF-8 小文件，与图片共用同一套 id、TTL 与消费规则。
+             被拒时它也会启动 MainActivity 并带 share_refused=<固定码>——NoDisplay 进程没有窗口，
+             Android 12+ 的文字 Toast 可能被掐，所以那句提示得由网页来画。 -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
@@ -90,11 +94,16 @@
             </intent-filter>
             <!-- "今日"跨天必须换内容。AppWidgetProvider 的默认 onReceive 只认 ACTION_APPWIDGET_*，
                  这三个动作投递进来它什么都不做，所以 AssistantWidget 覆写了 onReceive 来接。
+                 动作串要逐字对上 Java 常量：Intent.ACTION_TIME_CHANGED 的值是
+                 android.intent.action.TIME_SET（名字里有 CHANGED、值里是 SET，就差在这），
+                 照着常量名写成 TIME_CHANGED 的过滤器永远不会被投递，而编译器一声都不吭。
                  这几条是系统级（protected）广播，且落在 Android 8 隐式广播限制的豁免清单里，
-                 清单声明的接收器收得到——但这条只能实机验（spec §9 之外新增的一条）。 -->
+                 清单声明的接收器【应该】收得到——但个别 ROM 会不会投仍然只能实机验，
+                 所以另外给了 updatePeriodMillis=30 分钟这条不依赖广播的兜底，
+                 以及开机重排时顺手刷一次（BootReceiver）。 -->
             <intent-filter>
                 <action android:name="android.intent.action.DATE_CHANGED" />
-                <action android:name="android.intent.action.TIME_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
             <meta-data
