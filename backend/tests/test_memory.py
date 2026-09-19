@@ -80,6 +80,46 @@ def test_update_memory(enforced):
     assert "修改后" in results[0]["content"]
 
 
+def test_summarize_goes_through_the_provider_store(monkeypatch):
+    """摘要不许再硬编码 gpt-3.5-turbo：那是绕过 provider 单源的第二份事实来源。
+
+    MemoryManager 的 self.client 是给**嵌入**用的（api_key + apiyi 代理），摘要一直
+    借用它并写死一个 OpenAI 模型名，等于"界面配的是 DeepSeek，记账记到别人家"，
+    而且那个模型名在代理侧多半根本不存在——失败只打印一行警告就退化成截断。
+    """
+    from types import SimpleNamespace
+
+    from app.core.providers import store as provider_store
+    from app.memory import memory_manager as mm
+
+    built = {}
+    provider_call = {}
+    embed_client_call = {}
+
+    def _fake_client(bucket):
+        def create(**kwargs):
+            bucket.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="一句话摘要"))])
+        return SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setattr(mm, "build_client",
+                        lambda provider: (built.update(provider), _fake_client(provider_call))[1])
+    fake_self = SimpleNamespace(use_local_embed=False, _dummy_embed=False,
+                                client=_fake_client(embed_client_call))
+
+    out = mm.MemoryManager._summarize(fake_self, "我的猫喜欢吃鱼。" * 40)
+
+    assert out == "一句话摘要", f"没走通 provider，退化成截断了：{out[:30]}…"
+    assert built, "摘要仍在使用嵌入客户端，没走 provider 解析"
+    assert embed_client_call == {}, f"摘要还打在嵌入客户端上：{embed_client_call}"
+    expected = provider_store.resolve()
+    assert provider_call.get("model") == expected["model"] != "gpt-3.5-turbo", \
+        f"用的模型是 {provider_call.get('model')}，配置里是 {expected['model']}"
+    assert built["base_url"] == expected["base_url"]
+
+
 def test_decay():
     """衰减走管理员端点、只作用于调用者自己那一份记忆（此处即本机管理员）。"""
     # 添加记忆

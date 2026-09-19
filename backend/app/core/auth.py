@@ -289,6 +289,17 @@ class AuthStore:
         with self._lock:
             return [dict(u) for u in self._users.values()]
 
+    def has_role(self, role: str) -> bool:
+        """库里有没有这个角色的账号——fail-closed 那道门**每个请求**都要问一次。
+
+        刻意不复制记录：list_users() 会给每人新建一份 dict(...)，而一条记录里躺着
+        口令散列和全部令牌哈希，只为读一个 role 字段实在不划算。这里在同一把锁内
+        就地遍历，读到的仍是当下真值——没有缓存，也就没有"停用/删号之后还认旧身份"
+        那一类失效 bug（那正是 list_users 那份拷贝换来的东西，不能省成表外记忆）。
+        """
+        with self._lock:
+            return any(u.get("role") == role for u in self._users.values())
+
     def _new_user_id(self) -> str:
         # 取 id 那处必须重取：两个线程撞上同一个 id 时，
         # `self._users[user_id] = record` 会把已有那个人整条记录覆盖掉——

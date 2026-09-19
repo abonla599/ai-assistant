@@ -113,9 +113,14 @@ def _has_any_identity() -> bool:
 
     这里的 admin 检查只认运维手工写进 users.json 的逃生口：角色永不通过请求
     产生，否则任何人都能给自己提权。
+
+    判定走 has_role 而不是 list_users()：这条在每个受保护请求上都要跑一遍，
+    把整个身份库连口令散列一起拷一份只为读一个字段，纯属白付。拷贝省掉了，
+    实时性一点没省——has_role 在同一把锁里现读，所以删号/停用/手工把某个人的
+    role 改回 user，下一句请求就按新状态回答。这里**不要**加缓存：那道门是
+    fail-closed 的判据，读到过期身份等于把 503 变成放行。
     """
-    return bool(_bootstrap_token()) or any(
-        u.get("role") == "admin" for u in auth_store.list_users())
+    return bool(_bootstrap_token()) or auth_store.has_role("admin")
 
 
 def install_auth(app) -> None:

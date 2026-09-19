@@ -35,16 +35,19 @@ except ImportError:
     auto_weight_adjuster = None
     print("⚠️ auto_weight_adjuster 未安装，实时反馈监听不可用")
 
-# 2. preference_analyzer 和 memory_weight_updater (假设它们在 app 目录下)
+# 2. preference_analyzer：定时任务里唯一真正干活的后台模块。
+#    memory_weight_updater 从前也挂在这个 import 上，但它整个模块只有一个 print，
+#    每 300 秒被调用一次、每轮都印一句"执行记忆权重更新"——而它什么都不改。
+#    现在它只提供一句启动时打印的实话（见该文件的模块文档），不再进定时任务。
 try:
     from app import preference_analyzer
-    from app import memory_weight_updater
     HAS_BG_TASKS = True
 except ImportError as e:
     HAS_BG_TASKS = False
     preference_analyzer = None
-    memory_weight_updater = None
-    print(f"⚠️ 偏好分析/记忆更新模块未找到: {e}")
+    print(f"⚠️ 偏好分析模块未找到: {e}")
+
+from app import memory_weight_updater
 
 # 3. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
 # 注意：如果 preference_analyzer 已经在上面导入成功，这里可以直接从 app.preference_analyzer 导入函数
@@ -207,30 +210,45 @@ from app.session.session_store import SessionStore
 sessions_store = SessionStore()
 
 # ---------- 后台定时任务 ----------
+def run_scheduler_cycle():
+    """跑一轮周期性后台任务。
+
+    单独成一个函数，是为了这一轮能被测试调用：`backend/tests/
+    test_memory_weight_scheduler.py` 用一个 tripwire 钉住"定时器不改权重"。
+    原先整段逻辑埋在一个 while True 里，谁都调不到它，于是那句谎话印了
+    多少个周期都没人能为它写一条断言。
+
+    这里刻意不碰权重：写权重的只有用户反馈与两个显式端点，见
+    `app/memory_weight_updater.py` 的模块文档。
+    """
+    print("--- 开始执行周期性后台任务 ---")
+    if HAS_BG_TASKS and preference_analyzer:
+        # 定时器没有"当前调用者"，所以它不能替某一个人决定归属：
+        # 反馈里出现过谁就重算谁那一份（偏好摘要按人分账，见
+        # preference_analyzer）。原先这里调用的是不带身份的
+        # analyze_and_update_preference()，它把所有人合并成一份
+        # 全站摘要再注入每个人的提示词。
+        preference_analyzer.analyze_all_preferences()
+
+
 def run_scheduler():
     while True:
         try:
-            print("--- 开始执行周期性后台任务 ---")
-            if HAS_BG_TASKS:
-                if preference_analyzer:
-                    # 定时器没有"当前调用者"，所以它不能替某一个人决定归属：
-                    # 反馈里出现过谁就重算谁那一份（偏好摘要按人分账，见
-                    # preference_analyzer）。原先这里调用的是不带身份的
-                    # analyze_and_update_preference()，它把所有人合并成一份
-                    # 全站摘要再注入每个人的提示词。
-                    preference_analyzer.analyze_all_preferences()
-                if memory_weight_updater:
-                    memory_weight_updater.update_memory_weights_from_feedback()
+            run_scheduler_cycle()
             print("--- 周期性后台任务执行完毕 ---")
         except Exception as e:
             print(f"后台任务执行出错: {e}")
         time.sleep(300)
 
 def start_background_scheduler():
+    # 一句话说明权重到底由谁改写。只在启动时印这一次：它描述的是"没有自动衰减"
+    # 这件事，而这件事不会因为又过了 300 秒而变化——按周期印只会让人以为有东西在跑。
+    memory_weight_updater.log_weight_policy()
+
     # 启动偏好分析线程
     bg_thread = threading.Thread(target=run_scheduler, daemon=True)
     bg_thread.start()
-    print("🚀 后台偏好分析定时任务已启动")
+    print("🚀 后台偏好分析定时任务已启动（只重算偏好摘要，不改写记忆权重）")
 
     # 启动反馈文件监听器（仅当 auto_weight_adjuster 可用时）
     if auto_weight_adjuster is not None and FEEDBACK_FILE:

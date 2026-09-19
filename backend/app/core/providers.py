@@ -127,11 +127,28 @@ class ProviderStore:
         return None
 
     def default(self):
+        """「调用方没给 id 时真正会用哪个」的唯一答案（/v1/models 的 default 就是它）。
+
+        只在**可用**的里面挑，判据与 catalog() 给前端的 usable 同一条
+        （looks_placeholder）：此前这里只看 is_default 标记，而前端是
+        `usable.find(p => p.default) || usable[0]`，于是管理员把 ★ 点在一条只填了
+        占位符密钥的配置上时，界面显示的是 B、实际发请求用的是 A——"默认是哪个"
+        有了两个答案。现在前端不再自己挑（见 static/app.js 的 serverDefaultProvider）。
+
+        一个都不可用时仍退回老顺序，好让 resolve() 说出准确那句「缺少有效密钥」，
+        而不是把"配了但没填 key"说成"尚未配置任何模型服务"。
+        """
         with self._lock:
-            for p in self._items:
-                if p.get("is_default"):
-                    return dict(p)
-            return dict(self._items[0]) if self._items else None
+            usable = [p for p in self._items
+                      if not looks_placeholder(p.get("api_key", ""))]
+            for pool in (usable, self._items):
+                if not pool:
+                    continue
+                for p in pool:
+                    if p.get("is_default"):
+                        return dict(p)
+                return dict(pool[0])
+            return None
 
     def resolve(self, provider_id: str = None, legacy_model: str = None) -> dict:
         """按 provider id 取配置；兼容旧的 model 字段；都没有则用默认。"""
@@ -159,6 +176,10 @@ class ProviderStore:
             if existing is None:
                 cleaned["is_default"] = cleaned["is_default"] or not self._items
                 self._items.append(cleaned)
+                # 「最多一颗 ★」是不变式，两条写路径都得守：更新分支清了别人的，
+                # 新增分支不清的话库里能存下两颗，而 default() 只认遍历到的第一颗。
+                if cleaned["is_default"]:
+                    self._clear_default_except(cleaned["id"])
             else:
                 # 未填新密钥时保留原密钥，避免编辑界面回显掩码后被写回
                 if looks_placeholder(cleaned["api_key"]):

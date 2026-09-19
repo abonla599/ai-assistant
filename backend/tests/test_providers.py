@@ -37,6 +37,80 @@ def test_placeholder_key_marks_model_unusable():
     assert "密钥" in entry["reason"]
 
 
+# ---------- 「默认用哪个」只有一份答案 ----------
+# 服务端 ProviderStore.default() 原先只看 is_default 标记，前端那份
+# `usable.find(p => p.default) || usable[0]` 却先看密钥可用性。可用性判据两边都现成
+# （providers.looks_placeholder，catalog() 用它算 usable），所以漂移不是"两种定义"，
+# 而是服务端漏用了一处：管理员给一个填了占位符密钥的 provider 点了 ★，界面就显示
+# 「实际会用 B」而 resolve() 用的是 A（随后要么报错，要么拿 A 的配置去打上游）。
+
+def _store_at(tmp_path, items):
+    """从一份现成的 providers.json 起独立 store，不碰 conftest 那个进程级单例。"""
+    import json
+
+    from app.core.providers import ProviderStore
+
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps(items), encoding="utf-8")
+    return ProviderStore(path=str(path))
+
+
+UNUSABLE_DEFAULT = {
+    "id": "dead-default", "label": "占位默认", "base_url": "https://a.invalid/v1",
+    "api_key": "your-key-here", "model": "gpt-4o", "supports_vision": False,
+    "is_default": True,
+}
+USABLE_OTHER = {
+    "id": "live-other", "label": "真能用", "base_url": "https://b.invalid/v1",
+    "api_key": "sk-real-looking-key-123456", "model": "deepseek-chat",
+    "supports_vision": False, "is_default": False,
+}
+
+
+def test_default_only_picks_among_usable_providers(tmp_path):
+    """default() 与前端同口径：先在有有效密钥的里面挑，才谈得上"默认"。"""
+    from app.core.providers import ProviderError
+
+    store = _store_at(tmp_path, [UNUSABLE_DEFAULT, USABLE_OTHER])
+    assert store.default()["id"] == "live-other"
+    try:
+        resolved = store.resolve()
+    except ProviderError as e:                      # 修好之前这里就抛"缺少有效密钥"
+        raise AssertionError(f"resolve() 仍落到不可用的默认：{e}")
+    assert resolved["id"] == "live-other"
+
+
+def test_resolve_still_names_the_missing_key_when_nothing_is_usable(tmp_path):
+    """一个都不可用时不许改成"尚未配置任何模型服务"——那是另一件事，会让人去重配。"""
+    import pytest
+
+    from app.core.providers import ProviderError
+
+    store = _store_at(tmp_path, [UNUSABLE_DEFAULT,
+                                 {**USABLE_OTHER, "api_key": "填入你的密钥"}])
+    with pytest.raises(ProviderError) as exc:
+        store.resolve()
+    assert "密钥" in str(exc.value)
+
+
+def test_models_endpoint_default_skips_unusable_provider():
+    """接口报给前端的 default 必须是它真正会用的那一个。"""
+    saved = client.post("/v1/providers", json=_payload(api_key="your-key-here")
+                        ).json()["provider"]
+    try:
+        # 走「设为默认」而不是 POST 时带 is_default：后者那条分支不清别人的标记，
+        # 库里能同时躺着两颗 ★，那就不是在测漂移了（那是另一件事）。
+        assert client.post(f"/v1/providers/{saved['id']}/default").status_code == 200
+        data = client.get("/v1/models").json()
+        assert data["default"] == "fake-model", \
+            f"/v1/models 把默认报成了不可用的 {data['default']}"
+        starred = next(m for m in data["models"] if m["id"] == saved["id"])
+        assert starred["default"] is True and starred["usable"] is False, \
+            "★ 标记与「实际会用」是两件事，清单里得同时看得见"
+    finally:
+        client.delete(f"/v1/providers/{saved['id']}")
+
+
 def test_providers_never_leak_plaintext_key():
     saved = client.post("/v1/providers", json=_payload()).json()["provider"]
     body = client.get("/v1/providers").text
@@ -192,3 +266,19 @@ def test_build_client_feeds_that_context_to_httpx(monkeypatch):
     with pytest.raises(Recorder):
         providers.build_client({"api_key": "sk-x", "base_url": "https://api.deepseek.com"})
     assert seen.get("verify") == "SENTINEL", f"httpx 没拿到系统信任锚：{seen}"
+
+
+def test_adding_a_default_provider_clears_the_previous_star():
+    """两颗 ★ 让"默认是哪个"重新变成两个答案，而 default() 只认遍历到的第一颗。
+
+    更新路径会清别人的标记，新增路径不会——这是同一个不变式只写了一半。
+    """
+    before = client.get("/v1/models").json()["models"]
+    start = [m["id"] for m in before if m["default"]]
+    assert len(start) == 1, f"起点就该只有一颗 ★，实际 {start}"
+
+    added = client.post("/v1/providers", json=_payload(is_default=True)).json()["provider"]
+    after = client.get("/v1/models").json()["models"]
+    stars = [m["id"] for m in after if m["default"]]
+    assert len(stars) == 1, f"新增带 is_default 的 provider 后剩 {len(stars)} 颗 ★：{stars}"
+    assert stars == [added["id"]]

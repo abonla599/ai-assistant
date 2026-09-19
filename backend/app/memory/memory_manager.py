@@ -6,6 +6,7 @@ import httpx
 from openai import OpenAI
 
 from app.core.paths import data_root, load_project_env
+from app.core.providers import build_client, store as provider_store
 from app.core.tls import system_ssl_context
 from app.memory.ranking import weighted_rank
 
@@ -165,8 +166,13 @@ class MemoryManager:
         if len(text) <= max_length:
             return text
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+            # 用哪个模型、打哪个地址、花谁的额度，一律由 provider 单源决定。这里原先
+            # 写死 "gpt-3.5-turbo"、还借用**嵌入**那个客户端（api_key + apiyi 代理），
+            # 是全仓最后一处绕过 providers.py 的模型调用：界面配 DeepSeek 时摘要却按
+            # OpenAI 的模型名发出去，多半当场失败，只留一行警告再退化成截断。
+            provider = provider_store.resolve()
+            response = build_client(provider).chat.completions.create(
+                model=provider["model"],
                 messages=[
                     {"role": "system", "content": "将以下内容压缩成一句话，只保留最重要的信息。"},
                     {"role": "user", "content": text}
