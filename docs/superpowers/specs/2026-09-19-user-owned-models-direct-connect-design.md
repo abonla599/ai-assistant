@@ -54,9 +54,17 @@ OPTIONS 预检带 `Access-Control-Request-Headers: authorization,content-type`�
 
 ## 3. 两步协议
 
-今天 `/v1/chat/stream` 一次请求里同时做"组装"和"调模型"，而 `pipeline.py:129-158` 是**服务端驱动的
-多轮工具循环**（调模型 → 执行工具 → 回填 → 再调，最多 `max_turns` 轮）。key 不给服务端，服务端就驱动
-不了这个循环——这是"自带模型不带工具"这条边界的来源，不是偏好。
+**先纠一处本文件初稿说错的话**：初稿写的是"`pipeline.py:129-158` 那个服务端工具循环是边界的来源"。
+核对后不成立——PWA 走的是流式，`main.py:424` 调的是 `streaming.stream_chat(...)`，
+而它**没有 `tools` 参数**（`streaming.py:32-38`）；那个循环只在非流式 `/v1/chat` 的
+`ChatPipeline.process` 里，前端根本不碰。所以**今天 PWA 一个工具都调不到**。
+
+这条改判对本设计有两处影响：① "自带模型不带工具"不是新增的阉割，而是对现状的如实命名，
+A 的代价比初稿估的小；② 但它依赖一个易碎的前提——一旦有人把 tool loop 接进流式
+（那是另一份 P0 清单里的头号项），这条边界立刻从"描述"变成"真限制"，届时必须重开本设计。
+
+`used_memory_ids` 的约束不受影响：召回发生在 `pipe.inject_context()`（`main.py:405`），
+它和调模型是分开的两步，所以"服务端组装、客户端调模型"这个协议本来就成立。
 
 - `POST /v1/chat/prompt {provider, session_id, messages, attachments}`
   → 鉴权 + `_require_session_owner` + 新的 `ChatPipeline.assemble()`（记忆召回、附件拼装、vision 判定）
