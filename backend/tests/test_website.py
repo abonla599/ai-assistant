@@ -93,15 +93,21 @@ def test_invite_code_is_stated_as_not_needed():
 
 
 def test_unavailable_features_stay_in_the_not_now_section():
-    """联网搜索、代码执行、扫描版 PDF 只许出现在「当前未开启」那一节里。"""
-    import re
+    """联网搜索、代码执行、扫描版 PDF 只许出现在「当前未开启」那一节里。
+
+    节的边界按 `<section id="not-now">` 这个标签算，不按「当前未开启」这四个字算：
+    正文里一句"见下面「当前未开启」"的指引会把后者锚点提前，那样 head 就悄悄漏掉了
+    真那一节，"沙箱/支持联网不许出现在正文"这半条就没牙了（Task 3 实拍轮就是这么露馅的）。
+    """
     page = _page()
-    section = re.search(r'当前未开启(.*?)</section>', page, re.S)
-    assert section, "没有「当前未开启」这一节"
-    body = section.group(1)
+    anchor = page.find('<section id="not-now">')
+    assert anchor != -1, "没有「当前未开启」这一节"
+    end = page.find("</section>", anchor)
+    assert end != -1, "「当前未开启」那一节没闭合"
+    body = page[anchor:end]
     for term in ("代码执行", "联网搜索", "扫描版 PDF"):
         assert term in body, f"「{term}」应当在该节里说明"
-    head = page[:section.start()] + page[section.end():]
+    head = page[:anchor] + page[end:]
     for banned in ("沙箱", "支持联网"):
         assert banned not in head, f"「{banned}」被当成现成能力写进了正文"
 
@@ -148,3 +154,62 @@ def test_landing_page_has_the_six_sections():
     page = _page()
     for sid in ("can-do", "shell-only", "start", "not-now", "shots", "faq"):
         assert f'id="{sid}"' in page, f"缺这一节:{sid}"
+
+
+# ---------- 4. 实拍图：存在、被引用、不许把页面压垮 ----------
+
+def test_four_real_screenshots_are_present_and_small():
+    import os
+    from app.web.web_router import SITE_DIR
+    shots = ("img/register.jpg", "img/chat.jpg", "img/memory.jpg", "img/settings.jpg")
+    total = 0
+    for name in shots:
+        path = os.path.join(SITE_DIR, name.replace("/", os.sep))
+        assert os.path.isfile(path), f"缺实拍图：{name}"
+        total += os.path.getsize(path)
+    page = _page()
+    for name in shots:
+        assert name in page, f"{name} 没被页面引用"
+    budget = 600 * 1024
+    assert total < budget, f"四张图合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
+
+
+def test_no_placeholder_left_in_shots():
+    """占位块留着就是"页面还在施工"。Step 3-5 必须把它们换成真 img。"""
+    assert "实拍位" not in _page()
+
+
+def test_image_claim_always_carries_the_vision_qualifier():
+    """「图片」只许出现在带视觉限定的那一行里。
+
+    读图这件事取决于当前模型有没有视觉,不是产品开关:一旦页面上出现一句
+    光秃秃的"发图片它就能读",来的人就会照着做然后发现读不出来。上一轮是靠
+    人眼盯住的,这条把它变成断言——把那句限定删掉,这里立刻红。
+    扫描版 PDF 那条在「当前未开启」节里,它自己就是否定句,不算数。
+    """
+    page = _page()
+    cut = page.find('<section id="not-now">')
+    assert cut != -1, "没有「当前未开启」那一节"
+    for lineno, line in enumerate(page[:cut].splitlines(), 1):
+        if "图片" in line or "拍照" in line:
+            assert "视觉" in line, (
+                f"页面第 {lineno} 行提到「图片/拍照」却没有视觉限定,"
+                f"这句会被读成无条件能读图：{line.strip()[:90]}"
+            )
+    assert "图片" in page[:cut], "整页不再提图片——那这条守卫该跟着改,不是默默放行"
+
+
+# ---------- 5. 打包：spec 里没列目录,冻结版就没有这一页 ----------
+
+def test_pyinstaller_spec_ships_the_site_dir():
+    """这条存在,是因为 `run_backend.spec` 自己的注释写着"这条不会让任何测试变红",
+    而同一形状的 static 缺失崩过一次 EXE 启动。CI 不跑 PyInstaller,所以断言落在
+    spec 文本上：它是构建的真相源,漏了它就该在这里红,而不是等线上 404。"""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(root, "run_backend.spec"), encoding="utf-8") as f:
+        spec = f.read()
+    assert "backend/app/web/site" in spec, "datas 里没带 site/,冻结版 EXE 的 / 会找不到页面"
+    assert "'app/web/site'" in spec or '"app/web/site"' in spec, \
+        "datas 的目标解包路径必须是 app/web/site,和 _site_dir() 的 frozen 分支一致"
+

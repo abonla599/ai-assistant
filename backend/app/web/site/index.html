@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI 智能助手——一个记得住你的在线助手</title>
-<meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆,每个人各用各的。">
+<meta name="description" content="注册就能用的 AI 助手：多模型切换、读你发过去的文件、长期记忆,每个人各用各的。">
 <link rel="stylesheet" href="/site/site.css">
 </head>
 <body>
 
 <header class="hero">
   <h1>AI 智能助手</h1>
-  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,而且每个人各用各的、互不串味。</p>
+  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能读你发过去的文件,而且每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">打开就用（手机浏览器）</a>
     <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">装安卓壳（约 96 KB）</a>
@@ -22,9 +22,8 @@
 <section id="can-do">
   <h2>它现在真能做的</h2>
   <ul class="cards">
-    <li><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型,默认用哪个由服务端定,你不用配任何东西。</p></li>
-    <li><h3>会算数</h3><p>让它算,它走计算器而不是猜一个数:表达式在本机按白名单解析,不执行模型给的原样字符串。</p></li>
-    <li><h3>读你发过去的文件</h3><p>发 PDF、发图片,它会先读内容再回答,不用你把文字抄一遍。图片要当前模型带视觉：可切换的模型以服务端的列表为准,默认那条不带视觉时,在设置里换一个就行。</p></li>
+    <li><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型——清单和「能用几条」都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
+    <li><h3>读你发过去的文件</h3><p>发 PDF、发 txt 或代码文件,它会先把里面的文字读出来再回答,不用你抄一遍。图片不一样：那要当前模型带视觉,而这台服务器现在没有带视觉的模型可用,所以发进去只会收到一句拒绝——下面「当前未开启」那一节写的就是这件事。</p></li>
     <li><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来;哪些记忆在存着,你在设置里能看到、能删。</p></li>
     <li><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
   </ul>
@@ -35,8 +34,8 @@
   <p>下面这三件只有装了那个 96 KB 的壳才有——浏览器拿不到系统通知、分享入口和桌面组件。壳本身只是一个指向本站的地址,里面不含任何口令或密钥,所以服务端改版你不用重装;改壳的这三项功能才要重装。</p>
   <ul class="cards">
     <li><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟到——它不申请精确闹钟权限。</p></li>
-    <li><h3>分享进来</h3><p>在相册或 PDF 上点「分享」→ 选「AI 助手」,文件直接挂到附件栏,不用先存再传。</p></li>
-    <li><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话。</p></li>
+    <li><h3>分享进来</h3><p>在相册或 PDF 上点「分享」→ 选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
+    <li><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话（拍照提问同样要模型带视觉才读得出图）。</p></li>
   </ul>
 </section>
 
@@ -57,6 +56,7 @@
     <li><strong>联网搜索</strong>:代码里有,但这台服务器够不着搜索源,所以它现在给不出实时信息。</li>
     <li><strong>代码执行（沙箱）</strong>:代码里有,但需要宿主机上的 Docker,当前没开。</li>
     <li><strong>扫描版 PDF</strong>:图片式的 PDF 要先经过 OCR,今天还不行。有文字层的 PDF 可以直接读。</li>
+    <li><strong>读图片</strong>:附件收得到图片,但读它要一个带视觉的模型。这台服务器上唯一标着「支持图片」的那条模型,密钥还填着占位符,所以现在发图片只会得到一句「当前模型不支持图片输入」。有文字层的 PDF 与文本文件不受影响。</li>
     <li><strong>离线使用</strong>:没有。界面和数据都在线上,断网就只能等着。</li>
   </ul>
 </section>
@@ -64,10 +64,10 @@
 <section id="shots">
   <h2>界面长这样</h2>
   <div class="shots">
-    <figure id="shot-register"><div class="phone placeholder">注册页实拍位</div><figcaption>注册：自己填用户名密码,答三条找回问题</figcaption></figure>
-    <figure id="shot-chat"><div class="phone placeholder">对话页实拍位</div><figcaption>对话:附件、计算器都在这一屏</figcaption></figure>
-    <figure id="shot-memory"><div class="phone placeholder">记忆页实拍位</div><figcaption>长期记忆:存了什么,能看到也能删</figcaption></figure>
-    <figure id="shot-settings"><div class="phone placeholder">设置页实拍位</div><figcaption>设置:模型、提醒、账号都在这里</figcaption></figure>
+    <figure id="shot-register"><div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值"></div><figcaption>注册：自己填用户名密码,答三条找回问题</figcaption></figure>
+    <figure id="shot-chat"><div class="phone"><img src="/site/img/chat.jpg" alt="对话页：上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来"></div><figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption></figure>
+    <figure id="shot-memory"><div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页：搜「我不吃香菜」搜出来的那一条,右边有删除按钮"></div><figcaption>长期记忆:存了什么,能看到也能删</figcaption></figure>
+    <figure id="shot-settings"><div class="phone"><img src="/site/img/settings.jpg" alt="设置页：当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat"></div><figcaption>设置:模型、提醒、账号都在这里</figcaption></figure>
   </div>
 </section>
 
