@@ -1662,3 +1662,94 @@ def test_rejected_shares_are_said_out_loud_on_the_page():
                 f"文案里抄了体积数字（{line.strip()}）：上限住在壳的 ShareInbox，"
                 "壳改数字这句话就开始说谎")
     assert "分享没收下" in handler, "兜底句没了：壳将来加的新码会画成空白"
+
+
+# ---------- 登录层开场动画（intro） ----------
+#
+# 这段动效是装饰，不是新的状态机。三条锁各自守一条会被"顺手改好看"破坏的东西：
+# 晕动症用户的退路、"每次冷启动只播一次"这个决定的实现形状、以及动画不许拦住打字。
+
+
+def test_the_auth_intro_has_a_reduced_motion_escape():
+    """prefers-reduced-motion 下整段动画必须归零，而不是"稍微短一点"。
+
+    判据取"动画名被关掉"而不是"时长变短"：把 .5s 改成 .1s 在减弱动效的偏好下仍然是
+    动画，而晕动症要的是不要动。
+    """
+    css = _css()
+    assert "prefers-reduced-motion" in css, "整张样式表里没有任何减弱动效的退路"
+    media = re.search(r"@media[^{]*prefers-reduced-motion[^{]*\{(.*?)\n\}", css, re.S)
+    assert media, "prefers-reduced-motion 那条媒体查询没写成块，退路无从谈起"
+    body = media.group(1)
+    assert "auth-" in body and "none" in body, (
+        f"减弱动效的块里没有关掉开场动画：{body.strip()[:160]}")
+    assert "auth-brand-in" in css and "auth-sheet-rise" in css, \
+        "两段动画的名字不全，说明某一段根本没接上退路"
+
+
+def test_the_sheet_beat_fires_when_the_form_actually_exists():
+    """面板那段必须等"内容真的在屏上"再播，不能跟着弹层一起触发。
+
+    这是实测抓出来的 bug，不是假想：pending 期间 `.auth.pending .auth-form` 是
+    display:none，所以弹层一出现就跑"掀开面板"，掀开的是一个空盒子；等 0.5~2 秒后
+    服务端答话、表单才出现，那时动画早跑完了。截图里表现为字标闪一下、表单凭空出现。
+    判据因此是"clearAuthPending 里必须触发面板那一段"——它正是中性态被摘掉的那一刻。
+    """
+    js = _js()
+    clear = _function_body(js, "clearAuthPending")
+    assert "playAuthSheet" in clear, (
+        f"面板动画没挂在中性态摘掉那一刻，它会在空盒子上跑完：{clear.strip()[:180]}")
+    # 反向那半：字标那一段仍该在弹层一出现就跑（那是冷启动第一帧唯一有的东西）
+    pending = _function_body(js, "showAuthPending")
+    assert "playAuthIntro" in pending, "字标那一段没挂在冷启动第一帧，开场就没有第一段了"
+
+
+def test_the_intro_does_not_fade_fields_one_by_one():
+    """字段/按钮不许各自带延迟淡入——那会在面板中间留出一个洞。
+
+    实测过：给 .auth-field 与 .auth-go 分别加 .42s/.52s 延迟之后，动画中途那一帧
+    是"上面的说明文字在、中间三格透明、下面的链接在"，看着像渲染坏了。
+    整块面板一次掀开就够了，所以这里钉"不许再出现按字段错峰的那两条规则"。
+    """
+    css = _css()
+    for sel in re.findall(r"([^{}]*\.intro[^{}]*)\{", css):
+        assert ".auth-field" not in sel and ".auth-go" not in sel, (
+            f"又给单个字段加了独立入场规则，动画中途会空洞：{sel.strip()}")
+
+
+def test_the_auth_intro_plays_once_per_page_load_and_is_not_persisted():
+    """"每次冷启动播一次"= 内存标志。落盘的话就变成"这辈子只播一次"。
+
+    这条区分的是两种很容易写混的做法：记在 pref.* 里（会进 localStorage，换浏览器/清缓存
+    才重置）与记在模块变量里（刷新即重置）。选的是后者，所以判据是"intro 那段不许碰
+    pref. 与 localStorage"，而不是"存在某个标志位"。
+    """
+    js = _js()
+    body = _function_body(js, "playAuthIntro")
+    assert "introPlayed" in js, "没有那个一次性标志：动画要么每次都播，要么每次都不播"
+    assert "pref." not in body and "localStorage" not in body, (
+        f"开场动画的播放状态被写进了持久层，那就不是「每次冷启动一次」了：{body.strip()[:200]}")
+    decl = re.search(r"^(let|var)\s+introPlayed\s*=", js, re.M)
+    assert decl, "introPlayed 必须是模块级可变变量（const 播不完第二次，落盘变成只播一次）"
+
+
+def test_the_auth_intro_never_blocks_typing_or_reading():
+    """动画期间表单必须仍可点、可读：1.05 秒不值得把人拦在门外。
+
+    钉的是"每一条 .intro 规则里都不许出现 pointer-events / display:none / visibility:hidden"，
+    而不是"动画时长 < 1.2s"——时长会被人调，拦住输入这件事本身才是要防的回归。
+    也不许自动聚焦：手机上第一反应就是打字，抢焦点会让光标停在动画还没到位的那一格。
+    """
+    css = _css()
+    assert ".auth-sheet" in css, "没有 .auth-sheet：弧形面板那层没落地"
+    # 只扫带 .intro 的规则：`.auth.pending .auth-form { display:none }` 是冷启动中性态
+    # 自己的机制（有别的锁守着），不该被这条"动画不许拦人"的锁误伤。
+    intro_rules = re.findall(r"[^{}]*\.intro[^{}]*\{([^}]*)\}", css)
+    assert intro_rules, "一条 .intro 规则都没有，那这条锁在空转"
+    for rule in intro_rules:
+        assert "pointer-events" not in rule, f"开场动画把内容设成不可点：{rule.strip()}"
+        assert "display: none" not in rule and "visibility: hidden" not in rule, \
+            f"动画规则把内容整块藏了（那等于假加载）：{rule.strip()}"
+    js = _js()
+    intro = _function_body(js, "playAuthIntro")
+    assert ".focus()" not in intro, "开场动画里自动聚焦输入框：手机上抢光标"

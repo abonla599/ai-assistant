@@ -318,9 +318,43 @@ function showAuthPending() {
   const modal = $("authModal");
   modal.classList.add("pending");
   modal.classList.remove("hidden");
+  // 冷启动真正"第一次露出登录层"的是这里，不是 showAuth——showAuth 要等服务端答话。
+  // 字标那一段在这里播；面板那一段等 clearAuthPending 摘掉中性态时才播。
+  playAuthIntro();
 }
 
-function clearAuthPending() { $("authModal").classList.remove("pending"); }
+function clearAuthPending() {
+  const modal = $("authModal");
+  modal.classList.remove("pending");
+  // 中性态摘掉的那一刻才是"表单真的在屏上了"，面板那一段动画挂在这里而不是挂在
+  // 弹层出现时——早一步播就是在空盒子上掀一下（pending 期间两张表单是 display:none）。
+  playAuthSheet();
+}
+
+/* 开场动画的"只播一次"记在内存里：刷新一次就算一次新的冷启动，所以它该重来。
+   落盘（pref.* 会进 localStorage）就变成"这台设备有生之年只看一次"，不是这个意思。 */
+let introPlayed = false;
+let introSheetPlayed = false;
+
+/** 第一段：字标。冷启动第一帧上除了它什么都没有，所以它可以立刻播。 */
+function playAuthIntro() {
+  if (introPlayed) return;
+  introPlayed = true;
+  const modal = $("authModal");
+  modal.classList.add("intro-brand");
+  window.setTimeout(() => modal.classList.remove("intro-brand"), 500);
+}
+
+/** 第二段：弧形面板掀开。由 clearAuthPending 触发，一次页面生命周期只播一遍。 */
+function playAuthSheet() {
+  if (introSheetPlayed || !introPlayed) return;
+  introSheetPlayed = true;
+  const modal = $("authModal");
+  modal.classList.add("intro-sheet");
+  // 跑完摘类：CSS 里那些规则只以 .intro-sheet 为开关，摘掉之后切找回、掉线重弹
+  // 都不会再放一遍；时长取动画本身（.5s）再加一点余量。
+  window.setTimeout(() => modal.classList.remove("intro-sheet"), 700);
+}
 
 function showAuth(mode) {
   clearAuthPending();

@@ -443,6 +443,35 @@ button, input, textarea, select { font: inherit; color: inherit; }
                 line-height: 1.5; color: var(--text-2); }
 .auth.pending .auth-form { display: none; }
 .auth.pending .auth-pending { display: block; }
+/* ---------- 登录层开场动画 ----------
+ * 两段，各自挂在各自的触发时刻上（不是同一次 class 切换）：
+ *   intro-brand —— 弹层一出现就播，那第一帧上除了字标什么都没有；
+ *   intro-sheet —— 等中性态摘掉、表单真的在屏上了才播。
+ * 第二段为什么不能跟第一段同时：pending 期间两张表单是 display:none，
+ * 在空盒子上跑"掀开面板"等于掀了个空，实测截图里就是字标闪一下、表单凭空出现。
+ * 也刻意不给 .auth-field / .auth-go 各自加延迟——那样动画中途会留一个大洞
+ * （上面说明在、中间三格透明、下面链接在），由 test_web_pwa.py 钉住。
+ *
+ * 面板的弧边靠 clip-path 的椭圆从 6% 长到 130%，不依赖图片；底色只在动画这一段里
+ * 有、落位时淡成 transparent，所以静态观感与加这段动画之前完全一致
+ * （做成常驻卡片是另一件事：浅色主题下 --surface 与 --bg 都是 #fff，卡片得靠描边才看得出来）。
+ * fill-mode 用 backwards 而不是 both：both 会把结束态的 clip-path 一直挂在元素上，
+ * 那张表单以后长高了就会被裁掉一角——动画跑完就该彻底不掺和。
+ */
+.auth-sheet { display: flex; flex-direction: column; gap: 22px; }
+.auth.intro-brand .auth-brand { animation: auth-brand-in .4s ease-out backwards; }
+.auth.intro-sheet .auth-sheet { animation: auth-sheet-rise .5s cubic-bezier(.22, .61, .36, 1) backwards; }
+@keyframes auth-brand-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes auth-sheet-rise {
+  from { opacity: .4; transform: translateY(14px); background-color: var(--surface);
+         clip-path: ellipse(150% 6% at 50% 100%); }
+  to   { opacity: 1; transform: none; background-color: transparent;
+         clip-path: ellipse(150% 130% at 50% 100%); }
+}
+/* 晕动症要的是"别动"，不是"动快点"，所以这里关的是动画本身而不是时长。 */
+@media (prefers-reduced-motion: reduce) {
+  .auth.intro-brand .auth-brand, .auth.intro-sheet .auth-sheet { animation: none; }
+}
 /* 注册第二步与找回第二步那一整块：与表单同宽、内部同样 12px 间距。
    hidden 由 .hidden{display:none!important} 收，这里只定"露出来时长什么样"。 */
 .auth-step { display: flex; flex-direction: column; gap: 12px; }

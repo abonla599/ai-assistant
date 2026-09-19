@@ -331,6 +331,10 @@
            聊天外壳。三条出路（认出人 / 要凭据 / 连不上）都会摘掉这一态。 -->
       <p class="auth-pending" id="authPending">正在确认身份…</p>
 
+      <!-- 开场动画里"上推的那块弧形面板"就是这一层：两张表单（登录/注册与找回）都在它
+           里面，所以切到找回时不会又冒出一块新面板。中性态那句「正在确认身份…」刻意留在
+           面板外——它是动画还没跑完时唯一该看得见的一行字。 -->
+      <div class="auth-sheet">
       <form class="auth-form" id="authForm" autocomplete="on">
         <p class="auth-sub" id="authSub">登录后继续；还没有账号就点下面的「立即注册」。</p>
         <div class="auth-field">
@@ -429,6 +433,7 @@
           <button class="auth-link" id="rcBack" type="button">回去登录</button>
         </div>
       </form>
+      </div><!-- /.auth-sheet -->
     </div>
   </div>
 
