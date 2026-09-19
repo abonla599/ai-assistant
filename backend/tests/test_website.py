@@ -49,8 +49,15 @@ def test_unknown_paths_still_get_the_framework_json_404():
 
 
 def test_the_json_status_page_is_gone():
-    """旧断言是 `"status" in data`。它还在的话说明 @app.get("/") 没删干净。"""
-    assert '"status"' not in client.get("/").text
+    """旧接口回的是 {"status":"running","service":...,"version":"1.0.0"}。
+
+    原来这里扫的是子串 `"status"`，2026-09-19 它误伤了自己：复制链接的提示用了
+    `role="status"`（那是给读屏用户的实时区域，该留）。改成扫那段 JSON 独有的字段，
+    钉的还是同一件事——根路径不该再回机器话。
+    """
+    page = client.get("/").text
+    for marker in ('"service"', '"default_model"', '"version": "1.0.0"'):
+        assert marker not in page, f"根路径还在回那段机器话：{marker}"
 
 
 def test_app_admin_health_and_docs_still_work():
@@ -119,10 +126,14 @@ def test_download_points_at_latest_not_a_pinned_filename():
 
 
 def test_domain_spelling():
-    """域名只差一个字母,错一个就是别人的站(或一个不存在的站)。"""
+    """域名只差一个字母,错一个就是别人的站(或一个不存在的站)。
+
+    `feverner` 是 2026-09-20 真写进过发布说明的那一种（两个字母换了位置），
+    当时的清单里没有它，所以这条锁放过了它——清单要跟着栽过的跟头长。
+    """
     page = _page()
     assert "ai.fenever.xyz" in page
-    for wrong in ("feverver", "fenerver", "fenevrr", "feverless"):
+    for wrong in ("feverver", "fenerver", "fenevrr", "feverless", "feverner", "feniwer"):
         assert wrong not in page, f"域名拼错：{wrong}"
 
 
@@ -146,8 +157,18 @@ def test_absolute_links_only_to_the_two_hosts_we_own():
         assert href.startswith(allowed), f"链到了别人的地方:{href}"
 
 
-def test_page_is_a_single_html_with_no_js():
-    assert "<script" not in _page()
+def test_scripts_are_same_origin_only():
+    """2026-09-19 改口：原来这条叫"零 JavaScript"，轮播和滚动渐显把它作废了。
+
+    留下来的红线是**零外部依赖**：脚本只许从 /site 下自己拿，不许出现任何
+    第三方 src、内联事件处理器或 import()。CDN 上"今天还在、明天不一定"的东西
+    不该出现在一个自己托管的官网上。
+    """
+    page = _page()
+    assert 'src="/site/site.js"' in page, "交互脚本要走自己的 /site 前缀"
+    for bad in ("<script src=\"http", "<script src='http", "import(", "onclick=",
+                "onload=", "addEventListener(\"click\",window."):
+        assert bad not in page, f"外部依赖或内联事件处理器：{bad}"
 
 
 def test_landing_page_has_the_six_sections():
@@ -232,3 +253,53 @@ def test_calculator_card_states_it_uses_a_tool():
     assert "会算数" in card, "计算器实测通过了，这张卡片还没回来"
     assert "计算器" in card, "只说会算数不说怎么走：读者会以为是模型心算"
     assert "心算" in card or "不是" in card, "要把它和'模型自己算'区分开"
+
+
+# ---------- 7. 轮播与主题切换：交互也得有红线 ----------
+
+def test_carousel_shows_all_four_shots_and_can_be_stopped():
+    """四张实拍收进一个轮播，但自动播的东西必须能停（WCAG 2.2.2）——
+    一个停不下来的自动轮播，对手动操作页面的人是障碍，不是设计。"""
+    page = _page()
+    cut = page.find('<section id="shots"')
+    assert cut != -1, "没有截图那一节"
+    block = page[cut:page.find("</section>", cut)]
+    for name in ("register", "chat", "memory", "settings"):
+        assert f"/site/img/{name}.jpg" in block, f"{name}.jpg 没进轮播"
+    assert "data-carousel" in block, "轮播要有自己的挂载点，脚本靠它找元素"
+    assert 'aria-label="上一张"' in block and 'aria-label="下一张"' in block
+    assert 'aria-label="暂停轮播"' in block, "自动轮播缺暂停键"
+
+
+def test_theme_toggle_exists_and_dark_is_the_default():
+    """界面截图全是深色的，浅色页配深色截图会打架；默认改成深色，
+    但保留切换——有人就是要浅色。偏好要落 localStorage，否则每开一次都要重选。"""
+    page = _page()
+    assert 'aria-label="切换到浅色"' in page, "缺主题切换键"
+    css = _css()
+    assert "prefers-color-scheme" in css, "首屏不该闪一下才变深色"
+    assert "localStorage" in _js(), "主题偏好要记住，不能每次回到默认"
+
+
+def _css() -> str:
+    import os
+    from app.web.web_router import SITE_DIR
+    with open(os.path.join(SITE_DIR, "site.css"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _js() -> str:
+    import os
+    from app.web.web_router import SITE_DIR
+    path = os.path.join(SITE_DIR, "site.js")
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_nothing_is_fetched_from_the_outside_at_runtime():
+    """脚本里也不许偷偷连外网：一个 fetch 到别人域名，就等于把可用性押在别人的 uptime 上。"""
+    js = _js()
+    for bad in ("http://", "https://"):
+        assert bad not in js, f"脚本里出现了外部地址：{bad}"

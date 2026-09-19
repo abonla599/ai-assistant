@@ -1,15 +1,44 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI 智能助手——一个记得住你的在线助手</title>
-<meta name="description" content="注册就能用的 AI 助手：多模型切换、读你发过去的文件、长期记忆,每个人各用各的。">
+<meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆,每个人各用各的。">
+<meta name="theme-color" content="#0b0d12">
 <link rel="stylesheet" href="/site/site.css">
+<script>
+/* 首屏之前把主题定下来：等 site.js 再读 localStorage 会先闪一下深色。 */
+(function () {
+  try {
+    var saved = localStorage.getItem("site-theme");
+    if (saved !== "dark" && saved !== "light") {
+      saved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
+})();
+</script>
 </head>
 <body>
 
+<a class="skip" href="#can-do">跳到正文</a>
+
+<nav class="topbar" aria-label="页面导航">
+  <span class="brand">AI 智能助手</span>
+  <ul class="navlinks">
+    <li><a href="#can-do">能做什么</a></li>
+    <li><a href="#shell-only">装壳多三件</a></li>
+    <li><a href="#start">怎么开始</a></li>
+    <li><a href="#faq">常见问题</a></li>
+  </ul>
+  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到浅色">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+  </button>
+</nav>
+
 <header class="hero">
+  <p class="eyebrow">在线 · 多人 · 注册就能用</p>
   <h1>AI 智能助手</h1>
   <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,而且每个人各用各的、互不串味。</p>
   <p class="cta">
@@ -22,11 +51,11 @@
 <section id="can-do">
   <h2>它现在真能做的</h2>
   <ul class="cards">
-    <li><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型——清单和「能用几条」都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
-    <li><h3>会算数</h3><p>让它算数,它走计算器而不是自己心算:表达式在本机按 AST 白名单解析,不会原样执行模型给来的字符串。65 位的 50! 就是这么算出来的。</p></li>
-    <li><h3>读你发过去的文件</h3><p>发 PDF、发 txt 或代码文件,它会先把里面的文字读出来再回答,不用你抄一遍。图片不一样：那要当前模型带视觉,而这台服务器现在没有带视觉的模型可用,所以发进去只会收到一句拒绝——下面「当前未开启」那一节写的就是这件事。</p></li>
-    <li><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来;哪些记忆在存着,你在设置里能看到、能删。</p></li>
-    <li><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
+    <li class="reveal"><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型——清单和「能用几条」都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
+    <li class="reveal"><h3>会算数</h3><p>让它算数,它走计算器而不是自己心算:表达式在本机按 AST 白名单解析,不会原样执行模型给来的字符串。65 位的 50! 就是这么算出来的。</p></li>
+    <li class="reveal"><h3>读你发过去的文件</h3><p>发 PDF、发 txt 或代码文件,它会先把里面的文字读出来再回答,不用你抄一遍。图片不一样：那要当前模型带视觉,而这台服务器现在没有带视觉的模型可用,所以发进去只会收到一句拒绝——下面「当前未开启」那一节写的就是这件事。</p></li>
+    <li class="reveal"><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来;哪些记忆在存着,你在设置里能看到、能删。</p></li>
+    <li class="reveal"><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
   </ul>
 </section>
 
@@ -34,20 +63,59 @@
   <h2>装壳多出来的三件事</h2>
   <p>下面这三件只有装了那个 96 KB 的壳才有——浏览器拿不到系统通知、分享入口和桌面组件。壳本身只是一个指向本站的地址,里面不含任何口令或密钥,所以服务端改版你不用重装;改壳的这三项功能才要重装。</p>
   <ul class="cards">
-    <li><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟到——它不申请精确闹钟权限。</p></li>
-    <li><h3>分享进来</h3><p>在相册或 PDF 上点「分享」→ 选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
-    <li><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话（拍照提问同样要模型带视觉才读得出图）。</p></li>
+    <li class="reveal"><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟到——它不申请精确闹钟权限。</p></li>
+    <li class="reveal"><h3>分享进来</h3><p>在相册或 PDF 上点「分享」→ 选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
+    <li class="reveal"><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话（拍照提问同样要模型带视觉才读得出图）。</p></li>
   </ul>
 </section>
 
 <section id="start">
   <h2>三步上手</h2>
   <ol class="steps">
-    <li><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它会自动跳到同一个地址）。</li>
-    <li><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题(忘记密码时用它自己取回)。</li>
-    <li><strong>开始聊</strong>:换手机、换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
+    <li class="reveal"><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它会自动跳到同一个地址）。</li>
+    <li class="reveal"><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题(忘记密码时用它自己取回)。</li>
+    <li class="reveal"><strong>开始聊</strong>:换手机、换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
   </ol>
   <p class="note">提示「当前没有可用模型,请联系管理员配置模型服务」不是你的问题——那是这台助手的主人还没接上模型,找他。</p>
+</section>
+
+<section id="shots" class="shots-section">
+  <h2>界面长这样</h2>
+  <p class="note">四张都是线上实拍,不是设计稿。</p>
+
+  <div class="carousel" data-carousel>
+    <div class="stage" id="stage" aria-live="polite">
+      <figure class="slide is-active" data-index="0">
+        <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688"></div>
+        <figcaption>注册:自己填用户名密码,答三条找回问题</figcaption>
+      </figure>
+      <figure class="slide" data-index="1">
+        <div class="phone"><img src="/site/img/chat.jpg" alt="对话页:上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来" width="780" height="1688"></div>
+        <figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption>
+      </figure>
+      <figure class="slide" data-index="2">
+        <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页:搜「我不吃香菜」搜出来的那一条,右边有删除按钮" width="780" height="1688"></div>
+        <figcaption>长期记忆:存了什么,能看到也能删</figcaption>
+      </figure>
+      <figure class="slide" data-index="3">
+        <div class="phone"><img src="/site/img/settings.jpg" alt="设置页:当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat" width="780" height="1688"></div>
+        <figcaption>设置:模型、提醒、账号都在这里</figcaption>
+      </figure>
+    </div>
+
+    <div class="controls">
+      <button class="iconbtn" type="button" id="prevBtn" aria-label="上一张">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <div class="dots" id="dots" role="tablist" aria-label="选择看哪一张"></div>
+      <button class="iconbtn" type="button" id="nextBtn" aria-label="下一张">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+      </button>
+      <button class="iconbtn" type="button" id="pauseBtn" aria-label="暂停轮播" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
+      </button>
+    </div>
+  </div>
 </section>
 
 <section id="not-now">
@@ -62,16 +130,6 @@
   </ul>
 </section>
 
-<section id="shots">
-  <h2>界面长这样</h2>
-  <div class="shots">
-    <figure id="shot-register"><div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值"></div><figcaption>注册：自己填用户名密码,答三条找回问题</figcaption></figure>
-    <figure id="shot-chat"><div class="phone"><img src="/site/img/chat.jpg" alt="对话页：上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来"></div><figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption></figure>
-    <figure id="shot-memory"><div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页：搜「我不吃香菜」搜出来的那一条,右边有删除按钮"></div><figcaption>长期记忆:存了什么,能看到也能删</figcaption></figure>
-    <figure id="shot-settings"><div class="phone"><img src="/site/img/settings.jpg" alt="设置页：当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat"></div><figcaption>设置:模型、提醒、账号都在这里</figcaption></figure>
-  </div>
-</section>
-
 <section id="faq">
   <h2>常见问题</h2>
   <details><summary>要自己配 API 密钥吗?</summary><p>不用。模型由这台助手的管理员配。普通人在这里什么都不用填。</p></details>
@@ -79,13 +137,22 @@
   <details><summary>谁能看到我的数据?</summary><p>只有你。会话、附件、记忆都按账号隔离,别人（包括另一个注册用户）看不到你的。</p></details>
   <details><summary>怎么删干净?</summary><p>设置里删会话与记忆条目;要注销整个账号,联系这台助手的管理员做删除。删除动作不会把记忆库里的历史一并抹平的那部分,请当面问清再做。</p></details>
   <details><summary>有 iOS 吗?</summary><p>没有壳,但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用,加到主屏幕后接近全屏体验;只是没有提醒、分享入口和桌面组件。</p></details>
+  <details><summary>打不开怎么办?</summary><p>这台助手跑在一台个人电脑上,机器关机、断网或重启后没人登录,它就会暂时够不着——那不是你的账号出了问题,等一会儿再试。</p></details>
 </section>
 
 <footer>
-  <p><a href="https://github.com/abonla599/ai-assistant">GitHub · abonla599/ai-assistant</a></p>
-  <p class="note">界面在服务器上,没有"更新"这个动作:下次打开就是当前这一版。安卓壳的历史版本与安装包在 <a href="https://github.com/abonla599/ai-assistant/releases/latest">Releases</a>。</p>
+  <p><a href="https://github.com/abonla599/ai-assistant">GitHub · abonla599/ai-assistant</a>
+     <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  <p class="note" id="copyHint" role="status"></p>
+  <p class="note">当前版本 v0.13（2026-09-19）。界面在服务器上,没有"更新"这个动作:下次打开就是当前这一版。</p>
   <p class="note">本站不放后台入口。管理页不在这里,也不会出现在这里。</p>
 </footer>
+
+<button class="totop" type="button" id="topBtn" aria-label="回到顶部" hidden>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+</button>
+
+<script src="/site/site.js" defer></script>
 
 </body>
 </html>
