@@ -26,14 +26,22 @@ def test_site_assets_are_public_and_uncached():
     res = client.get("/site/site.css")
     assert res.status_code == 200
     assert res.headers["cache-control"] == "no-cache"
+    # 整串相等而不是 in:`/` 那半只用了 in,两边合起来才真正钉住"页面与资源的头
+    # 是同一组",而这一组字面量在 web_router 里只有一份(site_headers)。
+    assert res.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
 
 
 def test_unknown_paths_still_get_the_framework_json_404():
-    """这条是 R7 的核心防线。
+    """没被认领的路径仍是框架那副 JSON 404,没被静态兜底吞掉。
 
-    如果哪天有人图省事改回 `app.mount("/")`,这个请求会被静态目录兜走,
-    content-type 不再是 application/json —— 顺带 `/health/`、`/docs/` 的
-    redirect_slashes 语义也会一起坏掉(那是 test_auth_endpoints.py:296 在钉的)。
+    但别把这条当成 R7 的防线:它抓不住 `app.mount("/")` 本身 —— StaticFiles
+    找不到文件时抛的是 HTTPException(404),FastAPI 同样把它序列化成
+    application/json,换上根 Mount 这条照样绿(本轮 RED 就是这么露馅的)。
+    真正抓得住根 Mount 的是另外两条:test_trailing_slash_semantics_are_untouched
+    (`/health/` 只有 redirect_slashes 还活着才回 200;同一条语义的安全侧由
+    test_auth_endpoints.py:296 钉)与 test_site_assets_are_public_and_uncached
+    (`/site/site.css` 得真有这么个前缀,根 Mount 只会拿它去找 SITE_DIR 下的
+    site/site.css)。
     """
     res = client.get("/no-such-page-anywhere")
     assert res.status_code == 404

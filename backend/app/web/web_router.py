@@ -34,6 +34,20 @@ def _admin_dir() -> str:
 ADMIN_DIR = _admin_dir()
 
 
+def site_headers(response):
+    """全站响应共用的一组头，字面量只这一份：/app、/admin、/site 的静态资源走
+    RevalidatingStaticFiles，官网 index.html 走 FileResponse，两头都收口在这里。
+
+    不抽出来的话就有第二份 no-cache 字面量，改一份漏一份——和 _PROTECTED_PREFIXES
+    在测试里"不抄第二份清单"是同一个道理。
+    """
+    response.headers["Cache-Control"] = "no-cache"
+    # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
+    # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
+    response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
+    return response
+
+
 class RevalidatingStaticFiles(StaticFiles):
     """静态资源一律 no-cache：每次使用前必须回源问一次，ETag 就是那次问价。
 
@@ -47,12 +61,7 @@ class RevalidatingStaticFiles(StaticFiles):
     """
 
     async def get_response(self, path: str, scope):
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
-        # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
-        response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
-        return response
+        return site_headers(await super().get_response(path, scope))
 
 
 def mount_pwa(app: FastAPI) -> None:
@@ -85,17 +94,6 @@ def _site_dir() -> str:
 
 
 SITE_DIR = _site_dir()
-
-
-def site_headers(response):
-    """官网两份响应共用一组头:index.html 走 FileResponse,资源走下面那个类。
-
-    不抽出来的话就有第二份 no-cache 字面量,改一份漏一份——和 _PROTECTED_PREFIXES
-    在测试里"不抄第二份清单"是同一个道理。
-    """
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
-    return response
 
 
 def install_site(app: FastAPI) -> None:
