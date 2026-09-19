@@ -4,35 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>管理员 · AI 助手</title>
-<!-- 复用 PWA 那一份设计系统：同一进程同源服务，样式没有第二份真相。
-     只重排本页布局，配色/按钮/字号一律走 /app/style.css 的变量与类。 -->
+<!-- 复用 PWA 那一份设计系统：同一进程同源服务，配色/按钮/字号没有第二份真相。
+     admin.css 只补本页自己的骨架（表格、任务卡、弹层），不重定义颜色。 -->
 <link rel="stylesheet" href="/app/style.css">
-<style>
-  /* 本页不是聊天界面，套不上 .app/.composer 那套骨架，所以只补布局 */
-  body.admin { background: var(--bg); color: var(--text); margin: 0; }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 64px; }
-  .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
-  .top h1 { font-size: 20px; margin: 0; }
-  .who { color: var(--text-2); font-size: 13px; }
-  .sec { margin-top: 28px; }
-  .sec h2 { font-size: 15px; margin: 0 0 4px; }
-  .sec p { color: var(--text-3); font-size: 12.5px; margin: 0 0 12px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-  input.num { width: 74px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  th { color: var(--text-3); font-weight: 500; font-size: 12px; }
-  td.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
-  td.acts { white-space: nowrap; }
-  td.acts button { margin: 0 2px 2px 0; }
-  .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
-  .tag.off { background: rgba(248,113,113,.14); color: var(--danger); }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
-  .err { color: var(--danger); font-size: 12.5px; min-height: 18px; margin-top: 6px; }
-  .reveal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
-  .reveal .card { max-width: 520px; width: 100%; }
-  .secret { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
-</style>
+<link rel="stylesheet" href="admin.css">
 </head>
 <body class="admin">
 <div class="wrap">
@@ -40,43 +15,117 @@
   <!-- 未取到管理员身份时只有这一块可见 -->
   <section id="gate" class="hidden">
     <div class="top"><h1>管理员登录</h1></div>
-    <p class="who">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>。它只存在这台浏览器的 localStorage，不会进任何 URL 或日志。</p>
-    <div class="card">
-      <div class="row">
-        <input id="pass" class="field" type="password" placeholder="管理员口令" autocomplete="off">
-        <button id="btnLogin" class="btn btn-primary">进入</button>
-      </div>
-      <div class="err" id="gateErr"></div>
+    <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己那枚会话令牌。它只写进这台浏览器的 localStorage，不进 URL 也不进日志。</p>
+    <label class="field" style="margin-top:10px">
+      <span>口令</span>
+      <input id="pass" type="password" placeholder=".env 里的 ACCESS_TOKEN" autocomplete="off">
+    </label>
+    <div class="row">
+      <button id="btnLogin" class="btn btn-primary grow" data-icon="login" data-label="进入"></button>
     </div>
+    <div class="err" id="gateErr"></div>
   </section>
 
   <main id="panel" class="hidden">
     <div class="top">
-      <h1>用户管理</h1>
+      <h1>管理</h1>
       <span class="who" id="who"></span>
-      <span style="flex:1"></span>
-      <button id="btnReload" class="btn btn-ghost btn-small">刷新</button>
-      <button id="btnLogout" class="btn btn-ghost btn-small">退出</button>
+      <span class="spacer"></span>
+      <button id="btnReload" class="btn btn-ghost btn-small" data-icon="refresh" data-label="刷新"></button>
+      <button id="btnLogout" class="btn btn-ghost btn-small" data-icon="exit" data-label="退出"></button>
     </div>
     <div class="err" id="flash"></div>
 
-    <section class="sec">
+    <nav class="tabs" id="tabs">
+      <button class="tab active" type="button" data-goto="secUsers" data-icon="users" data-label="用户"></button>
+      <button class="tab" type="button" data-goto="secMemory" data-icon="memory" data-label="记忆"></button>
+      <button class="tab" type="button" data-goto="secTasks" data-icon="tasks" data-label="任务"></button>
+      <button class="tab" type="button" data-goto="secAgent" data-icon="agent" data-label="智能体"></button>
+    </nav>
+
+    <!-- ---------------- 用户 ---------------- -->
+    <section class="sec" id="secUsers">
       <h2>用户</h2>
-      <p>「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台）；「换发令牌」会一次全部作废。</p>
-      <table><thead><tr><th>用户名</th><th>身份</th><th>状态</th><th>设备</th><th>最后活跃</th><th class="acts">操作</th></tr></thead>
-      <tbody id="userRows"></tbody></table>
+      <p class="pane-note">「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台，上限 8 枚）。「记忆」按人不给数，理由写在记忆那一节。</p>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>用户名</th><th>身份</th><th>状态</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
+        </tr></thead>
+        <tbody id="userRows"></tbody>
+      </table></div>
+    </section>
+
+    <!-- ---------------- 记忆 ---------------- -->
+    <section class="sec hidden" id="secMemory">
+      <h2>记忆</h2>
+      <p class="pane-note">这个页面只读条数：长期记忆正文按人隔离，管理员的身份也只是“另一个用户”，跨人去读别人的记忆内容在这套系统里没有接口，也不该有。 <code>/v1/memory/stats</code> 给的是全库合计，不按人拆分，所以上面那张表的「记忆」栏只能是不支持。</p>
+      <div class="card">
+        <div class="stat"><b id="memTotal">—</b><span id="memNote">条 · 全库合计（不分人）</span></div>
+        <p class="pane-note" id="memCollection" style="margin:8px 0 0"></p>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <input id="decayFactor" class="num" type="number" step="0.01" min="0.1" max="1" value="0.95">
+        <button id="btnDecay" class="btn btn-ghost" data-icon="decay" data-label="衰减我自己记忆的权重"></button>
+      </div>
+      <p class="pane-note" style="margin-top:-4px"><code>/v1/memory/decay</code> 只作用于登录这个页面的人自己的记忆池，选不了别人——按用户逐个衰减没有端点。</p>
+    </section>
+
+    <!-- ---------------- 任务 ---------------- -->
+    <section class="sec hidden" id="secTasks">
+      <h2>任务</h2>
+      <p class="pane-note">编排任务是进程内的一张全局表，条目上没有归属，所以这一面整片挂 require_admin；进程一重启它就空了，这里看到的不是历史归档。</p>
+      <div class="task-list" id="taskList"></div>
+    </section>
+
+    <!-- ---------------- 智能体 ---------------- -->
+    <section class="sec hidden" id="secAgent">
+      <h2>智能体</h2>
+      <p class="pane-note">两条都是同步接口：请求会一直挂着直到跑完或超时，跑的是服务端自己那份上游配置。编排那条会往上面那张任务表里落一条。</p>
+      <textarea id="agentInput" class="req" rows="3" placeholder="要跑的事，例如：查一下明天上海的天气"></textarea>
+      <div class="row">
+        <span class="dim" style="font-size:12.5px">轮数</span>
+        <input id="agentTurns" class="num" type="number" min="1" max="40" value="10">
+        <span class="dim" style="font-size:12.5px">秒数</span>
+        <input id="agentDuration" class="num" type="number" min="10" max="600" value="120">
+        <button id="btnRunAgent" class="btn btn-ghost" data-icon="play" data-label="ReAct 跑一次"></button>
+        <button id="btnOrchestrate" class="btn btn-primary" data-icon="agent" data-label="编排执行"></button>
+      </div>
+      <div class="secret hidden" id="agentOut"></div>
     </section>
   </main>
 
-  <!-- 新令牌只在响应里出现一次，关掉就取不回来，所以做成必须主动确认的弹窗 -->
-  <div id="reveal" class="reveal hidden">
+  <!-- 明文只出现在那一次响应里（库里存的是 sha256 摘要），但这一枚不是他的入场券：
+       他自己的密码就能再领一枚，所以措辞不能说成“不发出去他就进不来”。 -->
+  <div id="reveal" class="sheet hidden">
     <div class="card">
-      <h2 style="margin:0 0 4px;font-size:15px">新令牌——只显示这一次</h2>
-      <p style="color:var(--text-3);font-size:12.5px;margin:0">旧令牌已经同时失效。现在复制并发给对方；关掉这个窗口就再也取不到明文了。</p>
+      <h2>新令牌</h2>
+      <p id="revealNote">这枚令牌的明文只出现在刚才那一次响应里，服务端存的是摘要，关掉这个窗口就再也查不到。这次换发已经把他名下所有旧令牌一起作废，每一台设备都会掉线。掉线不等于进不来：他在 App 里用自己的用户名和密码登录，就能领一枚新的。</p>
       <div class="secret" id="revealText"></div>
-      <div class="row" style="margin:0">
-        <button id="btnCopy" class="btn btn-primary btn-small">复制</button>
-        <button id="btnCloseReveal" class="btn btn-ghost btn-small">我已保存，关闭</button>
+      <div class="foot">
+        <button id="btnCopy" class="btn btn-primary btn-small" data-icon="copy" data-label="复制"></button>
+        <button id="btnCloseReveal" class="btn btn-ghost btn-small" data-icon="check" data-label="知道了"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 破坏性动作的二次确认：文案要放下“删了什么、留了什么”，window.confirm 放不下 -->
+  <div id="ask" class="sheet hidden">
+    <div class="card">
+      <h2 id="askTitle"></h2>
+      <p id="askBody"></p>
+      <div class="foot">
+        <button id="askCancel" class="btn btn-ghost btn-small" data-icon="close" data-label="取消"></button>
+        <button id="askOk" class="btn btn-small"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail" class="sheet hidden">
+    <div class="card">
+      <h2 id="detailTitle">任务</h2>
+      <div class="secret" id="detailText"></div>
+      <div class="foot">
+        <button id="btnCloseDetail" class="btn btn-ghost btn-small" data-icon="check" data-label="关闭"></button>
       </div>
     </div>
   </div>

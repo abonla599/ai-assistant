@@ -1,0 +1,115 @@
+/* 管理员页自己的布局。
+ *
+ * 配色、按钮、输入框、.hidden 这些一律用 /app/style.css 的变量与类：同一进程同源
+ * 服务，样式不该有第二份真相。这个文件里只放 PWA 那份没有的东西——本页的骨架、
+ * 用户表、任务卡、跳转弹层。
+ *
+ * 可点的东西都按 44px 以上做：这张表经常在手机上临时看一眼，而删号、换发令牌、
+ * 取消任务都是点错了就要重开一遍的动作。
+ */
+
+body.admin { background: var(--bg); color: var(--text); margin: 0; }
+
+.wrap { max-width: 900px; margin: 0 auto; padding: 20px 16px calc(48px + var(--safe-bottom)); }
+
+/* ---------- 图标配文字 ----------
+ * 图标由 admin.js 用 createElementNS 现建（用户名是别人填的，本页不拿 innerHTML
+ * 拼任何带数据的字符串），这里只负责它和文字的间距与描边粗细。
+ */
+.ico { display: inline-flex; flex: none; align-items: center; }
+.ico svg { width: 17px; height: 17px; display: block; }
+.btn .ico + .lbl { margin-left: 7px; }
+
+#panel .btn, #gate .btn, .sheet .btn, .tab { min-height: 44px; display: inline-flex;
+  align-items: center; justify-content: center; }
+#panel input, #gate input, #panel textarea, #panel select { min-height: 44px; }
+code { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  background: var(--bg-soft); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0 5px; }
+
+/* ---------- 顶栏与分区 ---------- */
+.top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* 把右边的按钮推到顶栏末尾。原先只有 /app/style.css 里有这一条，而 PWA 那页不用它，
+   清理死样式时被一并删了——本页顶栏还在用（链的就是同一份表），删掉就是"刷新/退出"
+   两个按钮贴到标题后面。既然 PWA 不再需要，它就该住在本页自己的表里。 */
+.spacer { flex: 1; }
+.top h1 { font-size: 20px; margin: 0; }
+.who { color: var(--text-2); font-size: 13px; }
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 18px 0 4px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.tab { flex: 1 1 auto; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--text-2); font-size: 14px; cursor: pointer; }
+.tab:hover { background: var(--bg-hover); color: var(--text); }
+.tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+.sec { margin-top: 22px; }
+.sec h2 { font-size: 15px; margin: 0 0 4px; }
+.pane-note { color: var(--text-3); font-size: 12.5px; line-height: 1.6; margin: 0 0 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.row .grow { flex: 1 1 220px; min-width: 0; }
+input.num { width: 86px; flex: none; }
+
+/* ---------- 卡片与状态 ---------- */
+.card { background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px 16px; }
+.stat { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.stat b { font-size: 26px; font-weight: 600; color: var(--accent); }
+.stat span { color: var(--text-3); font-size: 12.5px; }
+.err { color: var(--danger); font-size: 12.5px; min-height: 18px; margin: 6px 0; }
+.dim { color: var(--text-3); }
+
+/* ---------- 用户表 ---------- */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line);
+  vertical-align: middle; }
+th { color: var(--text-3); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td.name { font-weight: 500; }
+td.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
+td.acts { white-space: nowrap; }
+td.acts button { margin: 0 2px 2px 0; }
+.tag { font-size: 11.5px; padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); }
+.tag.off { background: rgba(248, 113, 113, .14); color: var(--danger); }
+
+/* ---------- 任务与智能体 ---------- */
+.task-list { display: flex; flex-direction: column; gap: 8px; }
+.task { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--line); background: var(--bg-soft);
+  border-radius: 12px; padding: 10px 12px; }
+.task .tm { flex: 1 1 220px; min-width: 0; }
+.task .tm b { display: block; font-size: 14.5px; font-weight: 600;
+  overflow-wrap: anywhere; }
+.task .tm span { display: block; font-size: 12px; color: var(--text-3);
+  font-family: ui-monospace, Consolas, monospace; }
+.task .st { font-size: 11.5px; flex: none; border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 8px; color: var(--text-2); }
+.task .st.run { color: var(--accent); border-color: var(--accent); }
+.task .st.bad { color: var(--danger); border-color: var(--danger); }
+.task .ops { display: flex; gap: 2px; flex: none; flex-wrap: wrap; }
+textarea.req { width: 100%; border: 1px solid var(--line); background: var(--bg-soft);
+  border-radius: 10px; padding: 10px 12px; resize: vertical; outline: none;
+  font: inherit; margin-bottom: 10px; }
+textarea.req:focus, input:focus, select:focus { border-color: var(--accent); outline: none; }
+
+/* ---------- 弹层（令牌明文 / 二次确认 / 任务详情）---------- */
+.sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: flex;
+  align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+.sheet .card { max-width: 560px; width: 100%; max-height: 86vh; overflow: auto;
+  box-shadow: var(--shadow); }
+.sheet h2 { font-size: 15px; margin: 0 0 6px; }
+.sheet p { color: var(--text-2); font-size: 13px; line-height: 1.65; margin: 0 0 10px; }
+.secret { font-family: ui-monospace, Consolas, monospace; font-size: 13px;
+  word-break: break-all; background: var(--code-bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.sheet .foot { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.danger-btn { color: var(--danger); border-color: var(--danger); }
+.danger-btn:hover { background: var(--danger); color: var(--bg); }
+
+@media (max-width: 620px) {
+  .tabs { gap: 4px; }
+  .tab { flex: 1 1 44%; padding: 0 8px; font-size: 13.5px; }
+  .sheet { padding: 8px; align-items: flex-end; }
+  .sheet .card { border-radius: 18px 18px 0 0; max-height: 92vh; }
+}

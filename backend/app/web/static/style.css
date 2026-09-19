@@ -54,7 +54,6 @@ body {
 button, input, textarea, select { font: inherit; color: inherit; }
 .hidden { display: none !important; }
 .only-mobile { display: none; }
-.spacer { flex: 1; }
 
 /* ---------- 布局 ---------- */
 .app { display: flex; height: 100%; }
