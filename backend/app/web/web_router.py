@@ -7,6 +7,7 @@ import os
 import sys
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -72,3 +73,41 @@ def mount_admin(app: FastAPI) -> None:
     /v1/、/docs 等，所以这里不需要动 PUBLIC_PATHS。
     """
     app.mount("/admin", RevalidatingStaticFiles(directory=ADMIN_DIR, html=True), name="admin")
+
+
+def _site_dir() -> str:
+    """官网文件的位置。和 PWA 同层、分目录：它是给人看的一页,不是聊天前端,
+    不该被 /app 那份 service worker 的作用域覆盖。"""
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        return os.path.join(base, "app", "web", "site")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "site")
+
+
+SITE_DIR = _site_dir()
+
+
+def site_headers(response):
+    """官网两份响应共用一组头:index.html 走 FileResponse,资源走下面那个类。
+
+    不抽出来的话就有第二份 no-cache 字面量,改一份漏一份——和 _PROTECTED_PREFIXES
+    在测试里"不抄第二份清单"是同一个道理。
+    """
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
+    return response
+
+
+def install_site(app: FastAPI) -> None:
+    """官网:`GET /` 出 index.html,静态资源挂 `/site`。
+
+    为什么不是 app.mount("/", ...)：根 Mount 的 .path 是空串,而它会部分匹配一切
+    路径,让 Starlette 的 redirect_slashes 不再运行——/health/、/docs/ 一起变 404,
+    未匹配的 POST 从 404 变 405。backend/tests/test_auth_endpoints.py:296 钉的正是
+    尾斜杠语义,那是安全测试,不该为一个落地页付账。
+    """
+    @app.get("/", include_in_schema=False)
+    async def site_index():
+        return site_headers(FileResponse(os.path.join(SITE_DIR, "index.html")))
+
+    app.mount("/site", RevalidatingStaticFiles(directory=SITE_DIR), name="site")
