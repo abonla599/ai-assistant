@@ -92,4 +92,39 @@ public class ShareInboxTest {
         assertEquals(1, rows.size());
         assertEquals(1L, rows.get(0).get("size"));
     }
+
+    /** spec §6 声称覆盖"文件名清洗"，计划里却一条测试都没有。补上。
+     *  注意这里走的是公开表面 put/pending，不去碰私有的 safeName——清洗只在
+     *  作为展示名交给网页时才有意义，磁盘上的文件名永远是那个校验过的 id。
+     *  按 id 取，不对 pending() 的顺序做假设：三次 put 落在同一毫秒，
+     *  addedAt 升序对它们没有约束力，位置断言会变成碰巧绿。 */
+    @Test public void displayNameLosesPathsControlCharsAndExtraLength() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+
+        inbox.put("s0123456789ab", data("x"), "..\\..\\windows\\system32\\cmd.exe", "image/png", 1);
+        assertEquals("cmd.exe", nameOf(inbox, "s0123456789ab"));
+
+        inbox.put("s0123456789ac", data("y"), "a\tb" + '\0' + "c.png", "image/png", 1);
+        assertEquals("a b c.png", nameOf(inbox, "s0123456789ac"));
+
+        StringBuilder longName = new StringBuilder();
+        for (int i = 0; i < 200; i++) longName.append('x');
+        inbox.put("s0123456789ad", data("z"), longName.toString(), "image/png", 1);
+        assertEquals(128, nameOf(inbox, "s0123456789ad").length());
+    }
+
+    private static String nameOf(ShareInbox inbox, String id) {
+        for (Map<String, Object> row : inbox.pending()) {
+            if (id.equals(row.get("id"))) return (String) row.get("name");
+        }
+        return null;
+    }
+
+    @Test public void anEmptyOrBlankDisplayNameFallsBackToShared() {
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+        inbox.put("s0123456789ab", data("x"), "   ", "image/png", 1);
+        assertEquals("shared", inbox.pending().get(0).get("name"));
+    }
 }

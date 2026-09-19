@@ -70,7 +70,7 @@ scheduleReminder(json)                        → {"ok":true,"nextAt":...}
 cancelReminder(id)                            → {"ok":true}
 listReminders()                               → [{"id":...,"at":...,"title":...}]
 pendingShares()                               → [{"id":...,"name":...,"mime":...,"size":...}]
-readShareChunk(id, offset, length)            → {"b64":"..."}
+readShareChunk(json)                          → {"b64":"..."}   {"id","offset","length"}
 consumeShare(id)                              → {"ok":true}
 ```
 
@@ -95,8 +95,9 @@ consumeShare(id)                              → {"ok":true}
 - **② 那一行 CSP**：`@JavascriptInterface` 会挂到**每个 frame** 的 window 上，而
   `view.getUrl()` 只看主文档，所以同源页面上任何能插入第三方 iframe 的 XSS 都能绕过 origin 校验。
   真正的补法不是加固校验，是给 `/app` 加响应头 `Content-Security-Policy: frame-src 'none'`，
-  写在 `backend/app/web/web_router.py:50`（`RevalidatingStaticFiles.get_file_response` 设
-  `Cache-Control` 的旁边）。**这是全设计唯一一处后端代码改动**（CI 工作流另计，见 §6）。
+  写在 `backend/app/web/web_router.py:53`（`RevalidatingStaticFiles.get_response` 设
+  `Cache-Control` 的旁边；初稿写的 `get_file_response` 是错的方法名，那个类只覆写
+  `get_response`）。**这是全设计唯一一处后端代码改动**（CI 工作流另计，见 §6）。
   可行性已实测：全站 grep 无 `iframe`、无 `window.open`，所以它不会碰坏任何东西。
   残余风险如实记录：若将来 XSS 能在**同源**页面执行 JS，桥仍可被调用；
   届时泄漏面是"用户自己设备上刚分享进来的图片"与"自己设的提醒"，不含令牌、不含会话数据。
@@ -138,8 +139,13 @@ CDP 验收），提醒那栏显示"这里设的提醒只在这台手机的应用
 - **清理**：`ShareInbox` 每次被调用时顺手删除超过 30 分钟的文件；`consumeShare` 立即删。
   `cacheDir` 系统在存储紧张时可能自己清掉——所以 JS 侧读到"文件不在了"要提示重新分享，
   而不是静默失败。
-- **归属**：分享件带 owner（见 §2 裁决①）。未登录时收到的分享，owner 记为 `null`，
-  对任何人都不可见，30 分钟后消失。不为它发明"登录后可见"的中间态。
+- **归属（2026-09-19 实现时改判）**：分享件带 owner。未 `setOwner` 前收到的记为 `null`（孤儿），
+  **由第一个 `setOwner` 的人认领**（先到先得），30 分钟后一起消失。
+  初稿写的是"孤儿对任何人不可见"，实现时否掉，因为那条会把首次使用的主路径打死：
+  从相册点分享 → 壳启动 → 网页要求登录 → 登录完成 → 那张图已经谁也看不见了。
+  **残余风险如实记录**：如果有人在从未登录的状态下分享，而下一个在这台设备上登录的是另一个人，
+  后者会看见前者那张图。窗口 ≤30 分钟、内容限于"刚从本人相册分享出来的那一个文件"、
+  且要求设备本身被两人交替使用。提醒表没有这个口子（`add` 时 owner 已确定，不存在孤儿）。
 
 ## 5. 桌面组件与快捷入口
 

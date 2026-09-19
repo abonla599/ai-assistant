@@ -185,7 +185,8 @@ public class MiniJsonTest {
     }
 
     @Test public void encodesNumbersBoolsAndNull() {
-        assertEquals("1.0", MiniJson.encode(1L));
+        assertEquals("1", MiniJson.encode(1L));
+        assertEquals("1.0", MiniJson.encode(1.0));
         assertEquals("true", MiniJson.encode(Boolean.TRUE));
         assertEquals("null", MiniJson.encode(null));
     }
@@ -273,7 +274,7 @@ public final class MiniJson {
             else if (c == '\n') sb.append("\\n");
             else if (c == '\r') sb.append("\\r");
             else if (c == '\t') sb.append("\\t");
-            else if (c < 0x20) sb.append(' ');   // 其余控制字符替换成空格，不生成 \u
+            else if (c < 0x20) sb.append(' ');   // 其余控制字符替换成空格，不生成反斜杠 u 转义
             else sb.append(c);
         }
         sb.append('"');
@@ -695,7 +696,8 @@ public class ShareInboxTest {
     }
 
     private static ByteArrayInputStream data(String s) {
-        return new ByteArrayInputStream(s.getBytes("UTF-8"));
+        // 不能用 getBytes("UTF-8")：它抛受检异常，会让下面三个不带 throws 的测试编译不过
+        return new ByteArrayInputStream(s.getBytes(StandardCharsets.UTF_8));
     }
 
     @Test public void rejectsIdsWithPathTraversalOrWrongLength() {
