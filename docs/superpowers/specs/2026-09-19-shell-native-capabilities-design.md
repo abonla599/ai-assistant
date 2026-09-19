@@ -28,7 +28,10 @@ android/app/src/main/java/xyz/fenever/assistant/
   ShellBridge.java         新：唯一注入 JS 世界的对象
   NotificationChannels.java 新：一次性建渠道
   core/ReminderStore.java  新：排期表（不 import android.*，JVM 可单测）
+  core/Reminder.java       新：提醒记录（不 import android.*）
   core/ShareInbox.java     新：待分享件队列（同上）
+  core/MiniJson.java       新：极小 JSON 编解码（同上；见下方说明）
+  PrefsIo.java             新：core 层与 SharedPreferences 之间唯一的接缝
   ReminderScheduler.java   新：往 AlarmManager 排/撤
   ReminderReceiver.java    新：到点 → 发通知 + 推进 repeat + 刷组件
   BootReceiver.java        新：开机重排（RECEIVE_BOOT_COMPLETED 是安装期权限）
@@ -44,6 +47,10 @@ build.gradle               改：versionCode 13 / versionName "0.13"
 **每个类一个职责**，且刻意把不带 Android 依赖的逻辑收进 `core/`：`ReminderStore` 与
 `ShareInbox` 能在 CI 里跑真正的 JVM 单元测试（见 §6）——这是本设计里唯一能把"写 Java
 却验不了"这件事压下去的手段。
+
+`core/MiniJson.java` 是这条理由逼出来的额外文件：`android.jar` 里的 `org.json` 是 stub，
+JVM 上一 `new JSONObject()` 就抛 `"Stub!"`。用它等于让 core 层的单测跑不起来，而单测正是
+这批改动唯一的本地证据。所以自己写一个只覆盖我们用得到的子集的编解码（约 100 行，含测试）。
 
 **权限只加两项**：`POST_NOTIFICATIONS`（Android 13+ 运行时权限，用户第一次设提醒时问一次）、
 `RECEIVE_BOOT_COMPLETED`（安装期，不弹框）。
@@ -195,7 +202,13 @@ javac -encoding UTF-8 -classpath android-34-ext12/android.jar -d out \
 - Release 说明**必须改**：现在不再"只是个壳、改服务端不用重装"。向后兼容约定写死两条：
   **桥的方法只加不减、不改语义**；**服务端与前端都不得假设壳有桥**。
   老壳装在新服务端上必须仍能正常聊天（走 §2 的降级路径）。
-- 签名仍是 CI 的 debug keystore。上架要 AAB + 永久上传密钥，那是另一次设计（§8）。
+- 签名仍是 CI 每次现装的 debug keystore（仓库里没有 keystore，`build.gradle` 没有
+  `signingConfig`，workflow 也没有持久化步骤）。推论：runner 是临时机器，
+  `~/.android/debug.keystore` 的密钥对每次都重新随机，所以**跨版本大概不能覆盖安装**——
+  要先卸载，卸载会清掉 WebView 的 localStorage（管理员口令、角色设定重填；聊天记录与记忆在
+  服务端，重新登录就回来）。**只是推论，未实测。** 只有一个用户时不值得为它固定 keystore；
+  真要给外人装之前再补（secrets 存一把 + `signingConfig` 指过去）。上架要 AAB + 永久上传密钥，
+  那是另一次设计（§8）。
 
 ## 8. 明确不做
 
@@ -208,7 +221,7 @@ javac -encoding UTF-8 -classpath android-34-ext12/android.jar -d out \
 - 上架 Google Play / 签名密钥迁移。
 - iOS（没有 iOS 客户端，不为其设计）。
 
-## 9. 实机验收清单（在手机上点，8 条）
+## 9. 实机验收清单（在手机上点，9 条）
 
 1. 设一条 2 分钟后的提醒 → 锁屏出通知，标题正文与设置一致。
 2. 通知点进去 → 直接落在助手界面，且不是重新登录。
@@ -218,3 +231,6 @@ javac -encoding UTF-8 -classpath android-34-ext12/android.jar -d out \
 6. 分享一张 >10MB 的图 → 有明确拒绝提示，不是静默没反应。
 7. 桌面组件显示今日提醒；换到另一个账号登录 → 组件里看不见上一个账号的提醒。
 8. 手机浏览器直接开 `https://ai.fenever.xyz/app/` → 一切照旧，提醒栏出说明文案，无报错。
+9. 装 v0.13 时**先不要卸载**：覆盖成功且口令与提醒都在 → §7 的签名推论作废，以后换包零代价；
+   提示签名冲突 → 推论成立，把这条结论回填 §7，并在发版说明里写清"要先卸载、口令需重填"。
+   这是整份设计里唯一只能在真机上拿到的证据，别拖到下次想起来。
