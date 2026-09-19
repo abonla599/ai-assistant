@@ -41,3 +41,10 @@ android {
 }
 
 // 零第三方依赖：全部走平台 API，APK 体积只有一个壳该有的大小
+
+dependencies {
+    // 唯一例外：testImplementation 只进单元测试的 classpath，不进 APK、不进 dex，
+    // 所以不违反上面那条。选 JUnit 4 不选 5：AGP 8.5 的 testDebugUnitTest 对 4 开箱即用，
+    // 用 5 还要再多拉一层 engine/vintage。
+    testImplementation "junit:junit:4.13.2"
+}
