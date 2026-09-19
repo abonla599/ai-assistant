@@ -66,3 +66,83 @@ def test_app_admin_health_and_docs_still_work():
 def test_trailing_slash_semantics_are_untouched():
     """官网上线不许动 redirect_slashes:`/health/` 仍应被引导回 /health。"""
     assert client.get("/health/").status_code == 200
+
+
+# ---------- 2. 文案红线（诚实账）----------
+# 每条都对应 spec §4 的一行证据。页面写谎比不写更糟：来的人照着做完发现对不上,
+# 就再没有第二次机会。
+
+def _page() -> str:
+    return client.get("/").text
+
+
+def test_no_admin_entry_on_the_official_page():
+    assert "/admin" not in _page(), "把管理面地址印到官网上,等于白送攻击面"
+
+
+def test_no_desktop_installer_claims():
+    page = _page()
+    for banned in ("Flutter", "Setup.exe", "AI智能助手_Setup", "Program Files"):
+        assert banned not in page, f"{banned} 是 2026-09 之前的桌面版文案,已经不成立"
+
+
+def test_invite_code_is_stated_as_not_needed():
+    page = _page()
+    assert "不需要邀请码" in page
+    assert "向作者要" not in page, "v0.11 起自助注册,这句会把人挡在门外"
+
+
+def test_unavailable_features_stay_in_the_not_now_section():
+    """联网搜索与代码执行只许出现在「当前未开启」那一节里。"""
+    import re
+    page = _page()
+    section = re.search(r'当前未开启(.*?)</section>', page, re.S)
+    assert section, "没有「当前未开启」这一节"
+    body = section.group(1)
+    assert "代码执行" in body and "联网搜索" in body
+    head = page[:section.start()] + page[section.end():]
+    assert "沙箱" not in head, "沙箱被当成现成能力写进了正文"
+
+
+def test_download_points_at_latest_not_a_pinned_filename():
+    page = _page()
+    assert "releases/latest" in page
+    assert "ai-assistant-0.13.apk" not in page, "钉死文件名的链接下一次发版就腐烂"
+
+
+def test_domain_spelling():
+    """域名只差一个字母,错一个就是别人的站(或一个不存在的站)。"""
+    page = _page()
+    assert "ai.fenever.xyz" in page
+    for wrong in ("feverver", "fenerver", "fenevrr", "feverless"):
+        assert wrong not in page, f"域名拼错：{wrong}"
+
+
+# ---------- 3. 零外部请求 ----------
+
+def test_no_third_party_subresources():
+    """样式和图片必须都在站内。第三方 src 既是外部请求、也是别人挂了我们不知道的
+    东西(它今天还在,明天不一定)。"""
+    import re
+    page = _page()
+    for src in re.findall(r'<(?:img|link|script)[^>]*\b(?:src|href)="([^"]+)"', page):
+        assert not src.startswith("http"), f"外部子资源:{src}"
+        assert not src.startswith("//"), f"协议相对的外部子资源:{src}"
+
+
+def test_absolute_links_only_to_the_two_hosts_we_own():
+    import re
+    page = _page()
+    allowed = ("https://ai.fenever.xyz", "https://github.com/abonla599/ai-assistant")
+    for href in re.findall(r'href="(https?://[^"]+)"', page):
+        assert href.startswith(allowed), f"链到了别人的地方:{href}"
+
+
+def test_page_is_a_single_html_with_no_js():
+    assert "<script" not in _page()
+
+
+def test_landing_page_has_the_six_sections():
+    page = _page()
+    for sid in ("can-do", "shell-only", "start", "not-now", "shots", "faq"):
+        assert f'id="{sid}"' in page, f"缺这一节:{sid}"
