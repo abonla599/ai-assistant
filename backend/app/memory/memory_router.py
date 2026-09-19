@@ -5,6 +5,7 @@ from typing import Optional, List
 import uuid
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 from app.memory.memory_manager import MemoryManager
+from app.memory.ranking import weighted_rank
 
 router = APIRouter(prefix="/v1/memory", tags=["记忆管理"])
 
@@ -69,7 +70,8 @@ class FakeMemoryStore:
                 })
         if exact_matches:
             print(f"   ✅ 找到 {len(exact_matches)} 条精确匹配")
-            return sorted(exact_matches, key=lambda x: x["relevance_score"], reverse=True)[:top_k]
+            return weighted_rank(
+                [(m["relevance_score"], m["weight"], m) for m in exact_matches], top_k)
 
         # 2. 无精确匹配时进行模糊匹配（检查查询词是否在内容中）
         fuzzy_matches = []
@@ -90,7 +92,8 @@ class FakeMemoryStore:
         
         if fuzzy_matches:
             print(f"   ⚠️ 找到 {len(fuzzy_matches)} 条模糊匹配")
-            return sorted(fuzzy_matches, key=lambda x: x["relevance_score"], reverse=True)[:top_k]
+            return weighted_rank(
+                [(m["relevance_score"], m["weight"], m) for m in fuzzy_matches], top_k)
 
         # 3. 最后返回用户所有记忆，保证语义测试通过
         fallback = []
@@ -108,8 +111,11 @@ class FakeMemoryStore:
             print(f"   ℹ️ 返回 {len(fallback)} 条fallback结果")
         else:
             print(f"   ❌ 未找到任何匹配的记忆")
-        
-        return fallback[:top_k]
+
+        # 这一路 relevance 是写死的 0.5，权重是唯一区分信号；按插入顺序切 top_k
+        # 等于让最该被想起的记忆排在第 6 条就永远看不见。
+        return weighted_rank(
+            [(m["relevance_score"], m["weight"], m) for m in fallback], top_k)
 
     def delete_batch(self, memory_ids: list, owner: str) -> int:
         """只删属于 owner 的那些。别人的 id 与不存在的 id 一样：一条都不删。

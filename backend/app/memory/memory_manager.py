@@ -7,6 +7,7 @@ from openai import OpenAI
 
 from app.core.paths import data_root, load_project_env
 from app.core.tls import system_ssl_context
+from app.memory.ranking import weighted_rank
 
 load_project_env()
 
@@ -222,9 +223,12 @@ class MemoryManager:
         if not total:
             return []
 
+        # 多取一些再按权重重排：只问 top_k 条的话，权重永远救不回被距离排在窗口外的
+        # 记忆——那等于反馈白给。截断在重排之后做，注入上下文的条数不会失控。
+        fetch = max(top_k * 3, top_k + 5)
         results = self.collection.query(
             query_embeddings=[self._embed(query)],
-            n_results=max(1, min(top_k, total)),
+            n_results=max(1, min(fetch, total)),
             where={"user_id": user_id},
         )
 
@@ -233,19 +237,22 @@ class MemoryManager:
         dists = (results.get("distances") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
 
-        out = []
+        entries = []
         for i, mem_id in enumerate(ids):
             # 把 id 并入 meta，供反馈闭环定位"这条回答用了哪几条记忆"，
             # 同时不改变返回元组长度，避免影响既有解包。
             meta = {**(metas[i] or {}), "memory_id": mem_id}
-            out.append((docs[i], dists[i], meta))
-        return out
+            entries.append((1.0 - dists[i], meta.get("weight", 1.0),
+                            (docs[i], dists[i], meta)))
+        return weighted_rank(entries, top_k)
 
     def adjust_weights(self, memory_ids: list, owner: str, delta: float) -> dict:
         """按反馈调整记忆权重，结果夹在 [0.1, 5.0]。
 
-        权重直接影响检索排序（memory_router 按 relevance*weight 排序），
-        所以被赞过的记忆更容易被召回、被踩的更难。
+        权重直接影响检索排序：真存储与内存替身两条路都走
+        `app.memory.ranking.weighted_rank`（relevance * weight），所以被赞过的记忆
+        更容易被召回、被踩的更难。这句话在 2026-09-19 之前是假的——两处 sort 键
+        都只有 relevance_score。
 
         owner 必填、无默认值，且筛选写在本方法内部：整份回写会话的端点接受客户端
         自填的 memory_ids，"消息是你的"并不等于"那些记忆是你的"。闸门如果只放在
