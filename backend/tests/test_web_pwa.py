@@ -1499,17 +1499,35 @@ def test_a_brand_new_identity_is_not_blocked_on_choosing_a_model():
     2026-09-18 真机 UI 上撞实：新身份点发送，send() 因为 currentProvider() 返回
     null 直接 return，界面只留一句红字「当前没有可用模型，请联系管理员配置模型服务」
     ——而服务端好得很。模型清单是一次网络往返，在那之前它必然是空的。
-    判据两条：挑不到就用 pickUsableProvider() 兜底；清单还没回来就先拉一次再判。
+    判据两条：挑不到就用服务端给的那个默认兜底；清单还没回来就先拉一次再判。
     """
     js = _js("app.js")
-    pick = _function_body(js, "pickUsableProvider")
-    assert "usable" in pick and "default" in pick, "兜底那条没走「默认优先、且只挑可用」"
+    pick = _function_body(js, "serverDefaultProvider")
+    assert "state.serverDefault" in pick, "兜底那条没在用服务端报的默认"
     cur = _function_body(js, "currentProvider")
-    assert "pickUsableProvider" in cur, "currentProvider 还是「清单里没命中就返回 null」"
-    assert "pickUsableProvider" in _function_body(js, "loadModels"), \
+    assert "serverDefaultProvider" in cur, "currentProvider 还是「清单里没命中就返回 null」"
+    assert "serverDefaultProvider" in _function_body(js, "loadModels"), \
         "loadModels 另写了一套挑选规则：两处口径迟早分家"
     assert "await loadModels()" in _function_body(js, "send"), \
         "清单还没回来时该先去拉一次，而不是直接拒发"
+
+
+def test_the_default_model_choice_comes_from_the_server_only():
+    """/v1/models 的 default 是"默认用哪个"的唯一答案，前端不许再自己挑一遍。
+
+    两侧各挑一次就是那条漂移：服务端 default() 当时不看密钥可用性，前端那句
+    `usable.find(p => p.default) || usable[0]` 看，于是界面显示 B、实际调用用 A。
+    现在服务端只在可用的里面挑（见 test_providers 那三条），前端改成信它的返回值。
+    """
+    js = _js("app.js")
+    assert "usable[0]" not in js, "前端还在自己按清单顺序兜底挑默认"
+    assert not re.search(r"usable\.find\(\s*\(?\s*p\s*\)?\s*=>\s*p\.default", js), \
+        "前端还在拿 catalog 的 ★ 标记自己挑默认"
+    assert "function pickUsableProvider" not in js, "那套自挑的规则还留着，早晚被人接回去"
+    load = _function_body(js, "loadModels")
+    assert "data.default" in load, "没把 /v1/models 报的 default 存下来"
+    assert ".usable" in _function_body(js, "serverDefaultProvider"), \
+        "服务端说了不可用还照用：那条就是会被 resolve() 拒掉的配置"
 
 
 def test_account_rows_offer_switch_and_delete_and_the_current_one_offers_nothing():
@@ -1608,3 +1626,39 @@ def test_shell_reads_a_share_in_chunks_and_uploads_through_the_existing_api():
     app = _js("app.js")
     assert "API.upload(" in app, "分享件没走 api.js 那个上传封装"
     assert 'request("/v1/uploads"' not in app, "app.js 自己另起了一次上传请求：那是第二条上传链路"
+
+
+def test_rejected_shares_are_said_out_loud_on_the_page():
+    """壳拒收一条分享时，网页必须把那句话画出来——不能只有系统 Toast。
+
+    起因是 v0.13 的一条实机风险：`ShareActivity` 用的是 `Theme.NoDisplay`，全程没有
+    窗口，而 Android 官方 Toast 文档写明文字 Toast 只在应用处于前台时显示（12 起重绘后
+    更容易被掐）。spec §9 第 6 条要的是"分享超限有明确拒绝提示，不是静默没反应"，
+    把唯一的希望押在一条系统随时可以不显示的 Toast 上，等于没做。
+
+    刻意**不**在这里抄一份码名清单：那五个名字住在 `SharePolicy.Intake`（壳侧），
+    复制过来就是第二个真相，壳加一个码这里就得跟着改一次，而没跟着改的那次
+    表现为一条红——一个什么都没坏、只是没同步的红旗。新码在没有这条分支的页面上
+    会落到下面锁住的兜底句，那句仍然为真。
+    """
+    handler = _function_body(_js("app.js"), "onShellEvent")
+    assert "share_rejected" in handler, (
+        "onShellEvent 不认 share_rejected：壳发过来的拒绝原因会被静默丢掉，"
+        "用户在页面上看到的仍然是「什么都没发生」")
+    assert re.search(r"setStatus\([^)]*,\s*true\s*\)", handler), (
+        "拒绝提示没按错误态画：与成功提示同色同形，等于没说")
+
+    src = _js("app.js")
+    table = src[src.index("SHARE_REFUSAL = {"):]
+    table = table[:table.index("};")]
+    codes = re.findall(r"^\s*([a-z_]+)\s*:", table, re.M)
+    assert len(codes) >= 5, f"拒收原因表只剩 {len(codes)} 条，少于壳那侧的五个码"
+    assert len(codes) == len(set(codes)), f"同一个码写了两遍：{codes}"
+    for line in table.splitlines():
+        if re.match(r"\s*[a-z_]+\s*:", line):
+            msg = line.split(":", 1)[1]
+            assert "分享没收下" in msg, f"这条拒收文案没先说结果：{line.strip()}"
+            assert not re.search(r"\d+\s*(MB|KB|G)", msg), (
+                f"文案里抄了体积数字（{line.strip()}）：上限住在壳的 ShareInbox，"
+                "壳改数字这句话就开始说谎")
+    assert "分享没收下" in handler, "兜底句没了：壳将来加的新码会画成空白"

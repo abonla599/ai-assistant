@@ -134,6 +134,7 @@ const state = {
   sessions: [],
   messages: [],
   providers: [],          // /v1/models 派生的清单
+  serverDefault: null,    // /v1/models 报的"不给 id 时服务端会用哪个"；唯一答案
   presets: {},
   pending: [],            // 待发送附件 [{id,name,kind,size,url}]
   streaming: false,
@@ -553,6 +554,10 @@ function applyRole() {
 async function loadModels() {
   const data = await API.models();
   state.providers = data.models || [];
+  // "默认是哪个"只有服务端知道答案（providers.ProviderStore.default() 已经只在
+  // 可用的里面挑）。这里抄下来就用它，不再自己按 usable 顺序挑一遍——两侧各挑一次
+  // 就是那条漂移：界面显示 B、实际调用用 A。
+  state.serverDefault = data.default || null;
   state.presets = data.presets || {};
 
   const usable = state.providers.filter((p) => p.usable);
@@ -573,7 +578,7 @@ async function loadModels() {
     ? `${usable.length} 个模型可用` : "服务端还没有可用的模型";
 
   if (!usable.some((p) => p.id === pref.provider)) {
-    const def = pickUsableProvider();
+    const def = serverDefaultProvider();
     if (def) pref.provider = def.id;
   }
   renderModelSelect();
@@ -602,16 +607,19 @@ function renderModelSelect() {
   sel.value = pref.provider;
 }
 
-function pickUsableProvider() {
-  const usable = state.providers.filter((p) => p.usable);
-  return usable.find((p) => p.default) || usable[0] || null;
+function serverDefaultProvider() {
+  // 服务端说用哪个就用哪个；只留一道"它在清单里、而且真可用"的核对：
+  // default() 在有可用配置时不会给出不可用的那条，给出的那条不可用就等于
+  // 一条都没有可用——那时返回 null，由调用方去说"没有可用模型"。
+  const listed = state.providers.find((p) => p.id === state.serverDefault);
+  return listed && listed.usable ? listed : null;
 }
 
 function currentProvider() {
   const listed = state.providers.find((p) => p.id === pref.provider);
   // 没选中、或选中的那个已经不可用（新身份的 providerId 是空的，管理员也可能刚把
   // 某家的密钥填坏）：退回服务端会用的那个默认，而不是把人拦在发送键上。
-  return listed && listed.usable ? listed : pickUsableProvider();
+  return listed && listed.usable ? listed : serverDefaultProvider();
 }
 
 async function loadProviders() {
@@ -1469,6 +1477,16 @@ async function drainShares() {
   updateSendEnabled();
 }
 
+/** 壳拒收分享的五个固定码 → 一句话。键必须与壳的 SharePolicy.Intake 小写名一一对应
+ *  （钉在 backend/tests/test_web_pwa.py）；落在之外的码走 onShellEvent 的兜底句。 */
+const SHARE_REFUSAL = {
+  too_large: "分享没收下：文件太大，超出了助手的附件上限",
+  text_too_large: "分享没收下：这段文本太长",
+  unsupported_mime: "分享没收下：这种内容助手不收",
+  no_stream: "分享没收下：里面没有内容",
+  read_failed: "分享没收下：没读到内容，请重新分享一次",
+};
+
 /** 壳推来的事件只带 {type,id}：所以这里只决定"该重取什么"，不决定"内容是什么"。 */
 function onShellEvent(evt) {
   if (evt.type === "share") { drainShares(); return; }
@@ -1482,6 +1500,15 @@ function onShellEvent(evt) {
   if (evt.type === "open") {
     if (evt.id === "camera") openCamera();
     else if (evt.id === "new_chat") newChat();
+  }
+  /* 分享被壳拒收（壳的 Task 3 加固）：id 是 SharePolicy 那五个固定码之一。
+     为什么网页也要说一遍：ShareActivity 是 Theme.NoDisplay，全程没有窗口，而官方
+     Toast 文档写明文字 Toast 只在应用处于前台时显示——那条即时反馈在这台手机上
+     随时可能被系统掐掉。两条路互不依赖，缺一条还剩一条。
+     文案里不写体积数字：上限住在壳的 ShareInbox（10MB / 文本 1MB），这里抄一份
+     就成了第二个真相，壳改了数字网页就开始说谎。 */
+  if (evt.type === "share_rejected") {
+    setStatus(SHARE_REFUSAL[evt.id] || "分享没收下，请重新分享一次", true);
   }
 }
 
