@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI 助手</string>
+
+    <!-- 桌面组件与快捷入口（Task 8）。启动器把这些读出来画在长按菜单与组件选择器里，
+         所以它们必须是字符串资源：内联文本在 lint 里是 HardcodedText，而且
+         快捷方式的 label 由 SystemUIService 侧读取，不走我们的代码。 -->
+    <string name="widget_description">今日提醒与两个快捷入口</string>
+    <string name="widget_camera">拍照提问</string>
+    <string name="widget_chat">新开对话</string>
+    <string name="shortcut_camera_short">拍照提问</string>
+    <string name="shortcut_camera_long">拍照并向助手提问</string>
+    <string name="shortcut_chat_short">新开对话</string>
+    <string name="shortcut_chat_long">新开一段对话</string>
 </resources>

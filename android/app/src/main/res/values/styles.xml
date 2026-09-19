@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 组件里那四行提醒共用同一套排版，写在一个 style 里而不是抄四遍：
+         改字号/改颜色的时候只有一处，不会只改了 row1 剩下三行还是旧值。
+         这里没有主题继承（parent），因为组件的解析方是桌面进程，
+         套一层设备主题反而把颜色交给了别人决定。 -->
+    <style name="WidgetRow">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">#C9CEDB</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+        <item name="android:paddingTop">2dp</item>
+        <item name="android:paddingBottom">2dp</item>
+    </style>
+</resources>

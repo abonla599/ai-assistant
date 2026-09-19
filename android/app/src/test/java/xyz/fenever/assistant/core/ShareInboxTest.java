@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
@@ -52,6 +53,38 @@ public class ShareInboxTest {
         ShareInbox inbox = new ShareInbox(dir, memIo());
         assertFalse(inbox.put("s0123456789ac", data("x"), "big.png", "image/png",
                 10L * 1024 * 1024 + 1));
+    }
+
+    /**
+     * Task 7 那条硬约束的下半场：Provider 报不出体积（或报小了）时，闸门要按【实际读到的
+     * 字节数】把，而且失败之后不许留下半份文件——ShareActivity 跑在别人相册的分享链路上，
+     * 留一份永远没人来读的 10MB 残件等于把用户 cache 占死。
+     *
+     * <p>这个假流【不】一次性分配 10MB：它顺着"8KB 缓冲流式复制、不整块读进内存"那条要求写，
+     * 所以超上限也只能靠读够字节来发现，而不是靠 array.length。
+     */
+    @Test public void aLyingDeclaredSizeCannotSmugglePastTheCapOrLeaveAHalfWrittenFile() {
+        InputStream endless = new InputStream() {
+            private long left = 10L * 1024 * 1024 + 1;
+
+            @Override public int read(byte[] buf, int off, int len) {
+                if (left <= 0) return -1;
+                int n = (int) Math.min(Math.min(len, buf.length - off), left);
+                left -= n;
+                return n;
+            }
+
+            @Override public int read() {
+                byte[] one = new byte[1];
+                return read(one, 0, 1) < 0 ? -1 : 0;
+            }
+        };
+        ShareInbox inbox = new ShareInbox(dir, memIo());
+        inbox.setOwner("alice");
+        // -1 = 体积未知：前置那一刀放行，真正拦下它的是写入时按字节数把的那一刀
+        assertFalse(inbox.put("s0123456789ad", endless, "big.jpg", "image/jpeg", -1));
+        assertEquals(0, dir.listFiles().length);
+        assertTrue(inbox.pending().isEmpty());
     }
 
     @Test public void pendingIsEmptyUntilAnOwnerIsSet() {

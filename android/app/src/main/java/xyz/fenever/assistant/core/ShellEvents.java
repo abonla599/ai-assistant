@@ -18,6 +18,8 @@ public final class ShellEvents {
     /** 快捷入口的两个固定值，白名单之外没有第三种。 */
     public static final String OPEN_CAMERA = "camera";
     public static final String OPEN_NEW_CHAT = "new_chat";
+    /** 静态快捷方式带参数的 URI 前缀，见 {@link #fromOpenUri}。 */
+    public static final String OPEN_URI_PREFIX = "assistant://open/";
 
     private ShellEvents() {}
 
@@ -30,9 +32,22 @@ public final class ShellEvents {
     }
 
     /**
-     * 把通知/组件/快捷方式带进来的 {@code open_from} 还原成事件。
-     * 只认 {@code reminder:<合法 id>}、{@code camera}、{@code new_chat}，其它回 null。
+     * 静态快捷方式那条链路的参数形状：{@code res/xml/shortcuts.xml} 的 {@code <intent>}
+     * 只能带 {@code android:data}（那条文件里写了为什么不用嵌套的 {@code <extra>} 标签），
+     * 于是那一条入口要先把 URI 折回 {@link #fromOpenFrom} 的输入形状。
+     *
+     * <p>刻意不另立一套判据：前缀只是把 URI 的外壳剥掉，认不认还是 {@link #fromOpenFrom} 说了算，
+     * {@code reminder:<id>} 那一路的 id 也照样过 {@link IDs}。
      */
+    public static String fromOpenUri(String dataUri) {
+        if (dataUri == null) return null;
+        String uri = dataUri.trim();
+        if (!uri.startsWith(OPEN_URI_PREFIX)) return null;
+        return fromOpenFrom(uri.substring(OPEN_URI_PREFIX.length()));
+    }
+
+    /** 把通知/组件/快捷方式带进来的 {@code open_from} 还原成事件。
+     *  只认 {@code reminder:<合法 id>}、{@code camera}、{@code new_chat}，其它回 null。 */
     public static String fromOpenFrom(String openFrom) {
         if (openFrom == null) return null;
         if (openFrom.startsWith(OPEN_FROM_REMINDER)) return reminder(openFrom.substring(OPEN_FROM_REMINDER.length()));

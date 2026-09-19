@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AppWidgetProviderInfo（spec §5）。
+
+     updatePeriodMillis=0：系统本来就把它夹到 30 分钟，靠轮询换"今日"既不可靠也白耗电。
+     真正驱动刷新的是三处写入（增/删/到点推进）加开机、跨天、换时区那几条广播，
+     见 AssistantWidget.onReceive 的注释。
+
+     previewImage 用应用图标：没有它，Android 12 之前的组件选择器里是一片空白。
+     不写 previewLayout（那是 API 31 的属性）、也不写 targetCellWidth/Height（API 31）——
+     minSdk 23 的老启动器读不到新属性只是少个预览，写了老系统会忽略，但
+     minWidth/minHeight 是所有版本都认的那一份，够定初始格数。 -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="140dp"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_assistant"
+    android:previewImage="@mipmap/ic_launcher"
+    android:description="@string/widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

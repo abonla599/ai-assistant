@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 桌面组件的布局（spec §5）。
+
+     RemoteViews 只认平台上那一小组控件：LinearLayout / FrameLayout / RelativeLayout /
+     GridLayout / TextView / ImageView / Button / ProgressBar。所以这里
+     没有 RecyclerView（那要 RemoteViewsService，破零依赖）、没有 ConstraintLayout
+     （它在 androidx 里）、提醒行就是写死的四行 TextView —— 这恰好就是
+     "最多 4 行 + 还有 N 条"那条硬约束的形状。
+
+     颜色全部写成十六进制，不用 ?android:attr/... 主题属性：主题属性是由
+     【桌面启动器】的主题解析的，第三方启动器给不出该属性时整个组件 inflate 失败，
+     用户看到的就只剩"预览不可用"。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widgetRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#161A22"
+    android:padding="10dp"
+    android:minHeight="120dp">
+
+    <TextView
+        android:id="@+id/header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textColor="#E6E8EE"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 四行写死。WidgetBoard.build 保证 rows 最多 4 条，填不满的行设成 GONE。 -->
+    <TextView
+        android:id="@+id/row1"
+        style="@style/WidgetRow"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/row2"
+        style="@style/WidgetRow"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/row3"
+        style="@style/WidgetRow"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/row4"
+        style="@style/WidgetRow"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/more"
+        style="@style/WidgetRow"
+        android:textColor="#8A93A6"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <!-- 两个按钮【不】直接拉相机：那要给相机一个可写 URI，也就是 FileProvider，
+             而 FileProvider 在 androidx.core 里 —— 会破零依赖。改成打开 App 并带上
+             open_from=camera|new_chat，由网页决定弹哪个面板（spec §5 那条取舍）。 -->
+        <Button
+            android:id="@+id/btnCamera"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/widget_camera"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnChat"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/widget_chat"
+            android:textSize="12sp" />
+    </LinearLayout>
+</LinearLayout>

@@ -178,6 +178,22 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * 助手【已经开着】时再从分享面板 / 桌面组件 / 长按图标快捷方式进来一次：
+     * ShareActivity 带的是 CLEAR_TOP + SINGLE_TOP，系统复用这个 WebView 实例
+     * （重建它等于把正聊到一半的对话、正在流式输出的回答整个丢掉），extras 就只走这里。
+     *
+     * <p>必须 setIntent：不然 getIntent() 永远停在冷启动那一条上，之后任何读它的代码
+     * 都会把上一条分享再发一遍。转发用的还是桥那个 queueStartupEvent，所以非法 id
+     * 与不认识的 open_from 一样在这里被静默丢掉。
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (bridge != null) bridge.queueStartupEvent(intent);
+    }
+
+    /**
      * 把网页给出的下载请求落到公共「下载」目录。
      *
      * WebView 对 attachment 响应默认不做任何处理，所以这里显式交给系统 DownloadManager；

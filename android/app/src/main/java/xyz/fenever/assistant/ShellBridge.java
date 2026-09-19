@@ -116,7 +116,12 @@ public final class ShellBridge {
     public void queueStartupEvent(Intent intent) {
         if (intent == null) return;
         event(ShellEvents.share(intent.getStringExtra("pending_share")));
-        event(ShellEvents.fromOpenFrom(intent.getStringExtra("open_from")));
+        // open_from 有两种形状：通知/桌面组件用 extra（Java 侧建的 PendingIntent，想放什么都有），
+        // 静态快捷方式只能放 android:data（见 res/xml/shortcuts.xml 的注释）。两种都折进
+        // 同一个白名单，谁也不给第二条放行规则。
+        String open = ShellEvents.fromOpenFrom(intent.getStringExtra("open_from"));
+        if (open == null) open = ShellEvents.fromOpenUri(intent.getDataString());
+        event(open);
     }
 
     /** 页面没加载完就 evaluateJavascript 会静默丢失，所以先攒着（Task 5 的「排队」）。 */
@@ -206,6 +211,9 @@ public final class ShellBridge {
         // 空串 = 清空归属，于是提醒与分享件对谁都不可见（登录态没了就该这样）
         reminders.setOwner(owner);
         shares.setOwner(owner);
+        // 组件的内容是按 owner 过滤的，换人不刷就等于上一个人的"今日"还挂在桌面上
+        // （spec §9 第 7 条要验的正是这一条）。计划只列了增/删/推进三处，漏了这一处。
+        AssistantWidget.refresh(activity);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", Boolean.TRUE);
         return MiniJson.encode(out);
@@ -224,6 +232,7 @@ public final class ShellBridge {
         if (!reminders.add(reminder)) return refused("too_many");   // 每 owner 32 条，见 ReminderStore
         ReminderScheduler.schedule(activity, reminder);
         askNotificationPermissionOnce();
+        AssistantWidget.refresh(activity);              // 计划 Step 4 的三处之一：新增
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", Boolean.TRUE);
@@ -242,6 +251,7 @@ public final class ShellBridge {
         }
         boolean removed = reminders.cancel(id);
         ReminderScheduler.cancel(activity, id);
+        AssistantWidget.refresh(activity);              // 计划 Step 4 的三处之二：删除
         return done(removed);
     }
 

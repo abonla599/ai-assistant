@@ -45,7 +45,9 @@ public class ReminderReceiver extends BroadcastReceiver {
             if (next != null) ReminderScheduler.schedule(context, next);
             ShellBridge.publish(ShellEvents.reminder(r.id));
         }
-        // Task 8 会在这里补 AssistantWidget.refresh(context)：今日列表变了组件得跟着换。
+        // 计划 Step 4 的三处之三：到点推进之后"今日"那一列也变了（once 少一条、
+        // daily 挪到明天），最后一次刷一遍，不在循环里刷 N 次。
+        AssistantWidget.refresh(context);
     }
 
     /**

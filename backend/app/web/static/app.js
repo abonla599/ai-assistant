@@ -1474,7 +1474,15 @@ function onShellEvent(evt) {
   if (evt.type === "share") { drainShares(); return; }
   // 点了到点的通知：把这一页刷成最新排期（没开着也无所谓，render 是幂等的）
   if (evt.type === "reminder") renderReminders($("paneReminders"));
-  // type==="open"（桌面组件那两个按钮）要等壳的 Task 8 装上才会真发过来
+  /* 桌面组件那两个按钮与长按图标的两条快捷方式（壳的 Task 8）。id 只会是 camera /
+     new_chat 这两个固定值——壳那侧 ShellEvents.fromOpenFrom 有白名单，第三种值发不过来；
+     而"不直接拉相机"是零依赖逼出来的取舍（FileProvider 在 androidx.core 里）。
+     这里刻意不加"先检查登录态"那一层：openCamera 与 newChat 各自会撞上已有的鉴权路径
+     （getUserMedia 要相机权限、ensureSession 要令牌），多一层判断就是多一套规则。 */
+  if (evt.type === "open") {
+    if (evt.id === "camera") openCamera();
+    else if (evt.id === "new_chat") newChat();
+  }
 }
 
 /** 切换前必须一次清掉的本机视图。

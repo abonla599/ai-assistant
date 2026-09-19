@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 长按图标的静态快捷方式（spec §5，API 25 起生效；23-24 上系统直接忽略这个 meta-data，
+     不报错也不显示——所以这两条是"锦上添花"，不是任何功能的前提）。零代码、零依赖。
+
+     参数为什么走 android:data 而不是 <extra> 子标签：shortcuts.xml 的 <intent> 由
+     系统的 XmlIntents 解析，它认 android:data 这一串【属性】，而嵌套标签在旧版本上
+     没有稳定记录可查——解析器遇到不认的子标签是【抛异常】，整个文件一起废掉，
+     两条快捷方式同时消失。本机没有实机可验，所以选那个只用到属性的形状：
+     assistant://open/camera 与 assistant://open/new_chat 由 ShellBridge 的
+     ShellEvents.fromOpenUri 折成与桌面组件同一个 open_from 事件（白名单仍在原处）。
+
+     android:targetPackage / targetClass 把 applicationId 与包名【第二次】写了一遍：
+     改包名时这里要同步改，漏了的表现是"点了快捷方式没反应"，不崩也不报错。
+     留字面量是因为 shortcuts.xml 没有 BuildConfig 那种派生渠道。 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="open_camera"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_camera"
+        android:shortcutShortLabel="@string/shortcut_camera_short"
+        android:shortcutLongLabel="@string/shortcut_camera_long"
+        android:shortcutDisabledMessage="@string/shortcut_camera_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/camera" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="open_new_chat"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_send"
+        android:shortcutShortLabel="@string/shortcut_chat_short"
+        android:shortcutLongLabel="@string/shortcut_chat_long"
+        android:shortcutDisabledMessage="@string/shortcut_chat_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/new_chat" />
+    </shortcut>
+</shortcuts>

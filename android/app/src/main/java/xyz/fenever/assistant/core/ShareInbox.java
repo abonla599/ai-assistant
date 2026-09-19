@@ -34,8 +34,13 @@ public final class ShareInbox {
     /** 与 spec §2 铁律 2 一致：id 走白名单，路径穿越与错长度一律拒。正则只在 {@link IDs} 定义一次。 */
     private static final Pattern ID_RE = IDs.PATTERN;
 
-    /** 对齐 backend/app/core/uploads.py 的 10MB；超了直接不收。 */
-    private static final long MAX_BYTES = 10L * 1024 * 1024;
+    /**
+     * 对齐 backend/app/core/uploads.py 的 10MB；超了直接不收。
+     *
+     * <p>public 是给 {@link SharePolicy}（分享入口的前置闸门）引用：同一个数字写两处，
+     * 迟早有一处会漂，漂了就成了「入口收得下、队列说太大」这种只在真机上半夜出现的错。
+     */
+    public static final long MAX_BYTES = 10L * 1024 * 1024;
 
     /** 分享件 30 分钟即弃：没登录就被分享进来、或用户切走了不看，都不该一直占着 cache。 */
     private static final long TTL_MILLIS = 30L * 60_000L;
