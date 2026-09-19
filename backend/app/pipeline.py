@@ -10,7 +10,7 @@ from app.core.providers import store, build_client
 # 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
 from app.memory.memory_router import memory_manager
 from app.preference_analyzer import read_preference
-from app.tools.registry import get_all_tools_schema
+from app.tools.registry import get_available_tools_schema
 from app.tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 from app.tools.builtin_tools import *
@@ -24,7 +24,9 @@ class ChatPipeline:
         self.user_id = user_id
         # 测试/CI 下为 None（走内存假存储），此时跳过记忆注入与自动保存
         self.memory = memory_manager
-        self.tools_schema = get_all_tools_schema()
+        # 每个请求新建一个 pipeline，所以这一行天然是"按当下的可用性重算"：
+        # 探测值是模块级缓存，代价只是一次布尔读，不会每次都去连 socket。
+        self.tools_schema = get_available_tools_schema()
 
     @staticmethod
     def text_of(content) -> str:

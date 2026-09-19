@@ -88,11 +88,20 @@ def test_web_search():
     assert "Python" in result
 
 
-def test_help():
+def test_help_lists_the_tools_that_can_run(monkeypatch):
+    """help 的清单从 2026-09-20 起按实测可用性裁剪（见 test_tool_availability.py），
+    所以这里不能只读结果就断言"三个都在"——本机没 Docker 时它本来就只剩两个，
+    那是正确行为，不是回归。把两个外部依赖钉成"通"，这条测的才是它原本想测的东西：
+    每一行是 `名字: 用途`。
+    """
+    from app.tools import availability, builtin_tools
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(availability, "search_reachable", lambda: True)
+    monkeypatch.setattr(builtin_tools, "sandbox", SimpleNamespace(client=object()))
     result = execute_tool("help", {})
-    assert "calculator" in result
-    assert "web_search" in result
-    assert "execute_code" in result
+    for name in ("calculator", "web_search", "execute_code"):
+        assert f"{name}:" in result, f"help 少了 {name} 这一行：{result!r}"
 
 
 def test_unknown_tool():
@@ -115,6 +124,9 @@ class _RecordingSandbox:
     def __init__(self, script):
         self.script = list(script)
         self.calls = []
+        # 真 SandboxManager 有 client，可用性检查读的就是它。假身少了这个字段，
+        # 任何走 get_available_tools_schema() 的用例都会撞到 AttributeError 再 fail-open。
+        self.client = object()
 
     def run_code(self, code, language="python", timeout=None):
         self.calls.append((code, language))

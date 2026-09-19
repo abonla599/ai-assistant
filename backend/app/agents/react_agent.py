@@ -7,7 +7,7 @@ import json
 from typing import List, Dict, Any, Optional
 from app.core.llm_client import get_llm_response
 from app.tools.executor import execute_tool
-from app.tools.registry import get_all_tools_schema
+from app.tools.registry import get_available_tools_schema
 
 
 class ReActAgent:
@@ -36,7 +36,7 @@ class ReActAgent:
         self.model = model
         self.max_turns = max_turns
         self.verbose = verbose
-        self.tools_schema = get_all_tools_schema()
+        self.tools_schema = get_available_tools_schema()
 
     def run(
         self,

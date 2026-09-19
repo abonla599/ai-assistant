@@ -13,7 +13,8 @@ import math
 import operator
 import re
 import time
-from app.tools.registry import register_tool, tools_registry
+from app.tools import availability
+from app.tools.registry import register_tool, tools_registry, is_available
 from ddgs import DDGS
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
@@ -127,7 +128,10 @@ def _value_of(node):
             }
         },
         "required": ["query"]
-    }
+    },
+    # 这里必须是 availability 模块属性调用（而不是 from ... import search_reachable），
+    # 也不能在导入期求值：搜索源通不通是后台每 5 分钟重测一次的，导入期定死就退化成名单。
+    available=lambda: availability.search_reachable()
 )
 def web_search(query: str) -> str:
     try:
@@ -151,6 +155,10 @@ def web_search(query: str) -> str:
 def help_tool() -> str:
     info = []
     for name, t in tools_registry.items():
+        # 模型问"你有什么工具"时推荐一个必失败的，等于我们亲自给它挖坑：
+        # 它会照着调，拿回一句错误，再凭那句错误硬编答案。
+        if not is_available(t):
+            continue
         info.append(f"{name}: {t['description']}")
     return "\n".join(info)
 
@@ -173,7 +181,10 @@ def help_tool() -> str:
             }
         },
         "required": ["code"]   # 必须提供代码，语言不提供则默认为 python
-    }
+    },
+    # 读 sandbox 这一个实例的 client，不再 new 一个 SandboxManager：后者每次都会
+    # 重连 docker 守护进程，并把「沙箱停用」那行警告重复打印一遍。
+    available=lambda: sandbox.client is not None
 )
 def execute_code(code: str, language: str = "python", max_retries=2) -> str:
     result = {}

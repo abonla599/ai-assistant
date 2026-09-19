@@ -10,6 +10,7 @@
 真身，否则测的还是那个假的。
 """
 import importlib
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -214,3 +215,31 @@ def test_chat_stream_endpoint_passes_the_tool_schema(real_stream_chat):
         f"{sorted(sent)}"
     names = {t["function"]["name"] for t in sent["tools"] if t.get("function")}
     assert "calculator" in names, f"清单里没有计算器：{sorted(names)}"
+
+
+# ---------- 4. 打桩函数不许比真身"更能收" ----------
+
+def test_the_autouse_stub_is_no_wider_than_the_real_signature():
+    """conftest 的 autouse 夹具把 `streaming.stream_chat` 整个换成了假的，端点用例
+    跑的就是那个假身。
+
+    假签名可以比真签名窄（少个参数会在调用点当场 TypeError，响得很），但不能宽出去：
+    多收一个参数、或者图省事补个 `**kwargs`，生产里必然报错的调用点在测试里就静静
+    通过了——下一次给 stream_chat 加参数时，这个文件会假装自己还测得着。
+    线上那个「端点没传 tools」的 bug 正是这个形状，别在测试脚手架上再犯一次。
+    """
+    stub = streaming.stream_chat                      # 夹具换上去的假身
+    importlib.reload(streaming)                       # 只有 reload 才拿得回真身
+    try:
+        real = streaming.stream_chat
+        stub_params = inspect.signature(stub).parameters
+        real_params = inspect.signature(real).parameters
+        assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in stub_params.values()), \
+            "打桩函数写了 **kwargs，签名比对就此失效"
+        extra = set(stub_params) - set(real_params)
+        assert not extra, f"打桩函数收得下真身不认识的参数：{sorted(extra)}"
+        assert inspect.isgeneratorfunction(real) and inspect.isgeneratorfunction(stub), \
+            "stream_chat 必须是同步生成器（async 会让阻塞读冻住整个事件循环）"
+    finally:
+        importlib.reload(streaming)

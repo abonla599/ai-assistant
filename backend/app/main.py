@@ -103,6 +103,10 @@ async def lifespan(app: FastAPI):
     # "所有数据都在 data/ 下吗"取决于本机有没有一个老 preference.txt，光看文档猜不出来。
     from app.core.paths import log_data_locations
     log_data_locations()
+    # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
+    # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
+    from app.tools.availability import start_probe
+    start_probe()
     start_background_scheduler()
     yield
     # 关闭时执行（如果需要清理资源）
