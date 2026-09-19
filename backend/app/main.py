@@ -431,8 +431,12 @@ def stream_chat_endpoint(request: ChatRequest,
 
         full_text = ""
         try:
+            # tools 走的是同一个 pipeline 实例：非流式那条一直把工具传给模型，
+            # 流式这条以前一个都没传，于是界面上工具等于不存在（模型如实说它
+            # 不会用计算器）。清单装配见 ChatPipeline.__init__。
             for chunk in stream_chat(provider["model"], messages,
-                                     provider_id=provider["id"]):
+                                     provider_id=provider["id"],
+                                     tools=pipe.tools_schema if pipe else None):
                 full_text += chunk
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             
