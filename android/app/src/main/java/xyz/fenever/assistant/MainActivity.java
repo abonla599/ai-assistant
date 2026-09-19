@@ -11,6 +11,7 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.webkit.PermissionRequest;
@@ -170,9 +171,20 @@ public class MainActivity extends Activity {
         webview.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) ->
                 startDownload(url, userAgent, contentDisposition));
 
-        // ACTION_DOWNLOAD_COMPLETE 只由系统 DownloadManager 发出，属系统广播，
-        // 因此即便 targetSdk 34 也不必给 registerReceiver 传 RECEIVER_EXPORTED 标志。
-        registerReceiver(downloadReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+        // Android 14 起，Context.registerReceiver 只有当过滤器【全部】命中 AOSP
+        // IntentFilter.SYSTEM_ONLY_ACTIONS 那张硬编码表时才能省掉导出标志，而
+        // DOWNLOAD_COMPLETE 不在表里。v0.13 就是被这一句崩在 onCreate 里、loadUrl 之前：
+        // Android 14+ 的设备点图标闪一下回桌面，服务端一条请求都收不到。
+        // 带标志的重载是 API 33 才有的，minSdk 23 不能无条件调，所以按版本分岔——
+        // 会强制要标志的设备必然 >= 34，这个分岔不会漏。
+        // 选 NOT_EXPORTED 而不是 EXPORTED：这条广播只该由系统的 DownloadManager 发，
+        // 不给别的 App 伪造一次"下载完成"来戳我们那个按 id 查表的接收器。
+        IntentFilter downloadFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadReceiver, downloadFilter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(downloadReceiver, downloadFilter);
+        }
 
         // 静态快捷方式那条 XML 链路（android:data 能不能被系统解析器读出来）本机没实机可证，
         // 所以冷启动自检一次：读不出参数就用 Java 建的动态快捷方式补上。那是几次 binder 调用，
