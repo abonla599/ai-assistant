@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI 智能助手——一个记得住你的在线助手</title>
-<meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、看懂你发的图片和 PDF、长期记忆,每个人各用各的。">
+<meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆,每个人各用各的。">
 <link rel="stylesheet" href="/site/site.css">
 </head>
 <body>
 
 <header class="hero">
   <h1>AI 智能助手</h1>
-  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能看懂你发过去的图片和 PDF,而且每个人各用各的、互不串味。</p>
+  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,而且每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">打开就用（手机浏览器）</a>
     <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">装安卓壳（约 96 KB）</a>
@@ -24,7 +24,7 @@
   <ul class="cards">
     <li><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型,默认用哪个由服务端定,你不用配任何东西。</p></li>
     <li><h3>会算数</h3><p>让它算,它走计算器而不是猜一个数:表达式在本机按白名单解析,不执行模型给的原样字符串。</p></li>
-    <li><h3>看懂你发的文件</h3><p>拍照、选图、发 PDF,它会先读内容再回答,而不是让你把文字抄一遍。</p></li>
+    <li><h3>读你发过去的文件</h3><p>发 PDF、发图片,它会先读内容再回答,不用你把文字抄一遍。图片要当前模型带视觉：可切换的模型以服务端的列表为准,默认那条不带视觉时,在设置里换一个就行。</p></li>
     <li><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来;哪些记忆在存着,你在设置里能看到、能删。</p></li>
     <li><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
   </ul>
@@ -56,6 +56,7 @@
   <ul>
     <li><strong>联网搜索</strong>:代码里有,但这台服务器够不着搜索源,所以它现在给不出实时信息。</li>
     <li><strong>代码执行（沙箱）</strong>:代码里有,但需要宿主机上的 Docker,当前没开。</li>
+    <li><strong>扫描版 PDF</strong>:图片式的 PDF 要先经过 OCR,今天还不行。有文字层的 PDF 可以直接读。</li>
     <li><strong>离线使用</strong>:没有。界面和数据都在线上,断网就只能等着。</li>
   </ul>
 </section>

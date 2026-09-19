@@ -93,15 +93,17 @@ def test_invite_code_is_stated_as_not_needed():
 
 
 def test_unavailable_features_stay_in_the_not_now_section():
-    """联网搜索与代码执行只许出现在「当前未开启」那一节里。"""
+    """联网搜索、代码执行、扫描版 PDF 只许出现在「当前未开启」那一节里。"""
     import re
     page = _page()
     section = re.search(r'当前未开启(.*?)</section>', page, re.S)
     assert section, "没有「当前未开启」这一节"
     body = section.group(1)
-    assert "代码执行" in body and "联网搜索" in body
+    for term in ("代码执行", "联网搜索", "扫描版 PDF"):
+        assert term in body, f"「{term}」应当在该节里说明"
     head = page[:section.start()] + page[section.end():]
-    assert "沙箱" not in head, "沙箱被当成现成能力写进了正文"
+    for banned in ("沙箱", "支持联网"):
+        assert banned not in head, f"「{banned}」被当成现成能力写进了正文"
 
 
 def test_download_points_at_latest_not_a_pinned_filename():
