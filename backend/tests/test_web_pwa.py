@@ -98,11 +98,18 @@ def test_service_worker_does_not_cache_api():
     assert "/v1/" in _js("sw.js")
 
 
-def test_root_still_reports_api_status():
-    """新增前端挂载不应改变 / 的既有语义。"""
-    res = client.get("/")
-    assert res.status_code == 200
-    assert res.json()["status"] == "running"
+def test_site_and_pwa_do_not_cover_each_other():
+    """/` 现在是官网,`/app` 仍是 PWA —— 两条都要在,而且返回的不是同一份东西。
+
+    这条前身叫 test_root_still_reports_api_status,钉的是"`/` 没被 PWA 挂载抢走"。
+    `/` 换主之后如果直接删掉它,就没人管"`/app` 有没有被官网抢走"了。
+    """
+    root = client.get("/")
+    app = client.get("/app/")
+    assert root.status_code == 200 and app.status_code == 200
+    assert root.headers["content-type"].startswith("text/html")
+    assert app.headers["content-type"].startswith("text/html")
+    assert root.text != app.text, "两个页面返回了同一份内容,说明有一个被覆盖了"
 
 
 def test_memory_list_shape_matches_frontend(enforced):

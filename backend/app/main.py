@@ -265,15 +265,6 @@ def start_background_scheduler():
 
 
 # ---------- API 端点 ----------
-@app.get("/")
-async def root():
-    return {
-        "status": "running",
-        "service": "AI 智能助手",
-        "version": "1.0.0",
-        "default_model": "deepseek-chat"
-    }
-
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
@@ -874,6 +865,12 @@ async def delete_task(task_id: str, _: Principal = RequireAdmin):
         del task_store[task_id]
         return {"status": "deleted", "task_id": task_id}
     raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+# ---------- 官网 ----------
+# 放最后只是因为这一节属于"对外长什么样",和上面那堆接口分开摆。
+# R7 之后它不再承担顺序语义：没有 catch-all Mount,所以放早也不会吞掉 /v1。
+from app.web.web_router import install_site
+install_site(app)
 
 # ---------- 启动入口 ----------
 if __name__ == "__main__":

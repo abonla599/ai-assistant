@@ -11,13 +11,17 @@ from app.main import app
 client = TestClient(app)
 
 
-# ========== 1. 根路径 ==========
+# ========== 1. 根路径：官网 ==========
 def test_root():
+    """`/` 是官网,不是机器话。
+
+    2026-09-19 之前它返回 {"status":"running",...,"version":"1.0.0"}——那个 version
+    和线上 v0.13 早就不是一个东西,来的人看到的是一句谎。
+    """
     res = client.get("/")
     assert res.status_code == 200
-    data = res.json()
-    assert "status" in data
-    assert data["status"] == "running"
+    assert res.headers["content-type"].startswith("text/html")
+    assert "AI 智能助手" in res.text
 
 
 # ========== 2. 基础对话（当前为占位接口） ==========

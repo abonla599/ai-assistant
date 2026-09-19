@@ -15,10 +15,12 @@ a = Analysis(
     # 入口以顶层包名 app 导入（见 run_backend.py），分析阶段需要能找到 backend/app
     pathex=['backend'],
     binaries=chroma_binaries + binding_binaries + fitz_binaries,
-    # 两个前端目录都要显式列出：漏一个的后果是"源码版全对、EXE 版 404"，
+    # 三个前端目录都要显式列出：漏一个的后果是"源码版全对、EXE 版 404"，
     # 而这条不会让任何测试变红（上次 static 缺失导致 EXE 启动即崩就是同一形状）。
+    # site 是官网：漏了它，冻结版的 GET / 会因为找不到 index.html 而 500。
     datas=[('backend/app/web/static', 'app/web/static'),
-           ('backend/app/web/admin', 'app/web/admin')] + chroma_datas + binding_datas + fitz_datas,
+           ('backend/app/web/admin', 'app/web/admin'),
+           ('backend/app/web/site', 'app/web/site')] + chroma_datas + binding_datas + fitz_datas,
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',

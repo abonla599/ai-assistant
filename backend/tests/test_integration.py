@@ -123,7 +123,7 @@ def test_health_check():
 
 
 def test_root():
-    """根路径检查"""
+    """根路径是官网。以前断的是 {"service": "AI 智能助手"} 那段 JSON。"""
     res = client.get("/")
     assert res.status_code == 200
-    assert res.json()["service"] == "AI 智能助手"
+    assert "AI 智能助手" in res.text

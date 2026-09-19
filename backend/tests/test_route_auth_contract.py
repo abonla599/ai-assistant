@@ -73,7 +73,12 @@ EXEMPT_PATHS = {"/", "/health"}
 # 那条测试就是为了让那种形状当场变红。
 # /admin 是管理员页的外壳：公开的是**壳**，不是数据——它一个用户的名字都不含，
 # 所有数据都要过 require_admin。那条边界由 backend/tests/test_admin_page.py 单独钉。
-SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin"}
+# /site：官网的静态资源(index.html 之外的 css 与截图)。新开顶层前缀必须在这里
+# 登记并写理由——本文件的 test_nothing_routable_lives_outside_both_locks 就是为了让
+# 这种改动不可能悄悄发生。页面本身是 `GET /`,已在 EXEMPT_PATHS 里。
+# 为什么不干脆挂 Mount("/")：它的 .path 是空串,且会抢走 redirect_slashes,
+# 把 /health/、/docs/ 变成 404 —— 详见 backend/app/web/web_router.py:install_site。
+SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin", "/site"}
 
 
 def _is_v1(path: str) -> bool:
