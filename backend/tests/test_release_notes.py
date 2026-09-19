@@ -41,6 +41,35 @@ def test_release_notes_are_named_after_a_real_tag():
     assert not bad, f"这些文件名对不上 tag 形状 v<主>.<次>.md：{bad}"
 
 
+def test_the_notes_answer_three_questions_in_order():
+    """版本日志要能一眼回答：修了什么 bug、优化了什么、加了什么功能。
+
+    三节都必须存在，但**允许某一节写"本版无"**——不许为了凑格式编内容。
+    真正防的是"只有一段散文/只有安装说明"那种正文：读的人分不出哪些是修复、
+    哪些是新能力，也就判断不出这版值不值得重装。
+    """
+    ver = current_version_name()
+    text = (RELEASE_NOTES_DIR / f"v{ver}.md").read_text(encoding="utf-8")
+    headings = [h.strip() for h in re.findall(r"^##\s+(.+)$", text, re.M)]
+    for needed in ("修了", "优化", "加了"):
+        assert any(needed in h for h in headings), (
+            f"v{ver}.md 少了「{needed}…」这一节。现有小节：{headings}")
+
+
+def test_every_link_in_the_notes_points_at_a_host_we_own():
+    """正文里的链接用白名单判，不用"错拼清单"判。
+
+    错拼清单永远少一个——`feverner` 这个写法真进过发布说明，而当时那份清单里没有它。
+    反过来只允许三个主机名，任何拼错、任何第三方域名都会红。
+    """
+    ver = current_version_name()
+    text = (RELEASE_NOTES_DIR / f"v{ver}.md").read_text(encoding="utf-8")
+    hosts = set(re.findall(r"https?://([^/\s>）)]+)", text))
+    allowed = {"ai.fenever.xyz", "www.fenever.xyz", "github.com"}
+    unexpected = hosts - allowed
+    assert not unexpected, f"正文里出现了不在白名单里的主机名：{sorted(unexpected)}"
+
+
 def test_the_workflow_reads_the_notes_file_by_tag_not_by_bare_version():
     """钉住那个刚踩过的坑：${ver} 是 ${tag#v}，v 已经被剥掉了。
 
