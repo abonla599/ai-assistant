@@ -55,3 +55,11 @@ path_fix.ps1
 path_inspect.ps1
 _diag_*.py
 _verify_*.py
+
+# Windows 自己写错的缓存目录，不是本项目的产物
+# 某处把 %SystemDrive% 当成**字面量**用了（没被环境变量展开），于是 Windows 把
+# ProgramData\Microsoft\Windows\Caches\ 下的图标/命名空间缓存（cversions.2.db 等
+# 四个 .db，约 976KB）写进了仓库根下一个真名叫 "%SystemDrive%" 的目录。全仓 grep 过，
+# 没有任何代码引用它；它是活动系统缓存，删了会被 Windows 再造，所以只挡不追。
+# 这条是控制"别进版本库"，不是"别存在"。
+/%SystemDrive%/
