@@ -1,0 +1,56 @@
+name: Android Shell Tests
+
+# 为什么单开一个文件，而不是并进 release-apk.yml（设计 §6）：release-apk.yml 由 tag
+# 触发，可出包之前必须先有测试能跑；并到一起会让"测试失败"和"发版失败"混成同一次红，
+# 事后谁也分不清是哪类。这里重复的是二十来行 CI 装配步骤，不是产品逻辑。
+#
+# Java/Gradle 的装配方式逐字抄 build-apk.yml —— 那是本仓 CI 已经跑绿的那一套，
+# 不要在这里发明新形状：
+#   - 仓库里没有 gradle-wrapper.jar（二进制文件），所以 gradle 由 setup-gradle 提供 8.7
+#     （AGP 8.5.2 要求的最低版本正是 8.7）；
+#   - ubuntu-latest 镜像自带 Android SDK（ANDROID_HOME 已设好），额外跑一步
+#     android-actions/setup-android 曾经把构建弄挂，故不再装；
+#   - 命令一律 `gradle -p android --no-daemon --stacktrace <task>`。任务名不带 `:app:`
+#     前缀也能跑到 :app 上：android/ 是 root project（settings.gradle 里 include ":app"），
+#     根工程没有同名任务时 Gradle 会到子工程里找——assembleDebug 今天就是这么跑起来的。
+#
+# 分层验证的其余部分不在这里：平台 API 签名靠本机 javac + android.jar（Task 5 的型检台），
+# 通知真响/Doze/组件渲染只能实机。CI 兜的是"资源引用、清单合并、整体构建"。
+on:
+  # 失败后从 UI 重跑即可，不必再推一个提交
+  workflow_dispatch:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-tests.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # 先测后包：core/ 那四个类不 import android.*，这一段是纯 JVM 真跑（不引 Robolectric）。
+      # 顺序有意——单测挂了就没必要再花两分钟出一个不该存在的包。
+      - name: Unit tests (pure JVM)
+        run: gradle -p android --no-daemon --stacktrace testDebugUnitTest
+
+      # 兜 javac 型检抓不到的那部分：资源引用、清单合并、R.* 生成。
+      - name: Assemble debug APK
+        run: gradle -p android --no-daemon --stacktrace assembleDebug
