@@ -606,3 +606,23 @@ def test_guard_detection_does_not_trust_parameter_names():
 
     target = next(r for r in test_app.routes if _is_v1(r.path))
     assert not _route_guards(target) & GUARD_CALLABLES, "参数名不该被当成守卫"
+
+
+# ---------- 壳的响应头契约（计划 2026-09-19 Task 1） ----------
+
+
+def test_app_shell_refuses_frames(client):
+    """`@JavascriptInterface` 挂到**每个 frame** 的 window 上，而原生侧的 origin 校验
+    只看主文档 URL（`webview.getUrl()`）。所以同源页面上任何能塞进第三方 iframe 的
+    XSS 都绕得过去——那一步不是靠"把校验写得更严"补的，是靠 web 侧不再给 frame 留
+    任何位置：`frame-src 'none'`。
+
+    这里查的是真请求返回的头，不是源码里有没有那行字：注释掉实现就红，把值改成
+    `frame-src 'self'`（等于没堵）也红。
+    """
+    for path in ("/app/", "/app/app.js", "/app/style.css"):
+        res = client.get(path)
+        # 先钉状态码：404 的响应本来就没有 CSP 头，不先排除它，"文件被改名"会伪装成
+        # "安全头没了"，红到离真凶很远的地方。
+        assert res.status_code == 200, f"{path} 拿不到 200（{res.status_code}），先修这个再谈 CSP"
+        assert res.headers.get("content-security-policy") == "frame-src 'none'; object-src 'none'", path

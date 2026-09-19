@@ -48,6 +48,9 @@ class RevalidatingStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache"
+        # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
+        # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
+        response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
         return response
 
 
