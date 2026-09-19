@@ -489,6 +489,7 @@ function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden")
  *  叫用户手动刷新一次页面才算登录成功。 */
 async function afterAuth(res) {
   addIdentity(res);                 // 落地凭据并把这个人设为当前身份
+  SHELL.setOwner(res.user_id);      // 告诉壳"现在是谁"：没这一步他看见的提醒是空集
   resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
   $("authPass2").value = "";
@@ -520,6 +521,9 @@ async function loadWho() {
     state.me = await API.me();
     setStatus("");      // 认出人了：上一轮"还没登录/连不上"那句已经过期
     touchIdentity(state.me);
+    // 冷启动已登录、以及切换之后都走这一条：服务端说他是谁，壳那边就按谁隔离提醒
+    // 与分享件。身份只多这一处出口，是因为清单里的 userId 只是本机记的，可能已作废。
+    SHELL.setOwner(state.me.user_id);
   } catch (e) {
     state.me = null;
     // 401/403 是"这台设备还没登录"这一种正常状态；其余（连不上、服务端没配凭据
@@ -1260,7 +1264,7 @@ async function sendFeedback(index, rating, btn) {
  * 列表本身就是入口，没有"落在哪一页"这回事了。
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
-                    persona: "角色设定", memory: "长期记忆" };
+                    persona: "角色设定", memory: "长期记忆", reminders: "提醒" };
 
 function openSettings(page) {
   $("settings").classList.remove("hidden");
@@ -1292,6 +1296,7 @@ function openSetPage(name) {
   if (name === "providers") loadProviders();
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
+  if (name === "reminders") renderReminders($("paneReminders"));
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
 
@@ -1344,6 +1349,134 @@ function renderAccounts() {
   $("accountsVal").textContent = readIdentities().length + " 个已登录";
 }
 
+/** 提醒页（设置 → 设备 → 提醒）。
+ *  没有桥时这一页只剩一句说明：提醒是壳在手机上排的，网页自己存一份就变成第二个
+ *  事实来源，而且那一份永远不会响——按了没反应的表单比没有表单更坏。 */
+function renderReminders(host) {
+  host.innerHTML = "";
+  if (!SHELL.present) {
+    const note = document.createElement("p");
+    note.className = "pane-note";
+    note.textContent = "这里设的提醒只在这台手机的应用里生效。";
+    host.appendChild(note);
+    return;
+  }
+
+  const items = SHELL.listReminders();
+  $("remindersVal").textContent = items.length ? items.length + " 条" : "";
+
+  const form = document.createElement("form");
+  form.className = "row";
+  const title = document.createElement("input");
+  title.type = "text";
+  title.placeholder = "提醒我什么";
+  const at = document.createElement("input");
+  at.type = "datetime-local";
+  at.setAttribute("aria-label", "提醒时间");
+  const repeat = document.createElement("select");
+  repeat.setAttribute("aria-label", "重复");
+  [["once", "只一次"], ["daily", "每天"], ["weekly", "每周"]].forEach((pair) => {
+    const opt = document.createElement("option");
+    opt.value = pair[0]; opt.textContent = pair[1];
+    repeat.appendChild(opt);
+  });
+  const add = document.createElement("button");
+  add.className = "btn btn-primary";
+  add.textContent = "添加";
+  form.append(title, at, repeat, add);
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const text = title.value.trim();
+    const when = at.value ? new Date(at.value).getTime() : NaN;
+    if (!text) { setStatus("先写上要提醒什么", true); return; }
+    if (isNaN(when)) { setStatus("时间还没选好", true); return; }
+    // at 交出去的是 epoch 毫秒：本地时区在网页这边算完，壳那边不做任何日历运算。
+    const r = SHELL.addReminder({ at: when, title: text, body: "", repeat: repeat.value });
+    if (!r.ok) {
+      setStatus(r.error === "too_many" ? "这个人已经有 32 条提醒了，先取消几条"
+                                       : "没能设这条提醒：" + (r.error || "壳没有应答"), true);
+      return;
+    }
+    setStatus("");
+    renderReminders(host);
+  };
+  host.appendChild(form);
+
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "pane-note";
+    empty.textContent = "还没有提醒";
+    host.appendChild(empty);
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "set-card";
+  items.forEach((r) => {
+    const row = document.createElement("div");
+    row.className = "set-row";
+    const lbl = document.createElement("span");
+    lbl.className = "set-lbl";
+    lbl.textContent = r.title || "提醒";
+    const val = document.createElement("span");
+    val.className = "set-val";
+    val.textContent = fmtReminderAt(r.at)
+      + (r.repeat === "daily" ? " 每天" : r.repeat === "weekly" ? " 每周" : "");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "set-mini set-del";
+    cancel.textContent = "取消";
+    cancel.onclick = () => { SHELL.cancelReminder(r.id); renderReminders(host); };
+    row.append(lbl, val, cancel);
+    card.appendChild(row);
+  });
+  host.appendChild(card);
+}
+
+/** 提醒行上的时间：月/日 时:分。跨年的提醒在本产品里没有意义，不值得占这一行。 */
+function fmtReminderAt(ms) {
+  const d = new Date(Number(ms));
+  if (isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* ---------------- 壳的系统分享入口 ----------------
+ * 相册/文件里点"分享 → AI 助手"，件先躺在壳的待上传队列里；这里把它读出来、
+ * 走**现有**那条 POST /v1/uploads（api.js 的 upload：令牌头、错误解析、附件记录
+ * 形状都只对齐一次），拿回附件记录挂进待发送区，然后让壳删掉本地那份。
+ */
+async function drainShares() {
+  if (!SHELL.present) return;                 // 浏览器里没有队列：第一句就出去
+  const items = SHELL.pendingShares();
+  for (const meta of items) {
+    const chip = attachmentChip({ name: meta.name, size: Number(meta.size) || 0, kind: "?" }, true);
+    $("attRow").appendChild(chip);
+    try {
+      const blob = await SHELL.readShare(meta.id);
+      // cacheDir 里的东西系统随时可能自己清掉；读不到要人说"重新分享一次"，不能静默
+      if (!blob) throw new Error("已经不在这台手机上了，请重新分享一次");
+      const file = new File([blob], meta.name || "shared", { type: blob.type });
+      const rec = await API.upload(file);
+      chip.replaceWith(attachmentChip(rec));
+      state.pending.push(rec);
+      SHELL.consumeShare(meta.id);
+    } catch (e) {
+      markChipFailed(chip, meta.name, e.message);
+      setStatus("分享的文件上传失败：" + e.message, true);
+    }
+  }
+  updateSendEnabled();
+}
+
+/** 壳推来的事件只带 {type,id}：所以这里只决定"该重取什么"，不决定"内容是什么"。 */
+function onShellEvent(evt) {
+  if (evt.type === "share") { drainShares(); return; }
+  // 点了到点的通知：把这一页刷成最新排期（没开着也无所谓，render 是幂等的）
+  if (evt.type === "reminder") renderReminders($("paneReminders"));
+  // type==="open"（桌面组件那两个按钮）要等壳的 Task 8 装上才会真发过来
+}
+
 /** 切换前必须一次清掉的本机视图。
  *  漏一项就是"界面写着 B、屏幕上画着 A 的对话"——用户据此判断「账号之间记忆共享」，
  *  哪怕服务端从来没共享过。所以这 7 项列在一处，而不是散在切换路径里各清各的。 */
@@ -1377,6 +1510,7 @@ async function switchTo(userId) {
     state.controller = null;
     state.streaming = false;
     setCurrent(userId);
+    SHELL.setOwner(userId);         // 换指针的同时换壳那边的 owner：否则切号后还能看见上一个人的提醒
     resetViewForIdentity();
     closeSettings();
     showAuthPending();
@@ -1676,6 +1810,7 @@ function bind() {
   $("rowProviders").onclick = () => openSetPage("providers");
   $("rowPersona").onclick = () => openSetPage("persona");
   $("rowMemory").onclick = () => openSetPage("memory");
+  $("rowReminders").onclick = () => openSetPage("reminders");
   // 改密码复用首层那套三步找回：这里再放一份字段就是第二个要各自校验、
   // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
   // 所以先把层打开，再翻到找回那张。
@@ -1822,6 +1957,8 @@ async function boot() {
   applyTheme();
   bind();
   setupKeyboardAware();
+  // 壳的事件入口只注册这一次。没有桥时这个数组永远没人推，注册本身无害。
+  SHELL.onEvent(onShellEvent);
   updateSendEnabled();
   $("ctxRange").value = pref.contextWindow;
   $("ctxVal").textContent = pref.contextWindow;
@@ -1851,6 +1988,9 @@ async function boot() {
   syncPersonaChip();
 
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => {});
+  /* 冷启动时壳里可能已经躺着一件"分享 → AI 助手"送进来的文件（人在没打开网页时就分享了）。
+     排在这一段最后：上传要带令牌，认不出人时传上去只会 401。没有桥它第一句就 return。 */
+  if (state.me) drainShares();
 }
 
 document.addEventListener("DOMContentLoaded", boot);

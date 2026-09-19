@@ -190,6 +190,16 @@
               <span class="set-lbl">长期记忆</span><span class="set-val" id="memoryVal"></span><span class="set-go">›</span></button>
           </div>
 
+          <!-- 提醒是**这台手机上的壳**在排期的，服务端没有这件事：所以它既不在记忆
+               那一组、也不在对话那一组，单独一组「设备」。浏览器里没有壳，这一页
+               只剩一句说明（app.js 的 renderReminders）。 -->
+          <p class="set-group">设备</p>
+          <div class="set-card">
+            <button class="set-row" id="rowReminders">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 17h10l-1.5-2.4V11a3.5 3.5 0 0 0-7 0v3.6L7 17Z"/><path d="M10.4 20h3.2"/></svg></span>
+              <span class="set-lbl">提醒</span><span class="set-val" id="remindersVal"></span><span class="set-go">›</span></button>
+          </div>
+
           <p class="set-group">关于</p>
           <div class="set-card">
             <button class="set-row" id="themeBtn">
@@ -281,6 +291,10 @@
           </form>
           <ul class="mem-list" id="memoryList"></ul>
         </section>
+
+        <!-- 提醒：整块内容由 app.js 的 renderReminders 铺——这一页要么只有壳，
+             要么只有一个空壳，HTML 里写死任何一行都会在浏览器里露出一个按不动的表单。 -->
+        <section class="set-page hidden" data-page="reminders" id="paneReminders"></section>
         </div>
       </div>
     </div>
@@ -423,6 +437,9 @@
   <script src="vendor/highlight.min.js"></script>
   <script src="markdown.js"></script>
   <script src="api.js"></script>
+  <!-- shell.js 必须排在 app.js 之前：它定义的全局 SHELL 是 app.js 里三处 setOwner 与
+       提醒/分享那几段的唯一入口，而它本身在没有桥的浏览器里就是一堆空操作。 -->
+  <script src="shell.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

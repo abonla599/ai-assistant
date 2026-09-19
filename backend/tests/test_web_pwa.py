@@ -1562,3 +1562,49 @@ def test_export_asks_the_server_for_a_downloadable_url():
     assert "download(" not in body, "blob 那条路在 App 里点了没反应"
     api = _js("api.js")
     assert "export-ticket" in api, "api.js 里没有签发票据的口子"
+
+
+# ---------- Task 4：原生壳桥的适配层（shell.js） ----------
+
+
+def test_the_bridge_surface_is_locked_to_eight_methods():
+    """桥的方法只加不减不改语义；名字漂了老壳会静默少功能，所以锁成语料。
+
+    兼容性是单向钉死的（spec §7）：新壳带新方法没人管，但 shell.js 一旦改了调用名，
+    老壳上那些方法就调不到了——而**不会报错**，只会静默少一项功能。
+    语料走 _js()（先剥注释）：把真调用删掉、原地留一句含方法名的注释就能骗过 in 判断。
+    """
+    src = _js("shell.js")
+    for name in ("capabilities", "setOwner", "scheduleReminder", "cancelReminder",
+                 "listReminders", "pendingShares", "readShareChunk", "consumeShare"):
+        assert src.count(name) >= 1, f"shell.js 里找不到桥方法 {name}"
+
+
+def test_shell_degrades_without_the_bridge():
+    """浏览器直接开网址、以及 headless Edge 跑 CDP 时没有 AssistantShell。
+
+    这条不是兼容性装饰：同一份 JS 既服务 APK 也服务直接访问网址的人，而本项目的
+    前端验收就是在没有壳的浏览器里跑的。降级必须是"什么都不做"，不能抛错——
+    一处 TypeError 会把它所在的那条链路（登录、上传）一起带走。
+    """
+    src = _js("shell.js")
+    assert "window.AssistantShell" in src
+    assert "present" in src
+    # 事件只有一个入口，且只认 {type,id}：内容一律由 JS 反查，
+    # 否则分享来的文件名就会被拼进一段 JS（spec §2 铁律①）。
+    assert "window.__shellEvent" in src
+    assert "typeof evt.id" in src
+
+
+def test_shell_reads_a_share_in_chunks_and_uploads_through_the_existing_api():
+    """readShareChunk 单次上限 512KB，所以一块照片得循环取；上传只许走现有那条路。
+
+    另写一套 fetch("/v1/uploads") 就是第二个事实来源：令牌头、错误解析、
+    附件记录形状都得再各自对齐一次，而这套对齐已经做过（api.js 的 upload）。
+    """
+    src = _js("shell.js")
+    assert re.search(r"512\s*\*\s*1024", src), "没按 512KB 分块：一张照片就该整块穿过桥了"
+    assert "new Blob" in src, "分块取回的字节得拼回一个 Blob 才交得出上传"
+    app = _js("app.js")
+    assert "API.upload(" in app, "分享件没走 api.js 那个上传封装"
+    assert 'request("/v1/uploads"' not in app, "app.js 自己另起了一次上传请求：那是第二条上传链路"
