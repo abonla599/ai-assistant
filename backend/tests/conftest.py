@@ -29,6 +29,13 @@ os.environ["USERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "users.json")
 # 测试不得真调付费模型：预置一个假 provider，并把附件目录指向临时路径。
 os.environ["PROVIDERS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "providers.json")
 os.environ["UPLOAD_DIR"] = os.path.join(_TEST_DATA_DIR, "uploads")
+
+# 长期记忆向量库同样是指不走的进程级单例：`memory_router` 导入时就构造
+# `MemoryManager()`，它只认 CHROMA_DB_PATH。不指走，本机跑测试时那 71 条真实记忆
+# 就在射程内——CI 看不见（CI=true 走内存替身），所以只有人会中招。
+# 判据由 tests/test_test_isolation.py 守着，新增可重定向的存储时那里会红。
+os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
+
 with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
     json.dump([{
         "id": "fake-model", "label": "测试模型", "base_url": "https://example.invalid/v1",
