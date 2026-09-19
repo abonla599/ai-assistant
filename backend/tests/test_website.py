@@ -213,3 +213,22 @@ def test_pyinstaller_spec_ships_the_site_dir():
     assert "'app/web/site'" in spec or '"app/web/site"' in spec, \
         "datas 的目标解包路径必须是 app/web/site,和 _site_dir() 的 frozen 分支一致"
 
+
+
+# ---------- 6. 计算器：实测通过才许上架 ----------
+
+def test_calculator_card_states_it_uses_a_tool():
+    """2026-09-19 真机验过才算数：让线上模型算 math.factorial(50)，日志里出现
+    `[Stream] 调用工具: calculator(...)`，回灌后答出与本地 math.factorial(50)
+    逐位相同的 65 位数。
+
+    断言的是"走工具"而不是"会算数"——上一版卡片写的就是"会算数"，而模型当时
+    是心算的（第一次答 420 对，第二次要求用工具时它答"我无法调用外部计算器工具"）。
+    """
+    page = _page()
+    cut = page.find('<section id="can-do">')
+    assert cut != -1
+    card = page[cut:page.find("</section>", cut)]
+    assert "会算数" in card, "计算器实测通过了，这张卡片还没回来"
+    assert "计算器" in card, "只说会算数不说怎么走：读者会以为是模型心算"
+    assert "心算" in card or "不是" in card, "要把它和'模型自己算'区分开"
