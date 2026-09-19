@@ -65,7 +65,22 @@ jobs:
           tag="$GITHUB_REF_NAME"
           ver="${tag#v}"
           file="ai-assistant-${ver}.apk"
-          cat > notes.md <<EOF
+          # 每个版本的变更清单单独存一个文件，不焊死在这段 YAML 里。上一版把
+          # "v0.13 实测 97,835 字节""从 0.13 起壳自己也有功能了"写进模板，于是往后
+          # 每次发版都在替旧版本说话；现在谁发版谁写自己那份 docs/releases/v<版本>.md。
+          # 少了这个文件不拦发布（应急发版不该被一段散文挡住）——拦的活儿交给
+          # backend/tests/test_release_notes.py，它在 develop 一推送就会红。
+          # 文件名跟着 tag 走（带 v），不是跟着 ver 走：ver 是 ${tag#v}，那个 `v` 已经被
+          # 剥掉了，写成 ${ver}.md 会去找 docs/releases/0.14.md 而永远找不到——
+          # 表现不是报错，是 Release 安静地少掉整份变更清单。
+          notes="docs/releases/${tag}.md"
+          if [ -f "$notes" ]; then
+            { cat "$notes"; printf '\n---\n\n'; } > head.md
+          else
+            echo "::warning::缺 ${notes}：本次 Release 只有通用说明，没有本版变更清单"
+            : > head.md
+          fi
+          cat > tail.md <<EOF
           ## 安装（安卓）
 
           1. 下载下面的 \`${file}\`（约 100 KB——它只是个壳，因此小到可以直接当文件传给你。
@@ -96,13 +111,11 @@ jobs:
 
           注册后你的聊天记录、附件、长期记忆都只归属到你这个账号，别人看不到。
           提醒与待上传的分享件按账号隔离，换账号后看不见上一个人的。
-
-          装完请在手机上过一遍这 13 条（清单在
-          \`docs/superpowers/specs/2026-09-19-shell-native-capabilities-design.md\` §9）：
-          本机没有实机，这 13 条是全部只能在真机上拿到的证据——尤其"分享超 1MB/10MB 有没有
-          明确拒绝提示""长按图标两条快捷方式在不在""改了系统日期组件的今日会不会换内容"。
-          有一条查出来是假的就回填进那份 spec，别让它继续以"应该没问题"活着。
           EOF
+          # 实机验收清单挪进各版本自己的 docs/releases/v*.md 了：条数会随版本变，
+          # 写死在这里的话下一次加条目时，Release 还在数旧的那 13 条。
+          cat head.md tail.md > notes.md
+          rm -f head.md tail.md
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$file" --clobber
             gh release edit "$tag" --notes-file notes.md
