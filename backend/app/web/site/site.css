@@ -1,6 +1,16 @@
 /* 官网样式。深色是默认：四张实拍都是深色界面，浅色页配深色截图会打架。
    字体一律用系统栈——中文网络字体动辄几 MB，首屏会为了一个字型等到天黑。
-   层级靠字号、字重、字距和行高做，不靠换字体。 */
+   层级靠字号、字重、字距、行高，以及一层层叠上去的透明度做，不靠换字体。
+
+   材质一共三层，从下往上：
+     1) 氛围光 html::before / body::before —— 两张 position:fixed 的多段径向渐变，
+        滚动时不动（只极慢漂移），所以内容划过它时有了视差；浅色系用低透明度，
+        是「纸被冷光洗过」而不是「白纸上糊了一块深色光晕」。
+     2) 正文与卡片——卡片/导航是半透明 + backdrop-filter，深度来自"透下去看见氛围光"，
+        加一道内侧高光细线，不靠重阴影。
+     3) 颗粒 body::after —— 一张 feTurbulence 生成的噪声贴片（CSS 内联 data-URI，
+        不是图片文件、不是外部请求），铺满视口、pointer-events:none。
+   三层全是装饰：关掉 JS、关掉动画、360px 窄屏，正文一个字都不能少、也不能被遮。 */
 
 :root {
   --step--1: clamp(0.83rem, 0.80rem + 0.15vw, 0.89rem);
@@ -8,52 +18,203 @@
   --step-1:  clamp(1.20rem, 1.12rem + 0.40vw, 1.42rem);
   --step-2:  clamp(1.45rem, 1.30rem + 0.70vw, 1.90rem);
   --step-3:  clamp(2.10rem, 1.70rem + 1.90vw, 3.30rem);
+  /* 首屏标题单独一档：窄屏守住 2.15rem（360px 下「AI 智能助手」不折不断），
+     宽屏一路给到 4.1rem——落地页的标题得有分量。 */
+  --step-display: clamp(2.15rem, 1.55rem + 2.9vw, 4.1rem);
   --radius: 16px;
+  --radius-lg: 24px;
+  --radius-sm: 10px;
   --radius-pill: 999px;
   --maxw: 1000px;
+  --measure: 34em;          /* 正文行长：中文一行超过 34 字就要回头重读 */
   --ease: cubic-bezier(.22,.61,.36,1);
+  --ease-out: cubic-bezier(.16,1,.3,1);
+  --dur-1: .18s;
+  --dur-2: .42s;
+  --dur-3: .7s;
+  --grain-a: .08;
+  /* 颗粒：180px 无缝贴片。feTurbulence 出噪声 → saturate(0) 去掉彩噪，只留明度。
+     空格与 < > # 全部转义（%20/%3C/%3E/%23），因为这是 URL 上下文；
+     其中 http://www.w3.org/2000/svg 是 XML 命名空间标识符，浏览器不会去取它。 */
+  --grain: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='180'%20height='180'%20viewBox='0%200%20180%20180'%3E%3Cfilter%20id='n'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.8'%20numOctaves='3'%20stitchTiles='stitch'/%3E%3CfeColorMatrix%20type='saturate'%20values='0'/%3E%3C/filter%3E%3Crect%20width='180'%20height='180'%20filter='url(%23n)'%20opacity='0.55'/%3E%3C/svg%3E");
 }
 
 html[data-theme="dark"] {
   --bg: #0b0d12; --bg-soft: #11141c; --surface: #151a25;
   --ink: #e9ecf4; --ink-soft: #9aa4bb; --line: #232a3a;
-  --brand: #7b9dff; --brand-ink: #0b0d12; --glow: rgba(123,157,255,.22);
+  --brand: #7b9dff; --brand-2: #b493ff; --brand-3: #6fd6ff;
+  --brand-ink: #0b0d12; --glow: rgba(123,157,255,.22);
   --shadow: 0 18px 40px rgba(0,0,0,.45);
+  --lift: 0 22px 44px -26px rgba(0,0,0,.7);
+  /* 氛围光：深色可以亮一点，它是这页的底色性格 */
+  --atmos-deep:
+    radial-gradient(72% 54% at 80% -10%, rgba(150,110,255,.20) 0%, rgba(150,110,255,0) 62%),
+    radial-gradient(58% 46% at 2% 14%, rgba(56,140,255,.15) 0%, rgba(56,140,255,0) 60%),
+    radial-gradient(86% 60% at 46% 114%, rgba(255,118,180,.10) 0%, rgba(255,118,180,0) 62%);
+  --atmos:
+    radial-gradient(44% 36% at 20% 2%, rgba(123,157,255,.26) 0%, rgba(123,157,255,0) 70%),
+    radial-gradient(38% 32% at 86% 24%, rgba(180,147,255,.17) 0%, rgba(180,147,255,0) 68%);
+  --band: rgba(233,236,244,.035);
+  --glass-a: 84%; --glass-b: 68%;
+  --hairline: rgba(255,255,255,.075);
+  --grain-a: .085;
+  --glow-0: rgba(123,157,255,0);
+  --bloom: rgba(123,157,255,.20);
+  --card-shadow: 0 1px 0 rgba(0,0,0,.25);
+  --fade: linear-gradient(180deg, rgba(233,236,244,0), rgba(233,236,244,.04));
+  --title: linear-gradient(168deg,#ffffff 0%,#dbe4ff 32%,#aac0fb 66%,#8fa9f0 100%);
+  --cta: linear-gradient(115deg,#9fb6ff 0%,#7b9dff 42%,#b493ff 100%);
+  --cta-ink: #0b0d12;
+  --seam: linear-gradient(90deg,rgba(123,157,255,0),rgba(123,157,255,.45) 22%,rgba(180,147,255,.4) 55%,rgba(123,157,255,0));
+  --sheen: rgba(255,255,255,.42);
+  color-scheme: dark;
 }
 html[data-theme="light"] {
   --bg: #ffffff; --bg-soft: #f5f6fa; --surface: #ffffff;
-  --ink: #14161c; --ink-soft: #5a6172; --line: #e5e8f0;
-  --brand: #2f5cff; --brand-ink: #ffffff; --glow: rgba(47,92,255,.16);
+  --ink: #14161c; --ink-soft: #545b6c; --line: #e5e8f0;
+  --brand: #2f5cff; --brand-2: #6f4bff; --brand-3: #0aa8c9;
+  --brand-ink: #ffffff; --glow: rgba(47,92,255,.14);
   --shadow: 0 14px 34px rgba(20,26,44,.10);
+  --lift: 0 22px 40px -24px rgba(20,26,44,.28);
+  /* 同一套色相，透明度砍到深色的三分之一多一点：浅色页要的是纸感洗色，不是光晕 */
+  --atmos-deep:
+    radial-gradient(72% 54% at 80% -10%, rgba(108,86,209,.08) 0%, rgba(108,86,209,0) 62%),
+    radial-gradient(58% 46% at 2% 14%, rgba(24,110,220,.06) 0%, rgba(24,110,220,0) 60%),
+    radial-gradient(86% 60% at 46% 114%, rgba(10,150,175,.05) 0%, rgba(10,150,175,0) 62%);
+  --atmos:
+    radial-gradient(44% 36% at 20% 2%, rgba(47,92,255,.11) 0%, rgba(47,92,255,0) 70%),
+    radial-gradient(38% 32% at 86% 24%, rgba(111,75,255,.07) 0%, rgba(111,75,255,0) 68%);
+  --band: rgba(47,92,255,.042);
+  --glass-a: 88%; --glass-b: 74%;
+  --hairline: rgba(255,255,255,.9);
+  --grain-a: .055;
+  --glow-0: rgba(47,92,255,0);
+  /* 浅色下光斑要收着：同一团蓝压到白底上就是一块没化开的污渍 */
+  --bloom: rgba(47,92,255,.055);
+  --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
+  --fade: linear-gradient(180deg, rgba(47,92,255,0), rgba(47,92,255,.045));
+  --title: linear-gradient(168deg,#0f1116 0%,#1b2440 42%,#2f5cff 100%);
+  --cta: linear-gradient(115deg,#2f5cff 0%,#4a4ce8 52%,#6f4bff 100%);
+  --cta-ink: #ffffff;
+  --seam: linear-gradient(90deg,rgba(47,92,255,0),rgba(47,92,255,.28) 22%,rgba(111,75,255,.22) 55%,rgba(47,92,255,0));
+  --sheen: rgba(255,255,255,.6);
+  color-scheme: light;
 }
-/* 脚本没跑起来时（禁用 JS、或首帧前）也按系统偏好选色，别硬吃深色 */
+/* 脚本没跑起来时（禁用 JS、或首帧前）也按系统偏好选色，别硬吃深色。
+   注意：这段的 token 必须和上面 html[data-theme="light"] 保持同步——
+   它没有 data-theme 可继承，漏一个就会在白底上糊一块深色光晕。 */
 @media (prefers-color-scheme: light) {
   html:not([data-theme]) {
     --bg: #ffffff; --bg-soft: #f5f6fa; --surface: #ffffff;
-    --ink: #14161c; --ink-soft: #5a6172; --line: #e5e8f0;
-    --brand: #2f5cff; --brand-ink: #ffffff; --glow: rgba(47,92,255,.16);
+    --ink: #14161c; --ink-soft: #545b6c; --line: #e5e8f0;
+    --brand: #2f5cff; --brand-2: #6f4bff; --brand-3: #0aa8c9;
+    --brand-ink: #ffffff; --glow: rgba(47,92,255,.14);
     --shadow: 0 14px 34px rgba(20,26,44,.10);
+    --lift: 0 22px 40px -24px rgba(20,26,44,.28);
+    --atmos-deep:
+      radial-gradient(72% 54% at 80% -10%, rgba(108,86,209,.08) 0%, rgba(108,86,209,0) 62%),
+      radial-gradient(58% 46% at 2% 14%, rgba(24,110,220,.06) 0%, rgba(24,110,220,0) 60%),
+      radial-gradient(86% 60% at 46% 114%, rgba(10,150,175,.05) 0%, rgba(10,150,175,0) 62%);
+    --atmos:
+      radial-gradient(44% 36% at 20% 2%, rgba(47,92,255,.11) 0%, rgba(47,92,255,0) 70%),
+      radial-gradient(38% 32% at 86% 24%, rgba(111,75,255,.07) 0%, rgba(111,75,255,0) 68%);
+    --band: rgba(47,92,255,.042);
+    --glass-a: 88%; --glass-b: 74%;
+    --hairline: rgba(255,255,255,.9);
+    --grain-a: .055;
+    --glow-0: rgba(47,92,255,0);
+    --bloom: rgba(47,92,255,.055);
+    --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
+    --fade: linear-gradient(180deg, rgba(47,92,255,0), rgba(47,92,255,.045));
+    --title: linear-gradient(168deg,#0f1116 0%,#1b2440 42%,#2f5cff 100%);
+    --cta: linear-gradient(115deg,#2f5cff 0%,#4a4ce8 52%,#6f4bff 100%);
+    --cta-ink: #ffffff;
+    --seam: linear-gradient(90deg,rgba(47,92,255,0),rgba(47,92,255,.28) 22%,rgba(111,75,255,.22) 55%,rgba(47,92,255,0));
+    --sheen: rgba(255,255,255,.6);
+    color-scheme: light;
   }
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-body {
-  margin: 0; background: var(--bg); color: var(--ink);
-  font: 400 var(--step-0)/1.75 system-ui, -apple-system, "Segoe UI",
-        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-  -webkit-font-smoothing: antialiased;
-  transition: background .35s var(--ease), color .35s var(--ease);
+html {
+  scroll-behavior: smooth;
+  /* 顶栏是 sticky 的：不给锚点留出它那一行的高度，点导航跳过去的标题正好被压在底下。 */
+  scroll-padding-top: 72px;
+  /* 底色挂 html：body 要留空，不然它的不透明背景会盖住 z-index 为负的氛围层 */
+  background: var(--bg);
+  transition: background-color var(--dur-2) var(--ease);
 }
-h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -.02em; line-height: 1.25; }
-h1 { font-size: var(--step-3); }
-h2 { font-size: var(--step-2); margin-bottom: 20px; }
-h3 { font-size: var(--step-0); margin-bottom: 6px; }
-p { margin: 0 0 12px; }
+body {
+  margin: 0; color: var(--ink); background: none;
+  font: 400 var(--step-0)/1.78 system-ui, -apple-system, "Segoe UI",
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-optical-sizing: auto;
+  font-variant-numeric: tabular-nums lining-nums;  /* 数字等宽：50! 和 v0.13 都不跳 */
+  letter-spacing: .006em;                          /* 中文正文留一丝呼吸 */
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  counter-reset: sec;
+}
+
+/* ---------- 氛围层 ---------- */
+html::before, body::before {
+  content: ""; position: fixed; inset: -16%; pointer-events: none;
+  background-repeat: no-repeat;
+}
+html::before {
+  z-index: -3; background-image: var(--atmos-deep);
+  animation: atmos-deep 44s var(--ease) infinite alternate;
+}
+body::before {
+  z-index: -2; background-image: var(--atmos); opacity: .95;
+  animation: atmos 28s var(--ease) infinite alternate;
+}
+@keyframes atmos-deep {
+  from { transform: translate3d(-1.2%, -.8%, 0) scale(1.03); }
+  to   { transform: translate3d(1.4%, 1%, 0) scale(1.07); }
+}
+@keyframes atmos {
+  from { transform: translate3d(1%, .6%, 0) scale(1.05); }
+  to   { transform: translate3d(-1.2%, -1%, 0) scale(1); }
+}
+/* 颗粒置顶：它是最后一道工序，压在玻璃和字上才有"片"的感觉。
+   峰值不透明度 0.055×0.55≈3%，暗/亮底上的正文对比度只掉不到 1 个比分。 */
+body::after {
+  content: ""; position: fixed; inset: 0; z-index: 30; pointer-events: none;
+  background-image: var(--grain); background-size: 180px 180px;
+  opacity: var(--grain-a);
+}
+
+/* ---------- 阅读进度 ---------- */
+.progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 40;
+  transform: scaleX(0); transform-origin: 0 50%; will-change: transform;
+  background: linear-gradient(90deg, var(--brand), var(--brand-3) 45%, var(--brand-2));
+  box-shadow: 0 0 14px var(--glow);
+}
+html:not(.js) .progress { display: none; }   /* 没脚本就没有数值，别留一根空杠 */
+
+h1, h2, h3 { margin: 0; font-weight: 700; line-height: 1.22; text-wrap: balance; }
+h1, h2 { letter-spacing: -.022em; }
+h3 { font-size: var(--step-0); margin-bottom: 8px; letter-spacing: .012em; }
+h1 { font-size: var(--step-display); line-height: 1.08; letter-spacing: -.03em; }
+h2 { font-size: var(--step-2); letter-spacing: -.018em; margin-bottom: 22px; }
+p { margin: 0 0 12px; text-wrap: pretty; }
 a { color: var(--brand); text-decoration: none; }
 a:hover { text-decoration: underline; }
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 6px; }
+:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 6px;
+  box-shadow: 0 0 0 6px var(--glow);
+}
 strong { font-weight: 600; }
+::selection { background: color-mix(in srgb, var(--brand) 32%, transparent); }
+/* 标题的渐变只在上色能力被确认后才生效——不支持时退回纯色，绝不写成透明字 */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  h1 {
+    background-image: var(--title); background-clip: text; -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent; color: var(--ink);
+  }
+}
 
 .skip {
   position: absolute; left: -9999px; top: 0; z-index: 50;
@@ -61,124 +222,328 @@ strong { font-weight: 600; }
 }
 .skip:focus { left: 0; }
 
-/* ---------- 吸顶导航 ---------- */
+/* ---------- 吸顶导航：一层带饱和的毛玻璃 ---------- */
 .topbar {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 12px;
   padding: 10px max(16px, env(safe-area-inset-left));
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
-  backdrop-filter: blur(12px); border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  border-bottom: 1px solid var(--line);
+  transition: background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease), border-color var(--dur-2);
 }
-.brand { font-weight: 700; letter-spacing: -.01em; margin-right: auto; }
-.navlinks { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0; overflow-x: auto; }
+/* 只在支持 backdrop-filter 的地方把底色调透：不支持的老 WebView 得靠不透明底才读得清 */
+@supports ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  .topbar {
+    background: color-mix(in srgb, var(--bg) 62%, transparent);
+    backdrop-filter: blur(18px) saturate(165%);
+    -webkit-backdrop-filter: blur(18px) saturate(165%);
+  }
+}
+.topbar.is-stuck {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--brand) 22%, var(--line));
+  box-shadow: 0 1px 0 var(--hairline), 0 14px 30px -18px rgba(0,0,0,.55);
+}
+.brand { font-weight: 700; letter-spacing: -.01em; margin-right: auto; white-space: nowrap; }
+.navlinks { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0; overflow-x: auto; scrollbar-width: none; }
+.navlinks::-webkit-scrollbar { display: none; }
 .navlinks a {
-  display: block; padding: 8px 12px; min-height: 44px; border-radius: var(--radius-pill);
+  display: block; padding: 8px 13px; min-height: 44px; border-radius: var(--radius-pill);
   color: var(--ink-soft); font-size: var(--step--1); white-space: nowrap;
+  border: 1px solid transparent; transition: color var(--dur-1), background-color var(--dur-1), border-color var(--dur-1);
 }
-.navlinks a:hover { color: var(--ink); text-decoration: none; background: var(--bg-soft); }
-.navlinks a[aria-current="true"] { color: var(--ink); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.navlinks a:hover {
+  color: var(--ink); text-decoration: none;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  border-color: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.navlinks a[aria-current="true"] {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 26%, var(--line));
+  box-shadow: inset 0 1px 0 var(--hairline);
+}
+/* 手机上顶栏只留必需的：品牌名 + 主题开关。四个锚点链接在 390px 下要占 350px 以上，
+   挤出来的结果是"品牌名折成两行 + 最后一个链接被切一半"——那比没有导航更难看。
+   这是一页纸的站，滚就能到；跳转有正文里的链接和页脚兜底。
+   写在 .navlinks 那条之后：媒体查询不加特异性，放前面会被后面的 display:flex 盖掉。 */
+@media (max-width: 560px) { .navlinks { display: none; } }
 
 .iconbtn {
   display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 auto;
-  background: transparent; color: var(--ink-soft); border: 1px solid var(--line);
-  border-radius: var(--radius-pill); cursor: pointer; transition: .2s var(--ease);
+  background: color-mix(in srgb, var(--surface) 55%, transparent); color: var(--ink-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill); cursor: pointer;
+  box-shadow: inset 0 1px 0 var(--hairline);
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1), background-color var(--dur-1), transform var(--dur-1) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
-.iconbtn:hover { color: var(--ink); border-color: var(--brand); background: var(--surface); }
+.iconbtn:hover {
+  color: var(--ink); border-color: color-mix(in srgb, var(--brand) 55%, var(--line));
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  box-shadow: inset 0 1px 0 var(--hairline), 0 6px 18px -8px var(--glow);
+}
+.iconbtn:hover svg { transform: rotate(-18deg); }
 .iconbtn:active { transform: scale(.94); }
-.iconbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.iconbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; transition: transform var(--dur-2) var(--ease-out); }
 
 /* ---------- 首屏 ---------- */
 .hero, section, footer { max-width: var(--maxw); margin: 0 auto; padding: 56px 20px; }
-.hero { padding-top: 72px; }
-.eyebrow {
-  display: inline-block; margin: 0 0 14px; padding: 5px 12px;
-  font-size: var(--step--1); letter-spacing: .06em; color: var(--brand);
-  background: var(--glow); border-radius: var(--radius-pill);
+.hero { padding-top: 84px; padding-bottom: 64px; position: relative; }
+/* 标题后面那团光：负 z 让它待在文字之下、氛围光之上。
+   宽度用 left/right 撑在 hero 自己的盒子里，不用 116vw——窄屏下 vw 会把光斑
+   顶出视口，多出来的那几十像素就是手机上的横向抖动。 */
+.hero::before {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  left: 0; right: 0; top: 26px; height: 430px;
+  background: radial-gradient(58% 52% at 50% 42%, var(--glow) 0%, var(--glow-0) 70%);
+  opacity: .95;
 }
-.lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 30em; margin: 0 0 28px; }
-.cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 14px; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; margin: 0 0 18px; padding: 6px 14px 6px 11px;
+  font-size: var(--step--1); letter-spacing: .08em; color: var(--brand);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--brand) 18%, transparent), color-mix(in srgb, var(--brand-2) 12%, transparent));
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent);
+  border-radius: var(--radius-pill); box-shadow: inset 0 1px 0 var(--hairline);
+}
+.eyebrow::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+  background: radial-gradient(circle at 35% 35%, var(--brand-3), var(--brand));
+  box-shadow: 0 0 10px var(--glow);
+  animation: pulse 3.6s var(--ease) infinite alternate;
+}
+@keyframes pulse { from { opacity: .55; transform: scale(.86); } to { opacity: 1; transform: scale(1.06); } }
+.lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 26em; margin: 0 0 30px; line-height: 1.7; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; }
 .btn {
+  position: relative; isolation: isolate; overflow: hidden;
   display: inline-flex; align-items: center; min-height: 48px; padding: 12px 24px;
   border: 1px solid var(--line); border-radius: var(--radius-pill);
-  color: var(--ink); background: var(--surface); font-weight: 600;
-  transition: transform .18s var(--ease), box-shadow .18s var(--ease), border-color .18s;
+  color: var(--ink);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--surface) var(--glass-a), transparent), color-mix(in srgb, var(--surface) var(--glass-b), transparent));
+  box-shadow: inset 0 1px 0 var(--hairline), var(--card-shadow);
+  font-weight: 600; letter-spacing: .01em;
+  transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-2) var(--ease), border-color var(--dur-1);
 }
-.btn:hover { text-decoration: none; transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--brand); }
+.btn:hover {
+  text-decoration: none; transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--brand) 60%, var(--line));
+  box-shadow: inset 0 1px 0 var(--hairline), var(--lift);
+}
 .btn:active { transform: translateY(0); }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
-.note { color: var(--ink-soft); font-size: var(--step--1); }
+/* 主 CTA：渐变底慢慢走位（呼吸），另加一道掠光。两者都是纯装饰，动画关掉不影响文字 */
+.btn.primary {
+  background: var(--cta); background-size: 220% 220%; background-position: 8% 50%;
+  border-color: color-mix(in srgb, var(--brand) 70%, transparent);
+  color: var(--cta-ink);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 10px 30px -12px var(--glow);
+  animation: cta-drift 12s var(--ease) infinite alternate;
+}
+@keyframes cta-drift {
+  from { background-position: 6% 42%; }
+  to   { background-position: 96% 60%; }
+}
+.btn.primary::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; opacity: .45;
+  background: linear-gradient(100deg, rgba(255,255,255,0) 26%, var(--sheen) 46%, rgba(255,255,255,0) 66%);
+  background-size: 240% 100%; background-position: 190% 0;
+  transition: background-position var(--dur-3) var(--ease);
+}
+.btn.primary:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.32), 0 16px 40px -14px var(--glow); }
+.btn.primary:hover::after { background-position: -70% 0; }
+.note { color: var(--ink-soft); font-size: var(--step--1); max-width: var(--measure); }
 
-/* ---------- 卡片 ---------- */
-section:nth-of-type(even) { background: var(--bg-soft); max-width: none; }
+/* ---------- 区块：编号眉标 + 玻璃卡片 ---------- */
+section { position: relative; }
+section > p { max-width: var(--measure); }
+section:nth-of-type(even) { background: var(--band); max-width: none; }
 section:nth-of-type(even) > * { max-width: var(--maxw); margin-left: auto; margin-right: auto; }
+/* 通栏色带的上下沿各拉一道渐变细线：色带交界不再是硬切，而是"透过去"的一条缝 */
+section:nth-of-type(even)::before, section:nth-of-type(even)::after {
+  content: ""; position: absolute; left: 0; right: 0; height: 1px; background: var(--seam); opacity: .75;
+}
+section:nth-of-type(even)::before { top: 0; }
+section:nth-of-type(even)::after { bottom: 0; }
+/* 眉标是纯 CSS 计数器：没有 JS 也在，且不往 HTML 里塞装饰文字 */
+section { counter-increment: sec; }
+section > h2 { display: flex; align-items: baseline; gap: 12px; }
+section > h2::before {
+  content: counter(sec, decimal-leading-zero);
+  flex: 0 0 auto; font-size: var(--step--1); font-weight: 600; letter-spacing: .1em;
+  font-variant-numeric: tabular-nums; color: var(--brand);
+  padding: 4px 10px; border-radius: var(--radius-pill);
+  background: linear-gradient(140deg, color-mix(in srgb, var(--brand) 20%, transparent), color-mix(in srgb, var(--brand-2) 14%, transparent));
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, transparent);
+  box-shadow: inset 0 1px 0 var(--hairline);
+}
 .cards {
   list-style: none; padding: 0; margin: 0; display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
 }
 .cards li {
-  border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px;
-  background: var(--surface); transition: transform .2s var(--ease), border-color .2s;
+  position: relative;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px;
+  background: linear-gradient(165deg, color-mix(in srgb, var(--surface) var(--glass-a), transparent), color-mix(in srgb, var(--surface) var(--glass-b), transparent));
+  box-shadow: inset 0 1px 0 var(--hairline), var(--card-shadow);
+  transition: transform var(--dur-2) var(--ease-out), border-color var(--dur-2), box-shadow var(--dur-2) var(--ease-out);
 }
-.cards li:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); }
-.cards p { margin: 0; color: var(--ink-soft); font-size: var(--step--1); line-height: 1.8; }
-.steps { padding-left: 22px; display: grid; gap: 10px; }
-.steps li { padding-left: 4px; }
+.cards li::after {
+  /* 追光：位置由 site.js 写进 --mx/--my，鼠标在哪儿光就在哪儿。默认值保证 JS 不在时也像个正常 hover */
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: radial-gradient(200px 200px at var(--mx, 50%) var(--my, 0%), var(--glow), var(--glow-0) 62%);
+  opacity: 0; transition: opacity var(--dur-2) var(--ease);
+}
+@supports ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  .cards li { backdrop-filter: blur(10px) saturate(140%); -webkit-backdrop-filter: blur(10px) saturate(140%); }
+}
+.cards li:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--line));
+  box-shadow: inset 0 1px 0 var(--hairline), var(--lift), 0 0 0 1px color-mix(in srgb, var(--brand) 12%, transparent);
+}
+.cards li:hover::after { opacity: 1; }
+.cards p { margin: 0; color: var(--ink-soft); font-size: var(--step--1); line-height: 1.85; max-width: 40em; }
+/* 三步上手：编号自己数（CSS counter，不靠 JS、不占文案），圆牌和区块眉标同一套语气 */
+.steps { list-style: none; padding-left: 0; counter-reset: st; display: grid; gap: 14px; max-width: var(--measure); }
+.steps li { position: relative; padding-left: 48px; line-height: 1.85; counter-increment: st; }
+.steps li::before {
+  content: counter(st, decimal-leading-zero);
+  position: absolute; left: 0; top: .1em; width: 34px; height: 34px;
+  display: grid; place-items: center; border-radius: 50%;
+  font-size: var(--step--1); font-weight: 700; letter-spacing: .04em; font-variant-numeric: tabular-nums;
+  color: var(--brand);
+  background: linear-gradient(150deg, color-mix(in srgb, var(--surface) 94%, transparent), color-mix(in srgb, var(--surface) 58%, transparent));
+  border: 1px solid color-mix(in srgb, var(--brand) 26%, var(--line));
+  box-shadow: inset 0 1px 0 var(--hairline), 0 8px 18px -12px var(--glow);
+}
 footer ul { padding-left: 20px; }
 
 /* ---------- 轮播 ---------- */
 /* 无 JS 时四张竖排全露出来；脚本一跑就加 html.js 换成单张切换。 */
-.carousel { margin-top: 8px; }
+.carousel { margin-top: 8px; position: relative; }
+/* 光斑收在机身周围，不铺满整节：浅色下铺满就是一块蓝渍 */
+.carousel::before {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  inset: 10% 20% 24%;
+  background: radial-gradient(46% 46% at 50% 46%, var(--bloom), var(--glow-0) 72%);
+}
 .stage { display: grid; gap: 18px; justify-items: center; }
 .slide { margin: 0; text-align: center; }
-figcaption { font-size: var(--step--1); color: var(--ink-soft); margin-top: 12px; }
-/* clamp 而不是 min：min(240px, 62vw) 在窄视口里会一路缩到看不见，手机外框得有下限 */
+figcaption { font-size: var(--step--1); color: var(--ink-soft); margin-top: 14px; letter-spacing: .01em; }
+/* clamp 而不是 min：min(240px, 62vw) 在窄视口里会一路缩到看不见，手机外框得有下限。
+   margin auto 是补的：外框是块级 div，text-align:center 管不着它，
+   不写这句机身贴左、说明文字居中，两条中线对不上。 */
 .phone {
-  width: clamp(176px, 62vw, 240px); aspect-ratio: 9 / 19.5; border-radius: 30px; overflow: hidden;
-  border: 1px solid var(--line); background: var(--bg-soft); box-shadow: var(--shadow);
+  width: clamp(176px, 62vw, 262px); aspect-ratio: 9 / 19.5; border-radius: 34px; overflow: hidden;
+  padding: 5px; margin: 0 auto;
+  border: 1px solid color-mix(in srgb, var(--brand) 16%, var(--line));
+  background: linear-gradient(158deg, color-mix(in srgb, var(--ink) 26%, transparent), color-mix(in srgb, var(--surface) 70%, transparent) 38%, color-mix(in srgb, var(--ink) 14%, transparent));
+  box-shadow: var(--shadow), inset 0 1px 0 var(--hairline);
+  transition: box-shadow .55s var(--ease-out), transform .55s var(--ease-out);
 }
-.phone img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.controls { display: none; align-items: center; justify-content: center; gap: 10px; margin-top: 20px; }
-.dots { display: flex; gap: 8px; }
+.phone img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 29px; }
+.controls { display: none; align-items: center; justify-content: center; gap: 10px; margin-top: 22px; }
+.dots { display: flex; gap: 8px; align-items: center; }
 
+/* 边缘那道 mask 试过又删了：Blink 下它会把整个 stage 连内容一起遮没
+   （实拍区直接空白），而离屏那张本来就已经被 opacity 压到 .28，不需要再羽化。 */
+/* 位移切页而不是原生滚动：overflow:hidden 之下 scroll-snap 是死属性，留着只会
+   让下一个人以为这块能手滑。触摸横滑由 site.js 监听 touch 实现。 */
 html.js .stage { grid-auto-flow: column; grid-auto-columns: 100%; display: flex; overflow: hidden;
-  scroll-snap-type: x mandatory; transition: transform .45s var(--ease); }
-html.js .slide { flex: 0 0 100%; scroll-snap-align: center; opacity: .35; transform: scale(.94);
-  transition: opacity .45s var(--ease), transform .45s var(--ease); }
+  transition: transform .55s var(--ease-out); }
+html.js .slide { flex: 0 0 100%; opacity: .28; transform: scale(.93);
+  transition: opacity .55s var(--ease-out), transform .55s var(--ease-out); }
 html.js .slide.is-active { opacity: 1; transform: none; }
+html.js .slide.is-active .phone { box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--brand) 20%, transparent), inset 0 1px 0 var(--hairline); }
 html.js .slide:not(.is-active) img { pointer-events: none; }
 html.js .controls { display: flex; }
-.dot { width: 9px; height: 9px; padding: 0; border-radius: 50%; border: 0; cursor: pointer;
-  background: var(--line); transition: .2s var(--ease); }
-.dot:hover { background: var(--ink-soft); }
-.dot[aria-selected="true"] { background: var(--brand); transform: scale(1.35); }
+/* 指示点：热区 26x44，看得见的 9px 小药丸交给 ::before。
+   直接给 button 写 9x9 是手机上按不中的——热区比视觉大不丢人，按不到才丢人。 */
+.dot { position: relative; width: 26px; height: 44px; padding: 0; border: 0; background: none;
+  display: grid; place-items: center; cursor: pointer; }
+.dot::before { content: ""; width: 9px; height: 9px; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  box-shadow: inset 0 1px 0 var(--hairline);
+  transition: width var(--dur-2) var(--ease-out), background-color var(--dur-2), box-shadow var(--dur-2); }
+.dot:hover::before { background: color-mix(in srgb, var(--ink) 45%, transparent); }
+.dot[aria-selected="true"]::before {
+  width: 26px; background: linear-gradient(90deg, var(--brand), var(--brand-2));
+  box-shadow: 0 0 12px var(--glow);
+}
 
 /* ---------- 滚动渐显 ---------- */
-html.js .reveal { opacity: 0; transform: translateY(14px); }
+html.js .reveal { opacity: 0; transform: translateY(16px); }
 html.js .reveal.in { opacity: 1; transform: none;
-  transition: opacity .5s var(--ease), transform .5s var(--ease); }
+  transition: opacity .6s var(--ease-out), transform .6s var(--ease-out); }
+/* 同屏出现的卡片错峰入场；纯延迟，JS 没跑照样在 1.5s 兜底里全亮 */
+html.js .cards li:nth-child(2).in, html.js .steps li:nth-child(2).in { transition-delay: .07s; }
+html.js .cards li:nth-child(3).in, html.js .steps li:nth-child(3).in { transition-delay: .14s; }
+html.js .cards li:nth-child(4).in { transition-delay: .21s; }
+html.js .cards li:nth-child(5).in { transition-delay: .28s; }
 
 /* ---------- 其余 ---------- */
 .linkbtn {
-  border: 1px solid var(--line); background: transparent; color: var(--ink-soft);
-  border-radius: var(--radius-pill); padding: 6px 12px; min-height: 44px; cursor: pointer; font: inherit;
+  border: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--ink-soft);
+  border-radius: var(--radius-pill); padding: 6px 14px; min-height: 44px; cursor: pointer; font: inherit;
+  box-shadow: inset 0 1px 0 var(--hairline);
+  transition: color var(--dur-1), border-color var(--dur-1), background-color var(--dur-1);
 }
-.linkbtn:hover { color: var(--ink); border-color: var(--brand); }
-details { border-bottom: 1px solid var(--line); padding: 6px 0; }
-summary { cursor: pointer; min-height: 44px; padding: 12px 0; font-weight: 600; }
-details p { color: var(--ink-soft); }
-footer { border-top: 1px solid var(--line); color: var(--ink-soft); }
+.linkbtn:hover { color: var(--ink); border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); }
+details { border-bottom: 1px solid var(--line); padding: 2px 0; }
+summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  cursor: pointer; min-height: 44px; padding: 13px 2px; font-weight: 600; letter-spacing: .006em;
+  list-style: none; transition: color var(--dur-1);
+}
+summary::-webkit-details-marker { display: none; }
+summary:hover { color: var(--brand); }
+summary::after {
+  content: ""; flex: 0 0 auto; width: 8px; height: 8px; margin-right: 2px;
+  border-right: 2px solid color-mix(in srgb, var(--brand) 70%, var(--ink-soft));
+  border-bottom: 2px solid color-mix(in srgb, var(--brand) 70%, var(--ink-soft));
+  transform: rotate(45deg); transition: transform var(--dur-2) var(--ease-out);
+}
+details[open] > summary::after { transform: rotate(-135deg); }
+details p { color: var(--ink-soft); padding-bottom: 8px; max-width: var(--measure); line-height: 1.85; }
+footer {
+  border-top: 0; position: relative; color: var(--ink-soft);
+  background: var(--fade);
+}
+footer::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--seam); opacity: .8;
+}
 .totop {
   position: fixed; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 15;
   width: 48px; height: 48px; display: grid; place-items: center; cursor: pointer;
-  border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  box-shadow: var(--shadow); transition: .2s var(--ease);
+  border-radius: 50%; border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--ink);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--hairline);
+  transition: color var(--dur-1) var(--ease), transform var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), opacity var(--dur-2);
 }
-.totop:hover { color: var(--brand); transform: translateY(-2px); }
+@supports ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  .totop { backdrop-filter: blur(12px) saturate(150%); -webkit-backdrop-filter: blur(12px) saturate(150%); }
+}
+.totop:hover { color: var(--brand); transform: translateY(-3px); box-shadow: var(--shadow), 0 0 18px var(--glow), inset 0 1px 0 var(--hairline); }
 .totop svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .totop[hidden] { display: none; }
 
+/* ---------- 窄屏与降低动效 ---------- */
+@media (max-width: 420px) {
+  .hero, section, footer { padding: 44px 16px; }
+  .cards li { padding: 18px; }
+  section > h2 { gap: 9px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
-  html.js .reveal { opacity: 1; transform: none; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+    /* 无限循环的装饰动画（氛围光漂移、CTA 呼吸、眉标脉动）在 .01ms 下等于每帧重播，
+       那比不动更糟——先把迭代次数钉死，再把它们整个关掉，只留静态渐变。 */
+    animation-iteration-count: 1 !important;
+  }
+  html::before, body::before, .btn.primary, .eyebrow::before { animation: none !important; }
+  html.js .reveal { opacity: 1; transform: none; transition: none !important; }
+  html.js .stage, html.js .slide { transition: none !important; }
 }

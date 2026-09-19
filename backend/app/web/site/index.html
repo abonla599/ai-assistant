@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>AI 智能助手——一个记得住你的在线助手</title>
 <meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆,每个人各用各的。">
 <meta name="theme-color" content="#0b0d12">
@@ -24,6 +25,9 @@
 
 <a class="skip" href="#can-do">跳到正文</a>
 
+<!-- 阅读进度：纯装饰，site.js 逐帧改写它的 scaleX；没有 JS 时整条不显示（CSS 里藏的） -->
+<div class="progress" aria-hidden="true"></div>
+
 <nav class="topbar" aria-label="页面导航">
   <span class="brand">AI 智能助手</span>
   <ul class="navlinks">
@@ -33,7 +37,10 @@
     <li><a href="#faq">常见问题</a></li>
   </ul>
   <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到浅色">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+    <!-- 两个图标都在 DOM 里，靠 CSS 换：JS 改 innerHTML 会把 SVG 命名空间写坏（Blink 下
+         赋 innerHTML 的 svg 有时不渲染），而这里没有谁在监听子树变化。 -->
+    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
   </button>
 </nav>
 
@@ -71,7 +78,8 @@
 
 <section id="start">
   <h2>三步上手</h2>
-  <ol class="steps">
+  <!-- 编号是 CSS counter 画的（list-style 被去掉了，Safari 会因此丢列表语义，role 补回来） -->
+  <ol class="steps" role="list">
     <li class="reveal"><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它会自动跳到同一个地址）。</li>
     <li class="reveal"><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题(忘记密码时用它自己取回)。</li>
     <li class="reveal"><strong>开始聊</strong>:换手机、换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
@@ -86,19 +94,19 @@
   <div class="carousel" data-carousel>
     <div class="stage" id="stage" aria-live="polite">
       <figure class="slide is-active" data-index="0">
-        <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688"></div>
+        <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688" fetchpriority="high"></div>
         <figcaption>注册:自己填用户名密码,答三条找回问题</figcaption>
       </figure>
       <figure class="slide" data-index="1">
-        <div class="phone"><img src="/site/img/chat.jpg" alt="对话页:上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来" width="780" height="1688"></div>
+        <div class="phone"><img src="/site/img/chat.jpg" alt="对话页:上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来" width="780" height="1688" loading="lazy"></div>
         <figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption>
       </figure>
       <figure class="slide" data-index="2">
-        <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页:搜「我不吃香菜」搜出来的那一条,右边有删除按钮" width="780" height="1688"></div>
+        <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页:搜「我不吃香菜」搜出来的那一条,右边有删除按钮" width="780" height="1688" loading="lazy"></div>
         <figcaption>长期记忆:存了什么,能看到也能删</figcaption>
       </figure>
       <figure class="slide" data-index="3">
-        <div class="phone"><img src="/site/img/settings.jpg" alt="设置页:当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat" width="780" height="1688"></div>
+        <div class="phone"><img src="/site/img/settings.jpg" alt="设置页:当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat" width="780" height="1688" loading="lazy"></div>
         <figcaption>设置:模型、提醒、账号都在这里</figcaption>
       </figure>
     </div>
@@ -144,7 +152,8 @@
   <p><a href="https://github.com/abonla599/ai-assistant">GitHub · abonla599/ai-assistant</a>
      <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
   <p class="note" id="copyHint" role="status"></p>
-  <p class="note">当前版本 v0.13（2026-09-19）。界面在服务器上,没有"更新"这个动作:下次打开就是当前这一版。</p>
+  <p class="note">界面跑在服务器上,没有"更新"这个动作:下次打开就是当前这一版。壳的版本号写在
+     <a href="https://github.com/abonla599/ai-assistant/releases/latest">Releases</a> 那一页,这里不抄——抄来的数字第二天就过期。</p>
   <p class="note">本站不放后台入口。管理页不在这里,也不会出现在这里。</p>
 </footer>
 
