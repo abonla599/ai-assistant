@@ -4,6 +4,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 网页相机（getUserMedia）需要宿主应用先拿到运行时权限，WebView 才会放行 -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Android 13+ 的运行时权限：到点提醒要发通知。首次设提醒时才问。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 安装期权限、不弹框：AlarmManager 的闹钟重启不保留，靠它把表重排一遍。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 不申请 SCHEDULE_EXACT_ALARM：提醒用 setAndAllowWhileIdle，可能晚几分钟，
+         产品不承诺准点（spec §1）。加了它就等于向用户要一个解释不了的开关。 -->
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -26,5 +33,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 闹钟到点。PendingIntent 是显式指向它的，所以 Android 8 的隐式广播限制碰不到它；
+             exported=false 就够——它只被自己的 PendingIntent 唤起，不给别的 App 开门。 -->
+        <receiver
+            android:name=".ReminderReceiver"
+            android:exported="false" />
+
+        <!-- 开机重排闹钟。BOOT_COMPLETED 属系统白名单内的广播，exported=false 仍收得到。 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

@@ -95,4 +95,38 @@ public class ReminderStoreTest {
         assertFalse(store.cancel("r-aaaaaaaaaaaa"));
         assertTrue(store.list().isEmpty());
     }
+
+    /**
+     * 壳里同时存在两个写者：网页这边的 store（MainActivity 持有）与到点通知那边的
+     * ReminderReceiver（每次广播 new 一个）。谁写都是整块覆盖，所以「重读」是唯一能同步的手段。
+     * 这两条测试钉的就是 Task 6 里 ShellBridge.syncReminders() 依赖的行为。
+     */
+    @Test public void reloadPicksUpWhatAnotherInstanceAlreadyWrote() {
+        MemIo io = new MemIo();
+        ReminderStore page = new ReminderStore(io);            // 网页这边
+        page.setOwner("alice");
+        page.add(r("r-aaaaaaaaaaaa", "alice", 1000L, "once"));
+        page.add(r("r-bbbbbbbbbbbb", "alice", 2000L, "once"));
+
+        ReminderStore receiver = new ReminderStore(io);        // 接收器那边：读表、推进、落盘
+        receiver.setOwner("alice");
+        for (Reminder due : receiver.dueAt(1500L)) receiver.advance(due, 1500L);
+
+        assertEquals("接收器那边已经少了一条", 1, receiver.list().size());
+        assertEquals("没重读的这边还留着旧的", 2, page.list().size());
+        page.reload();
+        assertEquals(1, page.list().size());
+        assertEquals("r-bbbbbbbbbbbb", page.list().get(0).id);
+    }
+
+    /** reload 不能把归属读丢：未 setOwner 时 fail-closed 这条得顶得住重读。 */
+    @Test public void reloadKeepsTheFailClosedOwner() {
+        MemIo io = new MemIo();
+        ReminderStore store = new ReminderStore(io);
+        store.setOwner("");                                    // 清空归属
+        store.add(r("r-aaaaaaaaaaaa", "alice", 1000L, "once"));
+        store.reload();
+        assertNull(store.activeOwner());
+        assertTrue(store.list().isEmpty());
+    }
 }

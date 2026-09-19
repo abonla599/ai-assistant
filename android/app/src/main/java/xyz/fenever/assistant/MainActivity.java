@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
@@ -22,11 +23,15 @@ import android.webkit.WebViewClient;
 import android.webkit.ValueCallback;
 import android.widget.Toast;
 
+import java.io.File;
 import java.net.URLDecoder;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import xyz.fenever.assistant.core.ReminderStore;
+import xyz.fenever.assistant.core.ShareInbox;
 
 /**
  * AI 助手的 WebView 外壳。
@@ -48,6 +53,11 @@ public class MainActivity extends Activity {
     private WebView webview;
     private ValueCallback<Uri[]> filePathCallback;
     private PermissionRequest pendingCameraRequest;
+
+    // 网页与原生之间唯一的口子，以及它背后的两张表（都从 SharedPreferences 恢复）
+    private ShellBridge bridge;
+    private ReminderStore reminderStore;
+    private ShareInbox shareInbox;
 
     // DownloadManager 的 enqueue id -> 展示用的文件名；回调线程与接收器都在主线程，普通 HashMap 够用
     private final Map<Long, String> pendingDownloads = new HashMap<>();
@@ -72,7 +82,30 @@ public class MainActivity extends Activity {
         // 只走 HTTPS，不放行混合内容
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
+        // 原生能力（提醒/分享入口）唯一的入口：一个对象、八个方法，见 ShellBridge 的类注释。
+        // 通知渠道要先建好——第一次设提醒时发的那条通知没有渠道会在 Android 8+ 上直接发不出去。
+        NotificationChannels.ensure(this);
+        reminderStore = new ReminderStore(PrefsIo.reminders(this));
+        // 分享件走 cacheDir：系统随时可能清掉它，所以 ShareInbox 每次读都先看文件还在不在
+        shareInbox = new ShareInbox(new File(getCacheDir(), "shares"), PrefsIo.shares(this));
+        bridge = new ShellBridge(this, webview, reminderStore, shareInbox);
+        webview.addJavascriptInterface(bridge, "AssistantShell");
+        // 冷启动带进来的 extra（点通知、从分享面板进来）先攒着，等页面加载完再发给网页
+        bridge.queueStartupEvent(getIntent());
+
         webview.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                // 开始跳转就把主线程上的「就绪」标志清掉，别让排着的事件发给正在换掉的页面
+                bridge.notePageStarted(url);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // 页面没加载完就 evaluateJavascript 会静默丢失：通知点了没反应就是这么来的
+                bridge.notePageFinished(url);
+            }
+
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 // 只接管主文档失败，否则页面里的小资源报错会把界面整个换掉
@@ -400,11 +433,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 提醒表的「重读」不在这里做，而在 ShellBridge 每次碰表之前做一次：
+        // 到点通知是 ReminderReceiver 另起一个 store 实例写的（整块覆盖），而网页随时可能在
+        // 前台问一句 listReminders()，那时还没走 onResume。放在桥里才真的堵住这个窗口。
         webview.onResume();
     }
 
     @Override
     protected void onDestroy() {
+        if (bridge != null) {
+            bridge.release();        // 静态引用要放开，否则整棵 WebView 树跟着 Activity 一起漏
+        }
         if (filePathCallback != null) {
             filePathCallback.onReceiveValue(null);
             filePathCallback = null;

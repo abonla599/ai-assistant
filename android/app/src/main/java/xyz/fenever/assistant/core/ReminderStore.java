@@ -84,6 +84,19 @@ public final class ReminderStore {
 
     public synchronized String activeOwner() { return owner; }
 
+    /**
+     * 丢开内存里的表，重新从 {@link Io} 读一遍。
+     *
+     * <p>为什么需要：{@code ReminderReceiver} 与 {@code MainActivity} 各自 new 一个 store，
+     * 谁写都是整块覆盖（last-writer-wins）。到点通知在网页还开着的时候触发，接收器把
+     * {@code once} 那条删掉了，Activity 手里那份还留着——下一次 add/cancel 就把已发过的
+     * 提醒又写回盘上，于是同一条能响两次。回前台时重新读一次就没这个窗口了。
+     */
+    public synchronized void reload() {
+        items.clear();
+        load();
+    }
+
     public synchronized boolean add(Reminder reminder) {
         if (reminder == null || reminder.owner == null) return false;
         if (countFor(reminder.owner) >= MAX_PER_OWNER) return false;

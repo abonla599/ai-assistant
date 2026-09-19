@@ -31,8 +31,8 @@ public final class ShareInbox {
         void write(String content);
     }
 
-    /** 与 spec §2 铁律 2 一致：id 走白名单，路径穿越与错长度一律拒。 */
-    private static final Pattern ID_RE = Pattern.compile("^[A-Za-z0-9_-]{8,24}$");
+    /** 与 spec §2 铁律 2 一致：id 走白名单，路径穿越与错长度一律拒。正则只在 {@link IDs} 定义一次。 */
+    private static final Pattern ID_RE = IDs.PATTERN;
 
     /** 对齐 backend/app/core/uploads.py 的 10MB；超了直接不收。 */
     private static final long MAX_BYTES = 10L * 1024 * 1024;
