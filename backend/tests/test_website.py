@@ -125,6 +125,17 @@ def test_download_points_at_latest_not_a_pinned_filename():
     assert "ai-assistant-0.13.apk" not in page, "钉死文件名的链接下一次发版就腐烂"
 
 
+def test_the_page_never_states_a_version_number():
+    """页脚原先写着「当前版本 v0.13」,而 v0.14 已经在昨天发出去了——那句话现在就是谎。
+
+    和上一条同一个形状:凡是能从别处实时读到、且会自己变的事实,不抄进静态页面。
+    版本号在 GitHub Releases 那一页,那个链接不会腐烂。
+    """
+    import re
+    hits = re.findall(r"v\d+\.\d+", _page())
+    assert not hits, f"页面硬编码了版本号，下一次发版它就变成谎：{hits}"
+
+
 def test_domain_spelling():
     """域名只差一个字母,错一个就是别人的站(或一个不存在的站)。
 
@@ -193,6 +204,25 @@ def test_four_real_screenshots_are_present_and_small():
         assert name in page, f"{name} 没被页面引用"
     budget = 600 * 1024
     assert total < budget, f"四张图合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
+
+
+def test_only_the_first_screenshot_loads_eagerly():
+    """四张实拍合计约 500 KB。一起下载的话，首屏那次绘制是在给三张看不见的图让路。
+
+    轮播的图横向摆在 `overflow:hidden` 的轨道里，浏览器始终不认为它们"快滚进视口"，
+    所以 `loading="lazy"` 单独用会翻车：翻到第二张时是个空壳（实测过）。正确的形状是
+    HTML 里先 lazy 让路、`load` 之后由 site.js 提升成 eager——两头都要钉住。
+    """
+    import re
+    imgs = re.findall(r"<img\b[^>]*>", _page())
+    assert len(imgs) == 4, f"截图 <img> 数量变了，这条的假设要一起改：{len(imgs)}"
+    assert 'fetchpriority="high"' in imgs[0], \
+        f"首屏那张没有提到高优先：{imgs[0][:70]}"
+    for tag in imgs[1:]:
+        assert 'loading="lazy"' in tag, f"后面那张在抢首屏带宽：{tag[:70]}"
+    js = _js()
+    assert 'img.loading = "eager"' in js, \
+        "缺了首屏后的 eager 提升：这三张会永远停在未下载，翻过去就是空壳"
 
 
 def test_no_placeholder_left_in_shots():
@@ -279,6 +309,9 @@ def test_theme_toggle_exists_and_dark_is_the_default():
     css = _css()
     assert "prefers-color-scheme" in css, "首屏不该闪一下才变深色"
     assert "localStorage" in _js(), "主题偏好要记住，不能每次回到默认"
+    # 图标不靠 JS 换 innerHTML（Blink 下赋 innerHTML 的 svg 有时不渲染），而是两个
+    # 都在 DOM 里靠 CSS 换着显示。少了这条规则，按钮里会上下叠出太阳和月亮。
+    assert "#themeBtn .i-moon" in css, "主题图标都挂在页面上，CSS 里却没有切换规则"
 
 
 def _css() -> str:

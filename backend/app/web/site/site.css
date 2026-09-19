@@ -285,6 +285,11 @@ strong { font-weight: 600; }
 .iconbtn:hover svg { transform: rotate(-18deg); }
 .iconbtn:active { transform: scale(.94); }
 .iconbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; transition: transform var(--dur-2) var(--ease-out); }
+/* 主题开关里太阳和月亮都在 DOM，靠这两条换着显示（不在 JS 里换 innerHTML，理由见
+   index.html 那段注释）。少了这两条，grid 会把两个图标上下排成两行。 */
+#themeBtn .i-moon { display: none; }
+html[data-theme="light"] #themeBtn .i-sun { display: none; }
+html[data-theme="light"] #themeBtn .i-moon { display: block; }
 
 /* ---------- 首屏 ---------- */
 .hero, section, footer { max-width: var(--maxw); margin: 0 auto; padding: 56px 20px; }
