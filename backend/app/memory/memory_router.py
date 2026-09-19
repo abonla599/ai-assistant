@@ -345,7 +345,7 @@ def update_memory(req: UpdateMemoryRequest, principal: Principal = CurrentPrinci
 
 
 @router.post("/decay")
-def decay_memories(decay_factor: float = Query(0.95),
+def decay_memories(decay_factor: float = Query(0.95, gt=0.0, le=1.0),
                          principal: Principal = RequireAdmin):
     """衰减调用者本人的记忆权重。
 
@@ -353,6 +353,14 @@ def decay_memories(decay_factor: float = Query(0.95),
     不再收 user_id —— 原先任何持凭据者都能带别人的 id 去压低他全部记忆的权重，
     等于替他决定什么值得被记住。管理员要按用户逐个衰减需要另建管理端点，
     不在这个口子上一并开。
+
+    因子必须落在 `(0, 1]`，这条校验是承重的而不是装饰：`decay_weights` 是乘完
+    直接写回、**不夹逼**（夹逼只在 `adjust_weights` 里），所以旧写法下管理员在输入框
+    里填一个 `0` 就把这个人全部记忆的权重一次清零，填负数得到负权重——而
+    `weighted_rank` 又把负数截成 0，两者结果相同：**排序信号被抹平，且没有任何
+    端点能按回去**（`adjust_weights` 只能靠点赞一条一条往上攒）。
+    上限取 1 是因为这个端点叫 decay；`1.0` 故意放行，那是管理员对照"这一下改了多少"
+    的唯一手段。前端 `min/max/step` 只是即时反馈，挡不住直接打接口的人。
     """
     def real_decay():
         memory_manager.decay_weights(principal.user_id, decay_factor)

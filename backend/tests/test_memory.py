@@ -120,6 +120,49 @@ def test_summarize_goes_through_the_provider_store(monkeypatch):
     assert built["base_url"] == expected["base_url"]
 
 
+def test_decay_factor_is_bounded():
+    """衰减因子只许落在 (0, 1]，越界的必须在门口挡掉。
+
+    起因是管理页这一轮把 `decay_factor` 做成了可点输入。那个 `<input>` 确实写了
+    `min="0.1" max="1"`，但数字框的 validity 只在**表单提交**时才拦，而这一页是
+    click 处理器直接发请求；更要紧的是接口本身谁都能直接打——所以前端那道只是
+    即时反馈，承重的一直缺着：路由原先是 `Query(0.95)` 无约束，而 `decay_weights`
+    又是乘完直接写回不夹逼，于是：
+
+    - 填 `0` → 整池权重变成 0；填负数 → 负权重，而 `weighted_rank` 把负数截成 0。
+      这两种都不是"这次衰减过头"，是**把这个人所有记忆的排序信号一次性抹平**；
+    - 没有任何端点能按回去。`adjust_weights`（用户点赞点踩）虽然夹在 [0.1, 5.0]
+      能慢慢拉回，但那要一条一条攒，而"清零"只需要一次输入框里的 0。
+
+    `1.0` 必须放过：管理员拿它确认"这个按钮到底改了多少"，挡死它等于不许试错。
+    上限取 1 是因为这个端点叫 decay——大于 1 是整池通胀，那是另一个动作。
+    """
+    for bad in ("0", "-1", "0.0", "1.5", "100"):
+        res = client.post(f"/v1/memory/decay?decay_factor={bad}")
+        assert res.status_code == 422, f"因子 {bad} 被收了（{res.status_code}）：整池权重会被这一次输入改坏"
+
+    ok = client.post("/v1/memory/decay?decay_factor=1.0")
+    assert ok.status_code == 200, "1.0（无操作）被误挡，管理员没法拿它对照"
+
+
+def test_decay_at_one_changes_nothing_and_negative_never_lands():
+    """1.0 真的什么都不改；而任何一路写进去的权重都不许是负数或 0。
+
+    前一条测的是门口，这条测的是门后：万一将来有人图省事在 `decay_weights` 里自己
+    乘一遍（绕过路由校验），排序层拿到的仍然是可比较的正数。
+    """
+    client.post("/v1/memory/add", json={"content": "边界记忆"})
+    before = [(r["content"], r["weight"]) for r in
+              client.post("/v1/memory/search", json={"query": "边界记忆", "top_k": 20}).json()["results"]]
+    client.post("/v1/memory/decay?decay_factor=1.0")
+    after = [(r["content"], r["weight"]) for r in
+             client.post("/v1/memory/search", json={"query": "边界记忆", "top_k": 20}).json()["results"]]
+
+    assert before, "这条断言在空转：一条都没搜到，比较就成了两句废话"
+    assert before == after, f"因子 1.0 改了权重：{before} → {after}"
+    assert all(w > 0 for _, w in after), f"排序层拿到了非正权重：{after}"
+
+
 def test_decay():
     """衰减走管理员端点、只作用于调用者自己那一份记忆（此处即本机管理员）。"""
     # 添加记忆
