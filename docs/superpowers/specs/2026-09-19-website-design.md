@@ -52,23 +52,34 @@ Do not submit a hostname**"*。47 个工具里没有自定义域名的绑定或�
 - `run_backend.spec`：datas 显式列目录,补一条即可
 - 冻结版解包路径：和 `_static_dir()`(`web_router.py:13`)同一套 `app/web/...` 逻辑
 
-挂载沿用现成的 `RevalidatingStaticFiles(directory=…, html=True)`(`web_router.py:36`),
-它已经带 `Cache-Control: no-cache` 和 CSP。Cloudflare 侧已设「尊重现有标题」,
-源站表态 no-cache,改版就不会在朋友那边变成"改了没生效"。
+页面本体用一根 `GET /` 的 `FileResponse` 出,静态资源沿用现成的 `RevalidatingStaticFiles`
+(`web_router.py:36`,它已经带 `Cache-Control: no-cache` 和 CSP)挂在 `/site` 前缀下。
+
+**2026-09-19 执行期改判(ledger R7)：原本这里写的是"挂 `app.mount("/")`",两处不成立**——
+① `Mount("/").path` 实测是空串 `''`,契约测试的豁免名单按 `.path` 算,盖不住它;
+② 根 Mount 部分匹配一切路径,会让 Starlette 的 `redirect_slashes` 不再运行,`/health/`、
+`/docs/` 变 404,而 `test_auth_endpoints.py:296` 钉的正是一条尾斜杠语义。
+换成 `/` 路由 + `/site` 前缀的代价,是要在 `test_route_auth_contract.py` 的 `SYSTEM_PATHS`
+里显式登记 `/site` 并写理由 —— 那本来就是那把锁的设计意图,不是障碍。
+
+Cloudflare 侧已设「尊重现有标题」,源站表态 no-cache,改版就不会在朋友那边变成"改了没生效"。
 
 ---
 
-## 2. 四处必须同时改,漏一处就是线上事故
+## 2. 六处必须同时改,漏一处就是线上事故
 
 | # | 位置 | 不改会怎样 |
 |---|------|-----------|
-| 1 | `backend/tests/test_api.py:15` `test_root` | 它断言 `/` 返回 JSON 且 `status=="running"`。页面一上,这条测试立刻红 |
+| 1 | `test_api.py:15` / `test_integration.py:125` / `test_web_pwa.py:101` 三处 `test_root` | 三处都在断 `/` 返回 JSON。第一轮只数到第一处(控制器 grep 加了 `head -10` 把命中截掉了),结果计划本身缺一处改动 |
 | 2 | `run_backend.spec:20` 的 `datas` | 冻结版 EXE 里没这个目录,线上 404。同一形状已经崩过一次("上次 static 缺失导致 EXE 启动即崩") |
 | 3 | `~/.cloudflared/config.yml` ingress 顺序 | 新主机名被兜底 404 吞掉,表现为"我这边好好的,外面打不开" |
-| 4 | 源站头:`/` 也要 no-cache | 复用同一个类即可。漏了就要靠手动 Purge,且朋友会看旧页 |
+| 4 | 源站头:`/` 与 `/site/*` 都要 no-cache | 页面走 `site_headers()`,资源走那个类,两处一致由测试各钉一半。漏了就要靠手动 Purge,且朋友会看旧页 |
+| 5 | `test_route_auth_contract.py:76` 的 `SYSTEM_PATHS` 加 `/site` | 不加则 `test_nothing_routable_lives_outside_both_locks` 红——那是设计出来的闸 |
+| 6 | 旧的 `@app.get("/")`(`main.py:268-275`)整段删除 | 留着它,那句 `version: "1.0.0"` 的谎还在,新页面也永远不会被读到 |
 
-`/app`、`/admin`、`/v1/*`、`/health`、`/docs` 全部排在前面,后挂的 `/` 不会遮它们;
-这条要在验收里真跑一遍,不能只靠推理。
+`/app`、`/admin`、`/v1/*`、`/health`、`/docs` 的语义全部不许被这次改动碰到;
+`test_trailing_slash_semantics_are_untouched` 与 `test_unknown_paths_still_get_the_framework_json_404`
+两条就是钉这个的,要在验收里真跑一遍,不能只靠推理。
 
 **不动壳**：`MainActivity.java:39` 钉的是 `https://ai.fenever.xyz/app/`,官网走的是另一个
 主机名,壳不需要重装(与「改界面不用重装」那条界分一致)。
@@ -79,7 +90,7 @@ Do not submit a hostname**"*。47 个工具里没有自定义域名的绑定或�
 
 | 区块 | 内容 | 事实来源 |
 |------|------|---------|
-| 首屏 | 一句话：一个你自己注册就能用的 AI 助手,记得住你、能算数、读得懂你发的图片和 PDF。两颗按钮：「打开就用」→ `https://ai.fenever.xyz/app/`；「装安卓壳(约 60 KB)」→ `https://github.com/abonla599/ai-assistant/releases/latest` | 手册 + Release v0.13 原话 |
+| 首屏 | 一句话：一个你自己注册就能用的 AI 助手,记得住你、能算数、读得懂你发的图片和 PDF。两颗按钮：「打开就用」→ `https://ai.fenever.xyz/app/`；「装安卓壳(约 96 KB)」→ `https://github.com/abonla599/ai-assistant/releases/latest` | 手册 + v0.13 的 asset 实测 97835 字节（Release 正文那句「约 60 KB」是 v0.10 的旧数,不抄） |
 | 它现在真能做的 | 多模型切换 / 计算器 / 图片和 PDF 解读 / 长期记忆 / 多人各用各的 | 只列 §4 里过了筛的 |
 | 装壳多出来的三件 | 提醒(存本机不上传,重启仍生效)/ 相册·PDF 点「分享」→ 选「AI 助手」直接进附件栏 / 桌面组件直达拍照提问 | Release v0.13 正文 |
 | 三步上手 | 打开链接 → 注册(自己填用户名密码,不要码)→ 开始聊 | Release v0.11+ 改口 |
