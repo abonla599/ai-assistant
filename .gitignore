@@ -45,9 +45,13 @@ generate_docx.py
 
 # 本地工具产物与临时备份（不属于源码，勿提交）
 .qoder/
-# 本地工具产物：cloudflared.exe、隧道 yml、启动脚本都不属于源码，整目录排除。
+# 本地工具产物：cloudflared.exe 与隧道 yml 不属于源码，整目录默认排除。
+# 例外只开一个：start-ai-stack.bat 是**开机自启的真身**，它不进仓库就等于"换一台机器
+# 没人知道开机该跑什么"——本会话已为此付过两次静默停机的排查成本，而命名隧道的
+# config.yml 本来就落在 %USERPROFILE%\.cloudflared\ 不在这里，所以没有任何凭据被带进来。
 # （这里曾经有一条 !tools/make-invite.bat 例外，随邀请码机制一起删除了。）
-/tools/
+/tools/*
+!/tools/start-ai-stack.bat
 server.log
 tunnel.log
 PATH_backup_*.txt
