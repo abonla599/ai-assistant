@@ -323,7 +323,10 @@
        分开就会有一个"前一步填的东西还在另一个层里"的收尾问题。
        题面文字不在这里：三句是全站常量、由 app.js 从 RECOVERY_QUESTIONS 渲染进
        .auth-q 那几格，HTML 里再抄一份就是第二个事实来源（test_web_pwa 钉着不许有）。 -->
-  <div class="auth hidden" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
+  <!-- 默认就是挡着的：hidden 会让浏览器在 JS 跑起来之前先画出聊天外壳，
+       于是每个人都能看到"对话窗口闪一下才变成确认身份"。pending 是中性态，
+       只露字标和下面那句，三条出路都由 app.js 摘掉它。 -->
+  <div class="auth pending" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
     <div class="auth-inner">
       <div class="auth-brand"><img src="icon.png" alt=""><span>AI 助手</span></div>
 

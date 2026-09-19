@@ -1760,3 +1760,87 @@ def test_the_auth_intro_never_blocks_typing_or_reading():
     js = _js()
     intro = _function_body(js, "playAuthIntro")
     assert ".focus()" not in intro, "开场动画里自动聚焦输入框：手机上抢光标"
+
+
+def test_the_first_painted_frame_is_already_the_neutral_layer():
+    """登录层在 HTML 里带 hidden，浏览器就先画聊天外壳，等 boot() 跑起来才盖上中性层。
+
+    这就是"对话窗口先出现、然后才是确认身份界面"那一次闪变的**第 0 步**。#43 那一轮
+    把「外壳 → 401 → 表单」的三步序压成了"不问完不露东西"，但它压的是 JS 执行之后的事；
+    JS 还没跑起来的那一帧上没有任何代码能救场，能让它不露外壳的只有标记本身。
+    所以这条判的是静态标记而不是运行时行为：把 hidden 加回去，它立刻红。
+    """
+    html = _html()
+    tag = re.search(r"<div[^>]*id=\"authModal\"[^>]*>", html)
+    assert tag, "找不到 #authModal 这个元素"
+    class_attr = re.search(r"class=\"([^\"]*)\"", tag.group(0))
+    assert class_attr, f"#authModal 连 class 都没有：{tag.group(0)}"
+    classes = class_attr.group(1).split()
+    assert "hidden" not in classes, (
+        "首帧上登录层是 hidden，于是浏览器先给用户看了聊天外壳，等 DOMContentLoaded "
+        "才盖上中性层——这一闪是 JS 修不掉的，只能靠标记自己默认就是挡着的")
+    assert "pending" in classes, (
+        f"登录层默认不带 pending（实际是 {classes}）：默认露出的是完整表单而不是中性层，"
+        "令牌有效的人会在第一帧上看到一张根本不该出现的登录表")
+
+
+def _declared_rules(css: str, selector: str) -> list[str]:
+    """取某个选择器下所有规则的花括号内容（只按字面匹配，够用且不会误伤别的选择器）。"""
+    return [body for sel, body in
+            re.findall(r"([^{}]+)\{([^}]*)\}", css)
+            if re.search(r"(^|[\s,])" + re.escape(selector) + r"($|[\s,{])", sel)]
+
+
+def test_the_arc_sits_on_a_real_boundary_in_both_themes():
+    """弧要看得见，前提是它两侧不是一档颜色——上一版就是因为这个白做了。
+
+    那时面板底色只在动画里存在、落位即淡成 transparent，于是深主题下 --surface(#16191d)
+    压在 --bg(#0e1013) 上根本分不出来，clip-path 擦了一遍弧没人看见。现在弧是常驻结构，
+    两侧各取一个专用 token，所以判据有三条：品牌带与面板取的是【不同】的 token；
+    这两个 token 在深浅两套主题里都真的定义了；而且两处的实际色值不相等。
+    少任何一条，弧都会静默消失——这类回归不会报错，只会"效果没了"。
+    """
+    css = _css()
+    band = _declared_rules(css, ".auth")
+    panel = _declared_rules(css, ".auth-sheet")
+    assert band and panel, ".auth 或 .auth-sheet 没有规则"
+    assert any("--auth-band" in r for r in band), "品牌带没吃 --auth-band"
+    assert any("--auth-panel" in r for r in panel), "表单面板没吃 --auth-panel"
+
+    root = re.search(r":root\s*\{([^}]*)\}", css)
+    light = re.search(r'\[data-theme="light"\]\s*\{([^}]*)\}', css)
+    assert root and light, "找不到 :root 或浅色主题那一段"
+
+    def var(block: str, name: str) -> str | None:
+        m = re.search(r"--" + name + r"\s*:\s*([^;]+);", block)
+        return m.group(1).strip() if m else None
+
+    for block, label in ((root.group(1), "深主题"), (light.group(1), "浅主题")):
+        a, b = var(block, "auth-band"), var(block, "auth-panel")
+        assert a and b, f"{label}里 --auth-band / --auth-panel 没成对定义：弧会塌成一片"
+        assert a.lower() != b.lower(), (
+            f"{label}里带子与面板同为 {a}：没有色差的弧等于没有弧")
+
+
+def test_the_sheet_panel_does_not_fade_back_out_at_rest():
+    """掀开动画跑完，面板必须留在原地。
+
+    钉的是 keyframes 里不许再出现 background-color——那正是"落位即透明"的写法，
+    它让动画结束的瞬间把弧的两侧重新并成同一档颜色。
+    """
+    css = _css()
+    frames = re.search(r"@keyframes\s+auth-sheet-rise\s*\{(.*)\n\}", css, re.S)
+    assert frames, "找不到 auth-sheet-rise"
+    assert "background-color" not in frames.group(1), (
+        "掀开动画又在动 background-color 了：结束态一旦是 transparent，弧就白擦")
+
+
+def test_the_neutral_state_hides_the_sheet_so_it_cannot_show_an_empty_slab():
+    """中性态里两张表单是 display:none，但 .auth-sheet 有常驻 padding。
+
+    不连面板一起收掉的话，pending 那一段会撑出一块 34+28 的空白板——比原来的问题更难看。
+    """
+    css = _css()
+    hidden = _declared_rules(css, ".auth.pending .auth-sheet")
+    assert any("display: none" in r or "display:none" in r for r in hidden), (
+        "中性态没收起 .auth-sheet：表单藏了，面板的常驻内边距会露出一块空板")

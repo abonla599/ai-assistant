@@ -17,6 +17,11 @@
   --user-text: #e6e9ed;
   --danger: #f87171;
   --code-bg: #0b0d10;
+  /* 登录层那两道弧色：弧要看得见，靠的是交界两侧一暗一亮，所以这两个值必须成对存在
+     （test_web_pwa 钉着"两侧不许是同一个 token"）。--auth-band 是品牌带那一侧，
+     --auth-panel 是表单面板那一侧。 */
+  --auth-band: #08090c;
+  --auth-panel: #151821;
   --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 30px rgba(0, 0, 0, .4);
   --radius: 14px;
   --sidebar-w: 268px;
@@ -39,6 +44,11 @@
   --user-bubble: #e6f6f0;
   --user-text: #17191f;
   --danger: #dc2626;
+  /* 浅主题下这两档也必须分得开，否则弧边又隐形了。这里走"带子略灰、面板纯白"，
+     步长比深主题小是因为白底上再压一块深灰会把整屏拉成深色登录页；
+     边界靠面板那道上投影补足，不靠色差硬扛。 */
+  --auth-band: #dfe5ec;
+  --auth-panel: #ffffff;
   --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 8px 24px rgba(16, 24, 40, .07);
 }
 
@@ -430,7 +440,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
  * z-index 必须高于 .backdrop/.modal，否则从设置页里掉线时会被设置层压住。
  */
 .auth { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center;
-        justify-content: center; padding: 20px; background: var(--bg); overflow: auto; }
+        justify-content: center; padding: 20px; background: var(--auth-band); overflow: auto; }
 .auth-inner { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 22px; }
 .auth-brand { display: flex; align-items: center; justify-content: center; gap: 10px;
               font-size: 24px; font-weight: 600; color: var(--accent); letter-spacing: .5px; }
@@ -443,29 +453,38 @@ button, input, textarea, select { font: inherit; color: inherit; }
                 line-height: 1.5; color: var(--text-2); }
 .auth.pending .auth-form { display: none; }
 .auth.pending .auth-pending { display: block; }
-/* ---------- 登录层开场动画 ----------
- * 两段，各自挂在各自的触发时刻上（不是同一次 class 切换）：
+/* ---------- 登录层的弧，与它的开场动画 ----------
+ * 弧是这一层的【结构】，不是动画的临时道具：品牌带（--auth-band）在上、表单面板
+ * （--auth-panel）在下，两档色差加上面板那道拱形顶边，才是"掀开"看得见的全部理由。
+ * 上一版把面板底色做成"只在动画里存在、落位即淡成 transparent"，于是深主题下
+ * #16191d 压在 #0e1013 上根本分不出来——弧擦了一遍，没人看见。
+ *
+ * 动画两段，各自挂在各自的触发时刻上（不是同一次 class 切换）：
  *   intro-brand —— 弹层一出现就播，那第一帧上除了字标什么都没有；
  *   intro-sheet —— 等中性态摘掉、表单真的在屏上了才播。
  * 第二段为什么不能跟第一段同时：pending 期间两张表单是 display:none，
  * 在空盒子上跑"掀开面板"等于掀了个空，实测截图里就是字标闪一下、表单凭空出现。
+ * 所以中性态连面板本身一起收掉——那 34+28 的常驻内边距会撑出一块没有内容的空板。
  * 也刻意不给 .auth-field / .auth-go 各自加延迟——那样动画中途会留一个大洞
  * （上面说明在、中间三格透明、下面链接在），由 test_web_pwa.py 钉住。
  *
- * 面板的弧边靠 clip-path 的椭圆从 6% 长到 130%，不依赖图片；底色只在动画这一段里
- * 有、落位时淡成 transparent，所以静态观感与加这段动画之前完全一致
- * （做成常驻卡片是另一件事：浅色主题下 --surface 与 --bg 都是 #fff，卡片得靠描边才看得出来）。
- * fill-mode 用 backwards 而不是 both：both 会把结束态的 clip-path 一直挂在元素上，
- * 那张表单以后长高了就会被裁掉一角——动画跑完就该彻底不掺和。
+ * 掀开用 clip-path 的椭圆从 8% 长到 130%，不依赖图片。fill-mode 用 backwards 而不是
+ * both：both 会把结束态的 clip-path 一直挂在元素上，表单以后长高了就被裁掉一角——
+ * 动画跑完就该彻底不掺和，常驻那道弧是 border-radius 给的，跟动画无关。
  */
-.auth-sheet { display: flex; flex-direction: column; gap: 22px; }
+.auth-sheet { display: flex; flex-direction: column; gap: 22px;
+              background: var(--auth-panel);
+              padding: 34px 24px 28px;
+              border-radius: 50% 50% 0 0 / 30px 30px 0 0;
+              box-shadow: 0 -14px 34px rgba(0, 0, 0, .28); }
+.auth.pending .auth-sheet { display: none; }
 .auth.intro-brand .auth-brand { animation: auth-brand-in .4s ease-out backwards; }
 .auth.intro-sheet .auth-sheet { animation: auth-sheet-rise .5s cubic-bezier(.22, .61, .36, 1) backwards; }
 @keyframes auth-brand-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes auth-sheet-rise {
-  from { opacity: .4; transform: translateY(14px); background-color: var(--surface);
-         clip-path: ellipse(150% 6% at 50% 100%); }
-  to   { opacity: 1; transform: none; background-color: transparent;
+  from { opacity: .45; transform: translateY(14px);
+         clip-path: ellipse(150% 8% at 50% 100%); }
+  to   { opacity: 1; transform: none;
          clip-path: ellipse(150% 130% at 50% 100%); }
 }
 /* 晕动症要的是"别动"，不是"动快点"，所以这里关的是动画本身而不是时长。 */
