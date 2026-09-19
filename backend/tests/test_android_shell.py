@@ -40,9 +40,11 @@ def test_every_runtime_receiver_registration_names_an_export_flag():
     不是精确的控制流分析——它守的是"别再靠注释宣称豁免"，不是编译器。
     """
     offenders = []
+    sites = 0
     for path in sorted(SHELL_SRC.rglob("*.java")):
         src = path.read_text(encoding="utf-8")
         for m in re.finditer(r"(?<!un)\bregisterReceiver\s*\(", src):
+            sites += 1
             args = _call_args(src, m.end() - 1)
             if any(flag in args for flag in EXPORT_FLAGS):
                 continue
@@ -50,6 +52,10 @@ def test_every_runtime_receiver_registration_names_an_export_flag():
             guarded = "SDK_INT" in "\n".join(src.splitlines()[max(0, line - 13):line - 1])
             if not guarded:
                 offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{line}")
+
+    # 正向对照：路径写错时 rglob 一个文件都找不到，offenders 空着也"通过"——那这条锁
+    # 就只是在空转，而它绿得和真的守住时一模一样。CI 里跑的正是这条命令，所以这里必须钉。
+    assert sites >= 1, f"在 {SHELL_SRC} 下一个 registerReceiver 调用都没扫到：要么路径错了，要么这条锁没用了"
 
     assert not offenders, (
         "这些 registerReceiver 既没给导出标志、也不在 SDK_INT 保护下，"
