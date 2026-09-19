@@ -5,4 +5,7 @@ __pycache__
 .venv
 venv
 *.egg-info
-chroma_data
+# 记忆库的真实落点名是 chroma_db（backend/app/memory/memory_manager.py 的
+# _default_persist_dir → data_root()/chroma_db）；这一条此前写的是 chroma_data，
+# 一个从来不存在的路径名，所以它从来没有挡过任何东西。
+chroma_db

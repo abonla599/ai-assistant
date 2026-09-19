@@ -90,7 +90,7 @@ $ErrorActionPreference = 'Stop'
 
 if ($DryRun) {
     # 空跑是人在控制台跟前看的。控制台默认按 GBK 解释字节，中文会糊成一团，
-    # 这里把它切到 UTF-8（start_ai.bat 用的 chcp 65001 就是这个意思）。
+    # 这里把它切到 UTF-8（等价于命令行那句 `chcp 65001`）。
     # 真跑时不动它：计划任务里没有控制台给人看。
     try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 }

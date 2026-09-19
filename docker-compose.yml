@@ -1,5 +1,21 @@
 version: '3.8'
 
+# 这里**没有**独立的向量库服务：记忆库是进程内嵌的 chromadb.PersistentClient
+# （backend/app/memory/memory_manager.py 里 self.chroma_client =
+# chromadb.PersistentClient(path=self.persist_dir)，persist_dir 默认就是
+# 项目根/chroma_db），它不开 8001、不需要 depends_on、也不接受外部连接。
+# 此前这份文件里那个 chromadb/chroma 容器与它的 ./chroma_data 卷跟代码说的不是同
+# 一件事，那个卷目录从来没被写过。
+#
+# 这份 compose 是"把后端搬到大机器上"的那条**备用**路，不是本机现网的形态。
+# 现网只有一个 backend 服务：PyInstaller 的 onedir 产物（见 run_backend.spec 的
+# COLLECT(name='run_backend')）跑 uvicorn 127.0.0.1:8000（见 run_backend.py 末尾），
+# 再由 Cloudflare 隧道把它暴露成 https://ai.fenever.xyz/，安卓端只是指向那个地址的
+# WebView 壳（见 android/app/build.gradle 的 APP_URL 与 .github/workflows/release-apk.yml）。
+# 所以：本机不要把这份 compose 和那份 exe 一起起来 —— "8000:8000" 绑的是 0.0.0.0，
+# 会直接和 run_backend.exe 抢 :8000，而且两个进程同写一份数据会互相覆盖
+# （见 docs/安装部署指南.md「一个数据根目录只允许一个服务进程」）。
+
 services:
   backend:
     build: .
@@ -9,21 +25,16 @@ services:
     env_file:
       - .env          # 确保 .env 里有 API Key 等配置
     volumes:
-      - ./chroma_data:/app/chroma_data   # 持久化向量数据库
-    depends_on:
-      - chroma
+      # 挂的是服务**真正会写**的那两棵目录，见 backend/app/core/paths.py::data_root()：
+      # 容器里 WORKDIR /app 且 COPY 进来的 backend/app/main.py 正好是项目根的特征文件，
+      # 所以七份可变数据落在 /app/data/、长期记忆落在 /app/chroma_db/。
+      # 这里过去写的是 ./chroma_data:/app/chroma_data —— 全仓没有任何代码读过
+      # chroma_data 这个名字，那个目录在本机也从来没被创建过，等于一次都没持久化成功。
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
       timeout: 10s
       retries: 3
-
-  chroma:
-    image: chromadb/chroma:latest
-    container_name: ai-chroma
-    volumes:
-      - ./chroma_data:/chroma/chroma
-    ports:
-      - "8001:8000"      # 可选，调试时暴露
-    restart: unless-stopped
