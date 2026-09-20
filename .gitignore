@@ -55,6 +55,11 @@ generate_docx.py
 # 同理：这条 .bat 的无闪窗包装（wscript 层）也是开机自启的真身的一部分，
 # 不进仓库就等于换一台机器开机又退回"闪一下 cmd 窗"的老样子。
 !/tools/start-ai-stack-hidden.vbs
+# 这台机器没有 Gradle 也没有 Android SDK，壳的 core/ 单测本来只能推上去等 CI 判。
+# 这个台架就是为省掉那段等待写的。它以前叫 _diag_shell_bench.py，那个名字同时撞着
+# `/tools/*` 和下面的 `_diag_*.py` 两条排除，等于永远进不了仓库——每换一次会话就得
+# 重新找一遍 android.jar 与 junit jar 的路径。纯逻辑、只读源码，不含任何凭据。
+!/tools/shell_jvm_tests.py
 server.log
 tunnel.log
 PATH_backup_*.txt

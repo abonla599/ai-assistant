@@ -85,6 +85,21 @@ param(
     # Cloudflare 命名隧道名（tools/start-ai-stack.bat 里 `tunnel run` 后面那个）。
     [string] $TunnelName = 'ai-assistant',
 
+    # cloudflared 的 metrics 端口（~\.cloudflared\config.yml 里那行 metrics:）。
+    # 有这个才问得出"隧道到底连上边缘了没有"——见下面 Test-TunnelReady 的注释。
+    [int] $TunnelMetricsPort = 35467,
+
+    # 本脚本自己拉起的那一个用这个端口。为什么不用主端口：cloudflared 起不来时
+    # 第一件事就是 metrics 监听失败（实测 "failed to bind to address 127.0.0.1:35467"），
+    # 而"进程在但不服务"这条升级路径【不杀旧进程】——旧的那个还占着主端口，
+    # 新起的如果抢同一个端口就会立刻退出，等于升级动作静默失败。
+    # 实测过一次：日志写着"已拉起"，进程表里却只有原来那一个。
+    [int] $TunnelAltMetricsPort = 35468,
+
+    # 连续多少次问不到 /ready 才按"隧道对外不可用"处理。取 3 = 三分钟：
+    # 网络抖一下、cloudflared 自己正在重连的时候，不该被看门狗抢着加塞。
+    [int] $TunnelUnreadyRestarts = 3,
+
     # 只管后端、不管隧道时用这个（隧道归另一套守护时）。
     [switch] $SkipTunnel,
 
@@ -225,6 +240,57 @@ function Test-PortListening {
     }
 }
 
+function Test-TunnelServed {
+    # 两个 metrics 端口里【任何一个】回 /ready 200，就算这条隧道对外可服务：
+    # 开机那个占 35467，看门狗补的那个占 35468，谁活着都算数。
+    param([int[]] $PortNumbers)
+    foreach ($portNumber in $PortNumbers) {
+        if (Test-TunnelReady -PortNumber $portNumber) { return $true }
+    }
+    return $false
+}
+
+function Test-TunnelReady {
+    # cloudflared 的 /ready 只在【至少一条 connector 连上边缘】时回 200。
+    # 为什么非要有这一条：2026-09-20 那次 ai.fenever.xyz 出 Error 1033（边缘上没有活的
+    # connector），而 cloudflared 进程一直活着、本脚本每分钟巡检一次全绿、零告警——
+    # 因为"进程在不在"量不出"链路通不通"。那种故障唯一的可见形状就是 /ready 不通。
+    #
+    # 走 127.0.0.1 是本机回环，不依赖出口网络：出口断了的时候 /ready 会连着不通，
+    # 那正是该报警的时候，而不是"探测失败所以别看"。
+    param([int] $PortNumber)
+    try {
+        $resp = Invoke-WebRequest -Uri ('http://127.0.0.1:{0}/ready' -f $PortNumber) `
+                                  -TimeoutSec 3 -UseBasicParsing
+        return ($resp.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+function Get-Counter {
+    # 读一个存在状态文件里的整数计数。
+    # 为什么要单独写一个函数而不是 [int]$State[$Key]：Read-State 对每个值都套了一层
+    # `@(...)`（那是给拉起记录数组准备的，见它的注释），于是这里读回来的是
+    # "只有一个元素的数组"，而 [int]@(...) 在 PowerShell 里是直接抛异常的——
+    # 实测症状：看门狗每次巡检都在隧道那一步报
+    # 「无法将"System.Object[]"…转换为"System.Int32"」，然后整轮 catch 掉，
+    # 后端守得好好的，隧道那条从此再没被执行过。
+    param([hashtable] $State, [string] $Key)
+    $raw = $State[$Key]
+    if ($raw -is [array]) { $raw = if ($raw.Count -gt 0) { $raw[0] } else { $null } }
+    $n = 0
+    if ($raw -and [int]::TryParse([string]$raw, [ref]$n)) { return $n }
+    return 0
+}
+
+function Set-Counter {
+    # 存成字符串：与 Test-ShouldLog 的写法一致，且被 Read-State 的 @() 包一层之后
+    # 仍是"一个元素的字符串数组"，Get-Counter 取得回来。
+    param([hashtable] $State, [string] $Key, [int] $Value)
+    $State[$Key] = [string]$Value
+}
+
 function Get-BackendProcess {
     # 按 exe 全路径认，别只认进程名：别处一个同名 run_backend.exe 会让守护以为
     # 服务还活着，于是真的那一个死了它也不拉。
@@ -254,7 +320,12 @@ function Invoke-Guard {
         [scriptblock] $Launch,  # 返回 Start-Process -PassThru 的对象
         # 只在调用方明确要求时才探端口。隧道那条不许传：cloudflared 是往外连的，
         # 本机 8000 通不通跟它活没活着是两件事，拿后端的标准去量它会天天误报。
-        [int] $CheckPort = 0
+        [int] $CheckPort = 0,
+        # "进程在，但已经不提供服务"的第二判据：返回 $true/$false。
+        # 传了它就要给 LivenessKey（连续不通的计数放哪儿）与阈值。
+        [scriptblock] $LivenessProbe = $null,
+        [string] $LivenessKey = '',
+        [int] $LivenessThreshold = 3
     )
 
     $probeResult = & $Probe
@@ -264,21 +335,63 @@ function Invoke-Guard {
         # 冷启动/依赖加载慢的时候端口本来就还没起，重启会把一个只是慢的服务打断，
         # 而"事件循环被卡死"那种形状（524 那次）留证据比自动开刀更安全。
         $pids = ($found | ForEach-Object ProcessId) -join ', '
-        $listening = $true
-        if ($CheckPort -gt 0) { $listening = Test-PortListening -PortNumber $CheckPort }
 
-        if (-not $listening) {
-            if (Test-ShouldLog -State $State -Key ("seen:port:" + $Key)) {
-                Write-Log 'WARN' ("$Title 进程在（PID $pids）但 127.0.0.1:$CheckPort 连不通，" +
-                                  "可能是卡死或还在启动中。本条按 ${WarnRepeatMins} 分钟一次提醒，" +
-                                  "守护不会自动重启它。")
+        # —— 第二判据：进程在不代表还在服务 ——
+        # 与上面那条"端口一时不通不重启"不矛盾，差别在【连续】与【量的是谁】：
+        # /ready 量的就是这条隧道对外的可用性本身，没有它就没有别的信号可看。
+        # 攒够 LivenessThreshold 次才动手，是为了给 cloudflared 自己的重连留时间。
+        # 默认不升级；只有"进程在但连续 N 次不服务"才把它置真，让下面那段
+        # "活着就 return"的常规收尾跳过，从而落到共用的拉起分支上去。
+        # （上一版这里漏了这个开关：WARN 打出来了，函数却照样 return，
+        # 于是"检测到了但什么都不做"——正是这次要修的那个形状。）
+        $escalate = $false
+        if ($LivenessProbe) {
+            $ready = $true
+            try { $ready = & $LivenessProbe } catch { $ready = $false }
+            $misses = Get-Counter -State $State -Key $LivenessKey
+            if ($ready) {
+                if ($misses -gt 0) {
+                    Write-Log 'INFO' ("$Title 重新可服务（此前连续 $misses 次 /ready 不通已恢复）")
+                }
+                Set-Counter -State $State -Key $LivenessKey -Value 0
+            } else {
+                $misses += 1
+                Set-Counter -State $State -Key $LivenessKey -Value $misses
+                if ($misses -lt $LivenessThreshold) {
+                    if (Test-ShouldLog -State $State -Key ("seen:unready:" + $Key)) {
+                        Write-Log 'WARN' ("$Title 进程在（PID $pids）但 /ready 不通，" +
+                                          "已连续 $misses/$LivenessThreshold 次 —— 还没到动手门槛，" +
+                                          "cloudflared 可能正在自己重连。")
+                    }
+                    return
+                }
+                $why = ("进程在（PID $pids）但连续 $misses 次 /ready 不通")
+                Write-Log 'WARN' ("$Title $why —— 按【隧道对外不可用】处理，再起一个 connector。" +
+                                  "旧的那个【不杀】（本脚本只启动、从不杀进程），而多条 connector " +
+                                  "指向同一条隧道是 Cloudflare 支持的形态，" +
+                                  "不是抢端口。旧进程为什么挂着不重连，看 data\cloudflared.log。")
+                Set-Counter -State $State -Key $LivenessKey -Value 0
+                $escalate = $true      # 往下走，与"进程不在"共用同一份预算和熔断
             }
-        } elseif ($DryRun) {
-            # 空跑是给人当"现在到底什么状态"用的，这种时候要说清楚，别只回两行沉默。
-            Write-Log 'INFO' ("$Title 存活：PID $pids" +
-                              $(if ($CheckPort -gt 0) { "，127.0.0.1:$CheckPort 可连接" } else { '' }))
         }
-        return
+
+        if (-not $escalate) {
+            $listening = $true
+            if ($CheckPort -gt 0) { $listening = Test-PortListening -PortNumber $CheckPort }
+
+            if (-not $listening) {
+                if (Test-ShouldLog -State $State -Key ("seen:port:" + $Key)) {
+                    Write-Log 'WARN' ("$Title 进程在（PID $pids）但 127.0.0.1:$CheckPort 连不通，" +
+                                      "可能是卡死或还在启动中。本条按 ${WarnRepeatMins} 分钟一次提醒，" +
+                                      "守护不会自动重启它。")
+                }
+            } elseif ($DryRun) {
+                # 空跑是给人当"现在到底什么状态"用的，这种时候要说清楚，别只回两行沉默。
+                Write-Log 'INFO' ("$Title 存活：PID $pids" +
+                                  $(if ($CheckPort -gt 0) { "，127.0.0.1:$CheckPort 可连接" } else { '' }))
+            }
+            return
+        }
     }
 
     $recent = Get-LaunchCount -State $State -Key $Key
@@ -295,12 +408,16 @@ function Invoke-Guard {
         return
     }
 
+    # 走到这里有两个原因：进程真的不在，或者进程在但已经不服务（$why 由上面那条写）。
+    # 文案不能写死"不在运行"——那会让人在排查时先去找一个根本没死的进程。
+    if (-not $why) { $why = '不在运行' }
+
     if ($DryRun) {
-        Write-Log 'INFO' ("[空跑] $Title 不在运行 —— 本该拉起它（本小时第 $($recent + 1)/$MaxRestartsPerHour 次），本次不执行。")
+        Write-Log 'INFO' ("[空跑] $Title $why —— 本该拉起它（本小时第 $($recent + 1)/$MaxRestartsPerHour 次），本次不执行。")
         return
     }
 
-    Write-Log 'INFO' ("$Title 不在运行，拉起中（本小时第 $($recent + 1)/$MaxRestartsPerHour 次）")
+    Write-Log 'INFO' ("$Title $why，拉起中（本小时第 $($recent + 1)/$MaxRestartsPerHour 次）")
 
     # 先记账、再启动：万一拉起的瞬间机器断电/被强杀，这一次也算已花掉的额度，
     # 反过来（先启动后记账）会让最坏情况变成"预算永远涨不上去 → 无限重启"。
@@ -378,9 +495,23 @@ try {
             # 这种"服务在、外面进不来"的故障依旧无人知晓，所以一起盯。
             Invoke-Guard -State $state -Key 'tunnel' -Title "Cloudflare 命名隧道 $TunnelName" `
                 -Probe { Get-TunnelProcess -Name $TunnelName } `
+                -LivenessProbe { Test-TunnelServed -PortNumbers @($TunnelMetricsPort, $TunnelAltMetricsPort) } `
+                -LivenessKey 'tunnel-unready' -LivenessThreshold $TunnelUnreadyRestarts `
                 -Launch {
-                    Start-Process -FilePath $TunnelExe -ArgumentList @('tunnel', 'run', $TunnelName) `
-                        -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
+                    # 一整行写完，不用反引号续行：这个文件里反引号 + 空行的组合实测把
+                    # -ArgumentList 当成了命令名（"无法识别的 cmdlet"），而语法解析是过的——
+                    # 只有真跑一次才暴露，所以这条注释留在这里提醒别再拆回去。
+                    # --metrics 必须放在 `run` 前面：`tunnel run <名> --metrics ...` 会被判成
+                    # "accepts only one argument"，进程立刻退出。实测踩过一次。
+                    $tunnelArgs = @('tunnel', '--metrics', "127.0.0.1:$TunnelAltMetricsPort", 'run', $TunnelName)
+                    # stderr 必须落盘：Start-Process -WindowStyle Hidden 会把子进程的输出整个丢掉，
+                    # 于是"用法错误"这种启动即失败连一行痕迹都不留（上面那条参数顺序的坑就是这么
+                    # 藏了一整轮：日志写着已拉起，进程表里却只有原来那一个）。
+                    # 文件名不带时间戳：Start-Process 每次覆盖写，只留最近一次尝试。
+                    # 带时间戳的话这个文件没人清（本脚本从不删文件），而"哪一次拉起"的时间本来就在
+                    # data\watchdog.log 紧邻的那行里，重复记一遍等于给自己留第二个事实来源。
+                    $errLog = Join-Path $DataDir 'tunnel-launch.stderr.log'
+                    Start-Process -FilePath $TunnelExe -ArgumentList $tunnelArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardError $errLog -PassThru
                 }
         } else {
             # tools/cloudflared.exe 不在：按节流提醒，不每分钟刷一条。
