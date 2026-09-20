@@ -45,4 +45,22 @@
             android:targetClass="xyz.fenever.assistant.MainActivity"
             android:data="assistant://open/new_chat" />
     </shortcut>
+
+    <!-- 第三个入口：整个功能都活在原生侧（拉发布页、弹确认框、下 APK、起安装页），
+         所以它【不】会产生发给网页的事件——ShellEvents.fromOpenFrom 故意不认这个值。
+         图标用 ic_menu_manage：这个 jar 里没有 ic_menu_refresh（javap 查过 android.R$drawable），
+         写错一个 drawable 名的表现是 CI 的 assembleDebug 直接红。 -->
+    <shortcut
+        android:shortcutId="open_check_update"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_manage"
+        android:shortcutShortLabel="@string/shortcut_update_short"
+        android:shortcutLongLabel="@string/shortcut_update_long"
+        android:shortcutDisabledMessage="@string/shortcut_update_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/check_update" />
+    </shortcut>
 </shortcuts>

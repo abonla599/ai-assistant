@@ -63,9 +63,11 @@
         android:orientation="horizontal"
         android:layout_marginTop="6dp">
 
-        <!-- 两个按钮【不】直接拉相机：那要给相机一个可写 URI，也就是 FileProvider，
+        <!-- 三个按钮【不】直接拉相机：那要给相机一个可写 URI，也就是 FileProvider，
              而 FileProvider 在 androidx.core 里 —— 会破零依赖。改成打开 App 并带上
-             open_from=camera|new_chat，由网页决定弹哪个面板（spec §5 那条取舍）。 -->
+             open_from=camera|new_chat|check_update，由壳决定弹哪个面板（spec §5 那条取舍）。
+             「检查更新」放这儿是它唯一的原生可见入口（长按图标那条之外）：点下去只是【问一次】，
+             不点就永远拿不到新安装包——这条边界写在 MainActivity.maybeCheckUpdate 的注释里。 -->
         <Button
             android:id="@+id/btnCamera"
             android:layout_width="0dp"
@@ -80,6 +82,14 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/widget_chat"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnUpdate"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/widget_update"
             android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

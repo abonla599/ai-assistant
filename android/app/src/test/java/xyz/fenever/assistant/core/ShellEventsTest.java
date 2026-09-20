@@ -1,7 +1,9 @@
 package xyz.fenever.assistant.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -137,5 +139,41 @@ public class ShellEventsTest {
         assertNull(ShellEvents.fromOpenUri("assistant://open/camera/extra"));
         assertNull(ShellEvents.fromOpenUri("assistant://open/"));
         assertNull(ShellEvents.fromOpenUri("assistant://open"));
+    }
+
+    /**
+     * 「检查更新」那条入口只被原生读，绝不变成发给网页的事件。
+     *
+     * <p>两条形状（extra 与 android:data）都要认，否则静态快捷方式那条 XML 一旦失手，
+     * 这颗按钮就悄悄没了——正是本仓反复栽过的"效果没了但不报错"。
+     */
+    @Test public void checkUpdateIsRecognisedButNeverEmittedAsAnEvent() {
+        assertTrue(ShellEvents.isCheckUpdate("check_update"));
+        assertTrue(ShellEvents.isCheckUpdate("assistant://open/check_update"));
+        assertTrue(ShellEvents.isCheckUpdate("  assistant://open/check_update/  "));
+        assertTrue(ShellEvents.isCheckUpdate("assistant://open/check_update?from=icon"));
+        assertNull(ShellEvents.fromOpenFrom("check_update"));
+        assertNull(ShellEvents.fromOpenUri("assistant://open/check_update"));
+        assertNull(ShellEvents.fromLaunchShape("check_update"));
+    }
+
+    /** 正对照：别的值一律不算点了检查更新，包括形状很像的那些。 */
+    @Test public void nothingElseReadsAsCheckUpdate() {
+        String[] notMine = {null, "", "   ", "camera", "new_chat", "check-update", "checkupdate",
+                "Check_Update", "assistant://open/camera", "assistant://open/check_update/extra",
+                "REMINDER:check_update", "javascript:assistant://open/check_update",
+                "bogus',x();//"};
+        for (String value : notMine) {
+            assertFalse("这个值不该被当成检查更新：" + value, ShellEvents.isCheckUpdate(value));
+        }
+    }
+
+    /** 剥壳只剥壳：认不认仍由白名单决定，所以 launchValue 会把没见过的值原样交回去。 */
+    @Test public void launchValueStripsTheShellWithoutJudgingIt() {
+        assertEquals("camera", ShellEvents.launchValue("assistant://open/camera"));
+        assertEquals("camera", ShellEvents.launchValue("camera"));
+        assertEquals("anything", ShellEvents.launchValue("assistant://open/anything"));
+        assertNull(ShellEvents.launchValue(null));
+        assertNull(ShellEvents.launchValue("   "));
     }
 }

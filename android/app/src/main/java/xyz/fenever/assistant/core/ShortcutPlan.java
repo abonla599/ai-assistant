@@ -23,18 +23,23 @@ import java.util.List;
  */
 public final class ShortcutPlan {
 
-    /** 静态快捷方式应当送达的两个固定值；顺序即兜底时注册的顺序（桌面上按这个次序排）。 */
+    /** 静态快捷方式应当送达的三个固定值；顺序即兜底时注册的顺序（桌面上按这个次序排）。 */
     public static final List<String> WANTED = Collections.unmodifiableList(
-            Arrays.asList(ShellEvents.OPEN_CAMERA, ShellEvents.OPEN_NEW_CHAT));
+            Arrays.asList(ShellEvents.OPEN_CAMERA, ShellEvents.OPEN_NEW_CHAT,
+                    ShellEvents.OPEN_CHECK_UPDATE));
 
     private ShortcutPlan() {}
 
     /**
      * 这些读回来的形状里，哪几个固定值一个都没送到。
      *
-     * <p>认的形状与冷启动那一条【完全相同】（{@link ShellEvents#fromLaunchShape}）：
-     * {@code open_from} 与 {@code assistant://open/<值>} 两条路折进同一个白名单判据，
+     * <p>认的形状与冷启动那一条【完全相同】（{@link ShellEvents#launchValue}）：
+     * {@code open_from} 与 {@code assistant://open/<值>} 两条路折进同一个剥壳判据，
      * 这里不另立第二套规矩——否则"自检说没送到、真点进来又说送到了"这种错就没人抓得住了。
+     *
+     * <p>比的是剥完壳的【裸值】而不是发给网页的那条事件：{@code check_update} 不产生事件
+     * （它整条都活在原生侧），拿事件 JSON 去比会永远判它"没送到"，于是每次冷启动都补一条
+     * 动态快捷方式，长按菜单里「检查更新」凭空排两遍。
      */
     public static List<String> missing(List<String> shapes) {
         List<String> out = new ArrayList<>();
@@ -46,10 +51,8 @@ public final class ShortcutPlan {
 
     private static boolean delivers(List<String> shapes, String want) {
         if (shapes == null) return false;
-        String wanted = ShellEvents.fromLaunchShape(want);
-        if (wanted == null) return false;              // 本类给出去的值就该永远认得
         for (String shape : shapes) {
-            if (wanted.equals(ShellEvents.fromLaunchShape(shape))) return true;
+            if (want.equals(ShellEvents.launchValue(shape))) return true;
         }
         return false;
     }

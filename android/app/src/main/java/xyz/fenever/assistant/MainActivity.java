@@ -1,6 +1,7 @@
 package xyz.fenever.assistant;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -14,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.Settings;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -24,14 +26,20 @@ import android.webkit.WebViewClient;
 import android.webkit.ValueCallback;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.URLDecoder;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import xyz.fenever.assistant.core.ReleasePlan;
 import xyz.fenever.assistant.core.ReminderStore;
+import xyz.fenever.assistant.core.ShellEvents;
 import xyz.fenever.assistant.core.ShareInbox;
 
 /**
@@ -51,6 +59,9 @@ public class MainActivity extends Activity {
     private static final Pattern DISPOSITION_FILENAME =
             Pattern.compile("filename\\*?\\s*=\\s*(?:\"([^\"]*)\"|([^;]+))", Pattern.CASE_INSENSITIVE);
 
+    /** 安装包的 MIME：下载请求与安装 Intent 两边都用它，别写两遍字符串。 */
+    private static final String APK_MIME = "application/vnd.android.package-archive";
+
     private WebView webview;
     private ValueCallback<Uri[]> filePathCallback;
     private PermissionRequest pendingCameraRequest;
@@ -62,6 +73,16 @@ public class MainActivity extends Activity {
 
     // DownloadManager 的 enqueue id -> 展示用的文件名；回调线程与接收器都在主线程，普通 HashMap 够用
     private final Map<Long, String> pendingDownloads = new HashMap<>();
+
+    /**
+     * 「检查更新」这一条自己占的三格状态。
+     *
+     * <p>安装包的下载 id 必须与网页附件那张表【分开】：混在一起的话，一次 APK 下完会去弹
+     * "已保存到「下载」"，而真正该做的（起系统安装页）没人做——正好是"效果没了但不报错"。
+     */
+    private boolean updateCheckRunning;
+    private long pendingApkId = -1L;
+    private String pendingApkVersion;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -93,6 +114,8 @@ public class MainActivity extends Activity {
         webview.addJavascriptInterface(bridge, "AssistantShell");
         // 冷启动带进来的 extra（点通知、从分享面板进来）先攒着，等页面加载完再发给网页
         bridge.queueStartupEvent(getIntent());
+        // 长按图标「检查更新」那条快捷方式走的也是冷启动，但它整条都活在原生侧，见 maybeCheckUpdate
+        maybeCheckUpdate(getIntent());
 
         webview.setWebViewClient(new WebViewClient() {
             @Override
@@ -213,6 +236,222 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (bridge != null) bridge.queueStartupEvent(intent);
+        maybeCheckUpdate(intent);
+    }
+
+    /**
+     * 只有【用户自己点过】那颗按钮才去问一次发布服务器。
+     *
+     * <p>这条判据是整个功能的边界：不点就没有新包，所以 onCreate / onResume / BootReceiver /
+     * 组件刷新里都不许出现 {@link #startUpdateCheck()}。代价也如实写着——它拿的是
+     * GitHub 未鉴权接口（按来源 IP 60 次/小时），自动化的话每天烧掉一格，
+     * 而"重启电脑＝给所有手机热修复"这条性质本来就不归它管（界面永远是从服务器现加载的）。
+     */
+    private void maybeCheckUpdate(Intent intent) {
+        if (intent == null) return;
+        if (ShellEvents.isCheckUpdateLaunch(intent.getStringExtra("open_from"),
+                intent.getDataString())) {
+            startUpdateCheck();
+        }
+    }
+
+    // ---------- 检查更新：拉发布页 → 确认 → 下载 → 交给系统安装 ----------
+
+    private static final int UPDATE_CONNECT_MS = 8000;
+    private static final int UPDATE_READ_MS = 12000;
+    /** 一条 release JSON 十几 KB 封顶；读满这个数还不停手就说明回来的不是它。 */
+    private static final int UPDATE_MAX_BYTES = 256 * 1024;
+
+    /** 后台线程里跑，回主线程弹框——网络绝不能在 UI 线程上碰（首屏时间与 524 那次的同一类错）。 */
+    private void startUpdateCheck() {
+        if (updateCheckRunning) {
+            toast("已经在检查了，稍等一下");
+            return;
+        }
+        updateCheckRunning = true;
+        toast("正在检查更新…");
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                ReleasePlan.Decision decision;
+                try {
+                    decision = ReleasePlan.decide(BuildConfig.VERSION_NAME, fetchLatestRelease(app));
+                } catch (Exception e) {
+                    // 连不上/超时/被网关改了：说清是哪一种，绝不当成"已经是最新版"
+                    decision = ReleasePlan.unusable("连不上发布服务器（"
+                            + e.getClass().getSimpleName() + "）");
+                }
+                updateCheckRunning = false;
+                final ReleasePlan.Decision shown = decision;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { showUpdateResult(shown); }
+                });
+            }
+        }, "update-check").start();
+    }
+
+    private String fetchLatestRelease(Context app) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(ReleasePlan.LATEST_URL).openConnection();
+            conn.setConnectTimeout(UPDATE_CONNECT_MS);
+            conn.setReadTimeout(UPDATE_READ_MS);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestMethod("GET");
+            // GitHub 的 API 对没有 User-Agent 的请求直接回 403，这不是可选装饰
+            conn.setRequestProperty("User-Agent", "ai-assistant-shell/" + BuildConfig.VERSION_NAME);
+            conn.setRequestProperty("Accept", "application/vnd.github+json");
+            int status = conn.getResponseCode();
+            if (status != HttpURLConnection.HTTP_OK) {
+                throw new java.io.IOException("HTTP " + status);
+            }
+            InputStream in = conn.getInputStream();
+            try {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream(8 * 1024);
+                byte[] chunk = new byte[8 * 1024];
+                int read;
+                int total = 0;
+                while ((read = in.read(chunk)) > 0) {
+                    total += read;
+                    if (total > UPDATE_MAX_BYTES) {
+                        throw new java.io.IOException("返回体积异常");
+                    }
+                    buf.write(chunk, 0, read);
+                }
+                return buf.toString("UTF-8");
+            } finally {
+                in.close();
+            }
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private void showUpdateResult(ReleasePlan.Decision decision) {
+        if (isFinishing() || isDestroyed()) return;      // 对话框挂在已经没了的窗口上是 BadTokenException
+        if (decision.kind == ReleasePlan.Kind.AVAILABLE) {
+            confirmDownload(decision);
+            return;
+        }
+        String message = decision.kind == ReleasePlan.Kind.UP_TO_DATE
+                ? "已经是最新版 v" + decision.version
+                : "检查更新失败：" + decision.reason;
+        new AlertDialog.Builder(this)
+                .setTitle("检查更新")
+                .setMessage(message)
+                .setPositiveButton("好", null)
+                .show();
+    }
+
+    /** 先问一句再动流量：查出新版 ≠ 立刻装，这是这个功能对"不点就不给包"那条承诺的下半段。 */
+    private void confirmDownload(final ReleasePlan.Decision decision) {
+        StringBuilder text = new StringBuilder();
+        text.append("当前 v").append(BuildConfig.VERSION_NAME)
+                .append(" → 最新 v").append(decision.version);
+        if (decision.sizeBytes > 0) {
+            text.append("，约 ").append(Math.max(1, decision.sizeBytes / 1024)).append(" KB");
+        }
+        if (decision.notes != null && !decision.notes.isEmpty()) {
+            text.append("\n\n").append(decision.notes);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("发现新版本 v" + decision.version)
+                .setMessage(text)
+                .setPositiveButton("下载", (dialog, which) -> startApkDownload(decision))
+                .setNegativeButton("以后再说", null)
+                .show();
+    }
+
+    private void startApkDownload(ReleasePlan.Decision decision) {
+        String fileName = ReleasePlan.assetName(decision.version);
+        try {
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                toast("这台设备不支持下载");
+                return;
+            }
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(decision.url));
+            request.setMimeType(APK_MIME);
+            // 落在本应用自己的外部目录，不落公共「下载」：
+            // ① DownloadManager.Request.allowOverwrite 是 @hide 的，公开 API 里没有"覆盖"这个开关，
+            //    而同一版重下（上一次没装完）撞已存在文件就会失败；
+            // ② Android 10+ 的分区存储下，公共目录里的同名文件我们未必删得动，自己目录里的删得动；
+            // ③ 安装包不是给用户留着看的资料，卸掉应用就该跟着走。
+            File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (dir != null) {
+                File stale = new File(dir, fileName);
+                if (stale.isFile()) {
+                    stale.delete();          // 删不掉也继续：真撞上了下面那句会给出失败提示
+                }
+            }
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
+            request.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            pendingApkId = manager.enqueue(request);
+            pendingApkVersion = decision.version;
+            toast("开始下载 v" + decision.version);
+        } catch (Exception e) {
+            toast("下载失败：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 下载完成后把安装包交给系统安装页。
+     *
+     * <p>URI 用 {@code getUriForDownloadedFile} 而不是自己拼 file://：Android 7 起
+     * 跨进程给 file:// 会抛 FileUriExposedException，而 content:// 由 DownloadManager 自己
+     * 授权，省掉一个 FileProvider（它在 androidx 里，会破零依赖）。
+     */
+    private void launchInstaller(DownloadManager manager, long id) {
+        String label = pendingApkVersion != null ? "v" + pendingApkVersion : "新版本";
+        Uri apkUri = null;
+        try {
+            apkUri = manager.getUriForDownloadedFile(id);
+        } catch (Exception ignored) {
+            // 拿不到就往下走那句"找不到文件"，别在这里抛出去把接收器带崩
+        }
+        if (apkUri == null) {
+            toast("下载完成了，但找不到那个文件");
+            return;
+        }
+        Intent install = new Intent(Intent.ACTION_VIEW);
+        install.setDataAndType(apkUri, APK_MIME);
+        install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(install);
+        } catch (Exception e) {
+            // 这台手机还没允许本应用"安装未知应用"，系统不会替你打开那个开关
+            offerUnknownSourcesSettings(label);
+        }
+    }
+
+    private void offerUnknownSourcesSettings(final String label) {
+        if (isFinishing() || isDestroyed()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("装不了：" + label)
+                .setMessage("这台手机还没允许「AI 助手」安装应用。打开那个开关后再回来点一次下载就行。")
+                .setPositiveButton("去设置", (dialog, which) -> openInstallPermissionSettings())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void openInstallPermissionSettings() {
+        try {
+            Intent page = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName()));
+            page.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(page);
+        } catch (Exception e) {
+            // 个别 ROM 没实现那一页；退到应用详情页，至少人能找到开关
+            try {
+                Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()));
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(fallback);
+            } catch (Exception stillNothing) {
+                toast("系统没有给出可以改这个开关的页面");
+            }
+        }
     }
 
     /**
@@ -284,6 +523,23 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {
                 // 查不到状态时按失败处理，宁可多提醒也别静默
+            }
+            if (id == pendingApkId) {
+                // 安装包这一条不能落到下面那句"已保存到「下载」"里：那样等于下载完了却没人去起安装页
+                pendingApkId = -1L;
+                String version = pendingApkVersion;
+                pendingApkVersion = null;
+                if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                    toast("下载失败：v" + (version != null ? version : "新版本"));
+                    return;
+                }
+                DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                if (manager != null) {
+                    launchInstaller(manager, id);
+                } else {
+                    toast("下载完成了，但这台设备取不到那个文件");
+                }
+                return;
             }
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
                 toast("已保存到「下载」：" + label);

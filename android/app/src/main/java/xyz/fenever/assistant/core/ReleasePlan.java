@@ -1,0 +1,218 @@
+package xyz.fenever.assistant.core;
+
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 「检查更新」的全部判断。一行 {@code android.*} 都不 import。
+ *
+ * <p>为什么单独收一层：这条链路的终点是【让用户装上一个 APK】。判错的代价不是显示错一个数字，
+ * 而是装上一个不是我们的东西——所以"取哪个资产、这个地址能不能信、版本号算不算更新"必须能在
+ * JVM 台架上被逐条钉住，而不是埋在 Activity 里等真机去撞。
+ *
+ * <p>三态而不是"有/没有"：读不出来的东西（被网关改了、限流了、GitHub 换了形状）如果和
+ * "已经是最新版"回同一句话，用户就永远分不清"没得更"和"检查失败"。这正是本仓反复踩过的
+ * "效果没了但不报错"那一类。
+ */
+public final class ReleasePlan {
+
+    public static final String OWNER = "abonla599";
+    public static final String REPO = "ai-assistant";
+
+    /** 唯一允许问一次的地方。写成一处的意义是"全仓只有一处提到 api.github.com"可以成为一条锁。 */
+    public static final String LATEST_URL =
+            "https://api.github.com/repos/" + OWNER + "/" + REPO + "/releases/latest";
+
+    /** 资产名与 {@code .github/workflows/release-apk.yml} 里那个 {@code file=} 同一个形状。 */
+    public static final String APK_PREFIX = "ai-assistant-";
+
+    /**
+     * 只认这一个主机。{@code browser_download_url} 就是 {@code https://github.com/...}，
+     * 302 到对象存储是 DownloadManager 自己去跟的，不在我们校验的范围里。
+     * GitHub 哪天换了主机的话这里会明确报"地址不在白名单里"，而不是静默去装别处的包。
+     */
+    private static final String ALLOWED_HOST = "github.com";
+    private static final String ALLOWED_PATH_PREFIX =
+            "/" + OWNER + "/" + REPO + "/releases/download/";
+
+    private ReleasePlan() {}
+
+    public enum Kind { UP_TO_DATE, AVAILABLE, UNUSABLE }
+
+    public static final class Decision {
+        public final Kind kind;
+        /** AVAILABLE 时是新版号；UP_TO_DATE 时也是（就是最新那一版）；UNUSABLE 时可能为 null。 */
+        public final String version;
+        public final String url;
+        public final long sizeBytes;
+        /** Release 正文，可能为 null。已经按长度截过，够放进一个对话框。 */
+        public final String notes;
+        /** UNUSABLE 时给人看的那句话；其余为 null。 */
+        public final String reason;
+
+        private Decision(Kind kind, String version, String url, long sizeBytes,
+                         String notes, String reason) {
+            this.kind = kind;
+            this.version = version;
+            this.url = url;
+            this.sizeBytes = sizeBytes;
+            this.notes = notes;
+            this.reason = reason;
+        }
+    }
+
+    public static String assetName(String version) {
+        return APK_PREFIX + version + ".apk";
+    }
+
+    /**
+     * 给调用方留一个造 UNUSABLE 的口子：连不上、超时这类事实只有 Activity 知道，
+     * 但三态的判据必须留在这层，别让它退化成"出错了就当没更新"。
+     */
+    public static Decision unusable(String reason) {
+        return new Decision(Kind.UNUSABLE, null, null, -1L, null, reason);
+    }
+
+    /**
+     * @param currentVersion 本机 {@code BuildConfig.VERSION_NAME}，形如 {@code 0.14}
+     * @param releaseJson    {@code /releases/latest} 的原样返回
+     */
+    public static Decision decide(String currentVersion, String releaseJson) {
+        Object parsed;
+        try {
+            parsed = MiniJson.decode(releaseJson);
+        } catch (RuntimeException e) {
+            // 限流页、代理改写的 HTML、空响应都落在这里——不能让它变成"已经是最新版"
+            return unusable("发布信息读不出来（不是合法 JSON）");
+        }
+        if (!(parsed instanceof Map)) return unusable("发布信息不是一个对象");
+        Map<?, ?> rel = (Map<?, ?>) parsed;
+
+        if (truthy(rel.get("draft"))) return unusable("最新一版被标成了草稿");
+        if (truthy(rel.get("prerelease"))) return unusable("最新一版被标成了预发布");
+
+        String version = normalizeTag(text(rel.get("tag_name")));
+        if (version == null) return unusable("发布标签形状不对");
+        if (!isNumericVersion(currentVersion)) return unusable("本机版本号形状不对");
+        if (compare(version, currentVersion) <= 0) return new Decision(
+                Kind.UP_TO_DATE, version, null, -1L, null, null);
+
+        Object assets = rel.get("assets");
+        if (!(assets instanceof List)) return unusable("发布里没有资产清单");
+        Decision picked = pickAsset((List<?>) assets, version);
+        if (picked == null) return unusable("没有名为 " + assetName(version) + " 的可安装资产");
+
+        String body = text(rel.get("body"));
+        return new Decision(Kind.AVAILABLE, version, picked.url, picked.sizeBytes,
+                truncate(body), null);
+    }
+
+    /**
+     * 在资产里找那一个【名字精确等于】{@code ai-assistant-<version>.apk} 的。
+     *
+     * <p>不按"扩展名是 .apk 就取第一个"办：一次发布可以同时挂着 mapping.txt、别的平台的产物、
+     * 或者上一次误传的文件，而这里挑中的东西是要弹给系统去安装的。名字对上版本号顺带钉住了
+     * "这个包就是这一版"，链式改错 tag 与资产名时这里会先变红。
+     */
+    private static Decision pickAsset(List<?> assets, String version) {
+        String want = assetName(version);
+        for (Object item : assets) {
+            if (!(item instanceof Map)) continue;
+            Map<?, ?> asset = (Map<?, ?>) item;
+            if (!want.equals(text(asset.get("name")))) continue;
+            String url = text(asset.get("browser_download_url"));
+            if (!downloadUrlIsTrusted(url, want)) return null;
+            return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")), null, null);
+        }
+        return null;
+    }
+
+    /** 校验的是 API 给回来的那个地址，不是我们自己拼的——所以每一项都不省。 */
+    static boolean downloadUrlIsTrusted(String raw, String expectedName) {
+        if (raw == null || raw.isEmpty()) return false;
+        URL url;
+        try {
+            url = new URL(raw);
+        } catch (MalformedURLException e) {
+            return false;
+        }
+        if (!"https".equalsIgnoreCase(url.getProtocol())) return false;
+        if (!ALLOWED_HOST.equalsIgnoreCase(url.getHost())) return false;
+        if (url.getUserInfo() != null) return false;
+        if (url.getPort() != -1) return false;                 // 带端口的不是那个下载入口
+        String path = url.getPath();
+        if (path == null || !path.startsWith(ALLOWED_PATH_PREFIX)) return false;
+        if (path.contains("..")) return false;
+        int slash = path.lastIndexOf('/');
+        return slash >= 0 && path.length() > slash + 1
+                && expectedName.equals(path.substring(slash + 1));
+    }
+
+    /** {@code v0.15} / {@code V0.15} → {@code 0.15}；不是"数字.数字…"的形状就判死。 */
+    static String normalizeTag(String tag) {
+        if (tag == null) return null;
+        String value = tag.trim();
+        if (value.startsWith("v") || value.startsWith("V")) value = value.substring(1).trim();
+        return isNumericVersion(value) ? value : null;
+    }
+
+    private static boolean isNumericVersion(String value) {
+        if (value == null || value.isEmpty()) return false;
+        boolean digitsSinceDot = false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '.') {
+                if (!digitsSinceDot) return false;         // 开头、连续、结尾的点都不合法
+                digitsSinceDot = false;
+            } else if (c >= '0' && c <= '9') {
+                digitsSinceDot = true;
+            } else {
+                return false;
+            }
+        }
+        return digitsSinceDot;
+    }
+
+    /**
+     * 按点分段比数值。
+     *
+     * <p>不能用字符串比较：{@code "0.9".compareTo("0.10") > 0}，于是 0.9 会被判成比 0.10 新，
+     * 而 v0.9 → v0.10 恰好是这种壳真实会走的一步。段数不等时短的那侧补 0。
+     */
+    public static int compare(String a, String b) {
+        String[] left = a.split("\\.");
+        String[] right = b.split("\\.");
+        int n = Math.max(left.length, right.length);
+        for (int i = 0; i < n; i++) {
+            long l = i < left.length ? Long.parseLong(left[i]) : 0L;
+            long r = i < right.length ? Long.parseLong(right[i]) : 0L;
+            if (l != r) return l < r ? -1 : 1;
+        }
+        return 0;
+    }
+
+    private static boolean truthy(Object value) {
+        return Boolean.TRUE.equals(value);
+    }
+
+    private static String text(Object value) {
+        return value instanceof String ? (String) value : null;
+    }
+
+    private static long number(Object value) {
+        return value instanceof Number ? ((Number) value).longValue() : -1L;
+    }
+
+    /** 对话框里放不下整篇发布说明；截断时补一句"完整说明在 Release 页"，不要半句话吊着。 */
+    private static String truncate(String body) {
+        if (body == null) return null;
+        String text = body.trim();
+        if (text.isEmpty()) return null;
+        if (text.length() <= MAX_NOTES) return text;
+        return text.substring(0, MAX_NOTES).trim() + "\n\n…完整说明在 Release 页";
+    }
+
+    static final int MAX_NOTES = 900;
+}

@@ -90,7 +90,8 @@ public final class ShortcutFallback {
 
     /** 标签仍从 strings.xml 读：与静态那两条用同一份文案，两条路在桌面上看着一样。 */
     private static int labelOf(String value) {
-        return ShellEvents.OPEN_CAMERA.equals(value)
-                ? R.string.shortcut_camera_short : R.string.shortcut_chat_short;
+        if (ShellEvents.OPEN_CAMERA.equals(value)) return R.string.shortcut_camera_short;
+        if (ShellEvents.OPEN_CHECK_UPDATE.equals(value)) return R.string.shortcut_update_short;
+        return R.string.shortcut_chat_short;
     }
 }

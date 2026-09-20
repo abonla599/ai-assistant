@@ -16,7 +16,7 @@ import xyz.fenever.assistant.core.ShellEvents;
 import xyz.fenever.assistant.core.WidgetBoard;
 
 /**
- * 桌面组件（spec §5）：今日提醒最多四行 + "还有 N 条" + 两个快捷入口。
+ * 桌面组件（spec §5）：今日提醒最多四行 + "还有 N 条" + 三个快捷入口。
  *
  * <p>内容规则全在 {@link WidgetBoard}（纯 Java，有 JVM 单测）：哪天算今天、取几条、
  * 每行写什么、没有归属时说什么。这个类只剩 RemoteViews 的填表动作。
@@ -30,9 +30,10 @@ import xyz.fenever.assistant.core.WidgetBoard;
  */
 public class AssistantWidget extends AppWidgetProvider {
 
-    /** 两个按钮各占一个 requestCode：与提醒行的 id 哈希分得开，也不会互相顶掉。 */
+    /** 三个按钮各占一个 requestCode：与提醒行的 id 哈希分得开，也不会互相顶掉。 */
     private static final int REQUEST_CAMERA = 9101;
     private static final int REQUEST_NEW_CHAT = 9102;
+    private static final int REQUEST_CHECK_UPDATE = 9103;
     private static final int[] ROW_VIEWS = {R.id.row1, R.id.row2, R.id.row3, R.id.row4};
 
     @Override
@@ -123,6 +124,9 @@ public class AssistantWidget extends AppWidgetProvider {
                 openMain(context, REQUEST_CAMERA, ShellEvents.OPEN_CAMERA, "camera"));
         views.setOnClickPendingIntent(R.id.btnChat,
                 openMain(context, REQUEST_NEW_CHAT, ShellEvents.OPEN_NEW_CHAT, "new_chat"));
+        views.setOnClickPendingIntent(R.id.btnUpdate,
+                openMain(context, REQUEST_CHECK_UPDATE, ShellEvents.OPEN_CHECK_UPDATE,
+                        "check_update"));
         manager.updateAppWidget(appWidgetId, views);
     }
 

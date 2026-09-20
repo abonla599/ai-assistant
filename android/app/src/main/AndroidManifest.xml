@@ -8,6 +8,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 安装期权限、不弹框：AlarmManager 的闹钟重启不保留，靠它把表重排一遍。 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 「检查更新」下完 APK 要把它交给系统安装页。声明这条【不等于】能装：
+         Android 8+ 还要用户在「设置 → 安装未知应用」里对本应用点一次允许，
+         没给的话 startActivity 会失败，MainActivity 那里退成一个带「去设置」的对话框。
+         没有别的路：不装 FileProvider（在 androidx 里）就只能让系统安装页来接。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 不申请 SCHEDULE_EXACT_ALARM：提醒用 setAndAllowWhileIdle，可能晚几分钟，
          产品不承诺准点（spec §1）。加了它就等于向用户要一个解释不了的开关。 -->
