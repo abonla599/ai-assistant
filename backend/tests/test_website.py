@@ -336,3 +336,55 @@ def test_nothing_is_fetched_from_the_outside_at_runtime():
     js = _js()
     for bad in ("http://", "https://"):
         assert bad not in js, f"脚本里出现了外部地址：{bad}"
+
+
+# ---------- 直连探测页（/site/probe.html） ----------
+
+def _probe_code():
+    """探测页去掉 HTML 与 JS 注释之后的正文。
+
+    必须剥注释再判：这个文件的注释里写着"不发 /v1/*、不读 localStorage"，
+    拿原文去 grep 这些字符串，锁会因为它自己说的话而变红。
+    """
+    import os
+    from app.web.web_router import SITE_DIR
+    from tests.test_web_pwa import _strip_html_comments, _strip_js_comments
+    with open(os.path.join(SITE_DIR, "probe.html"), encoding="utf-8") as f:
+        src = _strip_html_comments(f.read())
+    return _strip_js_comments(src)
+
+
+def test_the_probe_page_is_anonymous_and_only_talks_to_the_vendor():
+    """这页存在的唯一理由是"key 不出浏览器"，所以它对本站的反向承诺要钉住。
+
+    它是**匿名可访问**的（不是 /v1/ 前缀，中间件不管它），这没错——它不碰任何数据。
+    但也正因为匿名，任何一次"顺手加个 /v1/ 调用"都会把一个装着用户 key 的页面
+    接到我们自己的鉴权面上，那是形状 A 整条路线的反面。
+    """
+    code = _probe_code()
+    # 正向对照：文件空了/改名了也不许"通过"
+    assert "CHECKS" in code and code.count('["') >= 6, "探测页没读到内容或六项检查不见了：这条锁在空转"
+
+    assert "/v1/" not in code, "探测页不许调本站接口：它一旦能碰 /v1，key 就进了我们的鉴权面"
+    assert "XMLHttpRequest" not in code
+    for storage in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
+        assert storage not in code, f"探测页不落盘任何东西，出现了 {storage}"
+    # 每一次 fetch 都必须打到 endpoint()（用户在页面上填的供应商地址），不是相对路径
+    fetches = [ln for ln in code.splitlines() if "fetch(" in ln]
+    assert fetches, "一个 fetch 都没有：这页什么都不测"
+    assert all("endpoint()" in ln for ln in fetches), \
+        "有 fetch 没走 endpoint()，等于偷偷换目标：" + "；".join(fetches)
+
+
+def test_the_report_never_carries_the_key():
+    """报告是设计成"直接贴给工程师"的，所以它连 key 的长度与首尾片段都不许有。
+
+    `$("key").value` 在报告拼装区里只许出现在一个判空的三元里；写成
+    `+ $("key").value` 那种"顺手带上好排查"的方便，在这里就是泄露本身。
+    """
+    code = _probe_code()
+    start = code.index("const head = ")
+    end = code.index('$("report").textContent')
+    region = code[start:end]
+    assert '$("key").value ?' in region, "判空那个三元不在了：报告头的形状被改过，这条锁要看住的东西也变了"
+    assert region.count('$("key").value') == 1, "报告拼装区里第二次读了 key 的值——它会被带进可复制的文本"

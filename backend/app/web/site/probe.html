@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  自带模型「直连」探测页 —— 它唯一的用途是回答两个问题，回答完就可以删：
+
+  1) 手机浏览器 / 安卓 WebView 里，能不能真的从供应商拿到流式回答？
+     （docs/superpowers/specs/2026-09-19-user-owned-models-direct-connect-design.md §9：
+      桌面 CDP 验得了协议，验不了移动 WebView 的混合内容与 CORS 差异。**跑不通就不该动 pipeline.py**。）
+  2) 供应商到底回不回 `usage`？字段叫什么？（决定账本能不能"记账用回传、预算用估算"）
+
+  三条硬规矩，改这个文件前先读：
+  · **本页对本站后端零请求**：不发 /v1/*、不读 cookie、不碰 localStorage。
+    你填的 key 只活在内存里那个 input 里，刷新即无。所以本页可以匿名公开访问，
+    也不需要登录——它跟"你是不是我们的用户"完全无关。
+  · 报告里**绝不出现 key 的任何片段**（连长度、首尾字符都不写）。复制出去的文本要能直接贴给
+    工程师看，就必须假定贴到会公开的地方。
+  · 结论以"能不能复制出来的事实"为准，不以"页面没报错"为准。
+-->
+<title>直连探测 · AI 助手</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 18px 16px 56px; background: #0b0f16; color: #e6edf6;
+         font: 15px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #8b98ab; font-size: 13px; margin-bottom: 18px; }
+  .card { background: #121826; border: 1px solid #1f2a3d; border-radius: 12px;
+          padding: 14px; margin-bottom: 14px; }
+  label { display: block; font-size: 12.5px; color: #8b98ab; margin: 10px 0 4px; }
+  input { width: 100%; padding: 12px; font-size: 15px; color: #e6edf6;
+          background: #0b0f16; border: 1px solid #26334a; border-radius: 9px; }
+  button { width: 100%; min-height: 46px; margin-top: 12px; font-size: 15px; font-weight: 600;
+           color: #fff; background: #2f6feb; border: 0; border-radius: 10px; cursor: pointer; }
+  button.ghost { background: #1b2534; border: 1px solid #2b3852; }
+  button:disabled { opacity: .45; }
+  .row { display: flex; gap: 10px; }
+  .row button { margin-top: 10px; }
+  .t { padding: 9px 0; border-bottom: 1px solid #1c2739; font-size: 14px; }
+  .t:last-child { border-bottom: 0; }
+  .ok { color: #3fb950; } .no { color: #f85149; } .wait { color: #8b98ab; }
+  .n { color: #8b98ab; font-size: 12.5px; }
+  pre { white-space: pre-wrap; word-break: break-all; background: #0b0f16; border-radius: 9px;
+        padding: 12px; font-size: 12.5px; line-height: 1.55; margin: 12px 0 0; }
+  .hint { font-size: 13px; color: #d3a95c; }
+</style>
+</head>
+<body>
+<h1>自带模型直连探测</h1>
+<div class="sub">这一页只和你的供应商说话，不给本站服务器发任何请求。<br>
+  请在<strong>手机</strong>上打开 <code>https://ai.fenever.xyz/site/probe.html</code> 跑一遍。</div>
+
+<div class="card">
+  <label>Base URL</label>
+  <input id="base" value="https://api.deepseek.com" autocomplete="off" spellcheck="false">
+  <label>模型名</label>
+  <input id="model" value="deepseek-flash" autocomplete="off" spellcheck="false">
+  <label>API Key（只留在这台手机的内存里，本页不存盘）</label>
+  <input id="key" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
+  <button id="run">跑全部六项</button>
+  <button id="one" class="ghost">只跑第 6 项：我要手动断网</button>
+</div>
+
+<div class="card">
+  <div id="results">
+    <div class="t wait">还没跑。</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="n">下面这份报告可以直接复制粘贴。它不含你的 key 的任何片段。</div>
+  <div class="row"><button id="copy" class="ghost">复制报告</button></div>
+  <pre id="report">—</pre>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+// 状态只有这一个对象；不写 localStorage、不写 cookie、不发往本站任何路径。
+const state = { rows: [], ua: navigator.userAgent, webview: false, at: "" };
+
+const CHECKS = [
+  ["1", "流式连通", "能不能拿到增量，首个字要等多久"],
+  ["2", "usage 回传", "带 stream_options.include_usage 时最后一个块里有没有 usage"],
+  ["3", "非流式", "一次性返回能不能成（有些网关只放行其中一条路）"],
+  ["4", "错 key 的报错", "故意用坏 key，看状态码与文案长什么样"],
+  ["5", "中途取消", "生成到一半 abort()，看已收到的量与错误名"],
+  ["6", "手动断网", "跑起来之后请你亲手开飞行模式"],
+];
+
+function render() {
+  $("results").innerHTML = CHECKS.map(([k, name, note]) => {
+    const r = state.rows.find((x) => x.k === k);
+    const cls = !r ? "wait" : (r.ok ? "ok" : "no");
+    const mark = !r ? "○" : (r.ok ? "✔" : "✘");
+    return `<div class="t ${cls}">${mark} <strong>${k}. ${name}</strong>` +
+           `<div class="n">${r ? r.line : note}</div></div>`;
+  }).join("");
+  const head = "直连探测报告 " + state.at + "\n" +
+               "UA: " + state.ua + (state.webview ? "（识别为安卓 WebView）" : "") + "\n" +
+               "页面: https://ai.fenever.xyz/site/probe.html\n" +
+               "base: " + $("base").value.trim() + "  model: " + $("model").value.trim() + "\n" +
+               "key: " + ($("key").value ? "已填（不出现在报告里）" : "未填") + "\n\n";
+  $("report").textContent = head + (state.rows.length
+    ? state.rows.map((r) => `${r.ok ? "OK  " : "FAIL"} ${r.k}. ${r.name} —— ${r.line}${r.detail ? "\n     " + r.detail : ""}`).join("\n")
+    : "（还没跑）");
+}
+
+function put(k, ok, line, detail) {
+  const c = CHECKS.find((x) => x[0] === k);
+  state.rows = state.rows.filter((x) => x.k !== k);
+  state.rows.push({ k, name: c[1], ok, line, detail: detail || "" });
+  render();
+}
+
+function endpoint() {
+  const b = $("base").value.trim().replace(/\/+$/, "");
+  return b + "/chat/completions";
+}
+
+function body(model, messages, extra) {
+  const o = { model, messages, temperature: 0 };
+  return Object.assign(o, extra || {});
+}
+
+async function callStream(label, extra, opts) {
+  const ctrl = new AbortController();
+  const started = performance.now();
+  let firstByte = null, deltas = 0, chars = 0, usage = null, finish = "";
+  const res = await fetch(endpoint(), {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer " + $("key").value.trim() },
+    body: JSON.stringify(body($("model").value.trim(),
+      [{ role: "user", content: (opts && opts.prompt) || "说一句话证明你活着。" }],
+      Object.assign({ stream: true }, extra || {}))),
+    signal: ctrl.signal,
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw Object.assign(new Error("HTTP " + res.status), { status: res.status, text: t.slice(0, 220) });
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "", aborted = false;
+  if (opts && opts.stopAfter) setTimeout(() => { aborted = true; ctrl.abort(); }, opts.stopAfter);
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done || aborted) break;
+    if (firstByte === null) firstByte = performance.now() - started;
+    buf += dec.decode(value, { stream: true });
+    // SSE 帧之间用空行分隔；这里按行拆，兼容 ": OPENAI-COMPLETION" 之类注释行。
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      let j; try { j = JSON.parse(payload); } catch (e) { continue; }
+      if (j.usage) usage = j.usage;
+      const d = (j.choices && j.choices[0] && j.choices[0].delta) || null;
+      if (d && (d.content || d.reasoning_content)) {
+        deltas++; chars += ((d.content || "") + (d.reasoning_content || "")).length;
+      }
+      if (j.choices && j.choices[0] && j.choices[0].finish_reason) finish = j.choices[0].finish_reason;
+    }
+  }
+  return { firstByte, deltas, chars, usage, finish, aborted, ms: performance.now() - started };
+}
+
+async function runAll() {
+  $("run").disabled = $("one").disabled = true;
+  state.at = new Date().toLocaleString("zh-CN", { hour12: false });
+  state.webview = /; wv\)/.test(state.ua) || /wv,/.test(state.ua);
+  state.rows = [];
+  render();
+  if (!$("key").value.trim()) {
+    put("1", false, "key 没填，后面五项全部跳过");
+    $("run").disabled = $("one").disabled = false;
+    return;
+  }
+  // 1 流式连通
+  try {
+    const r = await callStream();
+    put("1", r.deltas > 0, `首字 ${Math.round(r.firstByte)}ms，增量 ${r.deltas} 块 / ${r.chars} 字，` +
+        `共 ${Math.round(r.ms)}ms，finish=${r.finish || "无"}`,
+        r.deltas ? "" : "连上了但一个增量都没拿到——流式解析或供应商行为要查");
+  } catch (e) { put("1", false, e.message, e.text || ""); }
+
+  // 2 usage 回传
+  try {
+    const r = await callStream(null, { include_usage: true });
+    const u = r.usage;
+    put("2", !!u, u ? "回传了：" + JSON.stringify(u) : "最后一个块里没有 usage 字段",
+        u ? "字段名以这份 JSON 为准，账本照它写" : "那账本只能走非流式的 usage，或本地估算——两者要分清");
+  } catch (e) { put("2", false, e.message, e.text || ""); }
+
+  // 3 非流式
+  try {
+    const t0 = performance.now();
+    const res = await fetch(endpoint(), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + $("key").value.trim() },
+      body: JSON.stringify(body($("model").value.trim(), [{ role: "user", content: "一个字：好" }])),
+    });
+    if (!res.ok) throw Object.assign(new Error("HTTP " + res.status), { text: (await res.text()).slice(0, 220) });
+    const j = await res.json();
+    put("3", true, `${Math.round(performance.now() - t0)}ms，usage=${JSON.stringify(j.usage || "无")}`);
+  } catch (e) { put("3", false, e.message, e.text || ""); }
+
+  // 4 错 key
+  try {
+    const good = $("key").value;
+    $("key").value = good.slice(0, -1) + (good.slice(-1) === "x" ? "y" : "x");
+    await callStream();
+    $("key").value = good;
+    put("4", false, "错的 key 居然成功了？那这条供应商不接受鉴权，得查");
+  } catch (e) {
+    $("key").value = good;
+    put("4", /401|403/.test(String(e.status)), `状态码 ${e.status}，文案：${(e.text || "").slice(0, 120)}`);
+  }
+
+  // 5 中途取消（前端主动 abort，模拟"切后台/关页面"）
+  try {
+    const r = await callStream(null, null, { stopAfter: 2500, prompt: "从 1 数到 500，每个数字一行。" });
+    put("5", r.deltas > 0, `2.5s 时主动中断：已收 ${r.deltas} 块 / ${r.chars} 字，aborted=${r.aborted}`);
+  } catch (e) { put("5", false, e.message, e.text || ""); }
+
+  // 6 留给手动
+  put("6", false, "未跑：点「只跑第 6 项」，然后在你手上开飞行模式");
+  $("run").disabled = $("one").disabled = false;
+}
+
+async function runOffline() {
+  $("run").disabled = $("one").disabled = true;
+  state.at = new Date().toLocaleString("zh-CN", { hour12: false });
+  try {
+    put("6", false, "正在跑——现在请开飞行模式，看它多久、以什么方式失败");
+    render();
+    const r = await callStream(null, null, { prompt: "从 1 数到 500，每个数字一行。" });
+    put("6", false, `断网后它还是跑完了（说明没测到）：${r.deltas} 块`,
+        "请确认你确实在生成过程中断开了网络，而不是在结束后");
+  } catch (e) {
+    put("6", true, `断网如期失败：${e.name || ""} ${e.message}`,
+        "错误名决定界面该显示什么文案，别省略");
+  }
+  $("run").disabled = $("one").disabled = false;
+}
+
+$("run").onclick = runAll;
+$("one").onclick = runOffline;
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("report").textContent); $("copy").textContent = "已复制"; }
+  catch (e) { $("copy").textContent = "复制失败：长按上面那段字手动选"; }
+};
+render();
+</script>
+</body>
+</html>
