@@ -3,17 +3,22 @@
 落盘在 data/uploads/，文件名一律用生成的 uuid，绝不采用客户端给出的路径或
 文件名，避免目录穿越与互相覆盖；原始文件名只作为元数据保存用于界面展示。
 
-图片类型按文件头字节判定，不信任浏览器上报的 MIME。PDF 在上传时即抽取为纯文本
-再落盘，因此下游的预览与上下文注入不必区分来源格式。
+图片类型按文件头字节判定，不信任浏览器上报的 MIME。PDF 与 .docx 在上传时即抽取为
+纯文本再落盘，因此下游的预览与上下文注入不必区分来源格式。
 
 每条索引记录带 owner：这里存的是别人上传的合同、账单、论文，索引一旦共用，
 "知道 id"就等于"拿到文件"，所以读、下载、删除都必须先过归属。
 """
 import base64
+import io
 import json
 import os
+import re
 import threading
 import uuid
+import zipfile
+import xml.etree.ElementTree as ET
+import zlib
 from datetime import datetime
 
 from app.core.owner_backfill import backfill_owner
@@ -32,7 +37,11 @@ TEXT_EXTS = {".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", 
              ".csv", ".tsv", ".log", ".ini", ".cfg", ".html", ".css", ".c", ".h",
              ".cpp", ".java", ".go", ".rs", ".sh", ".bat", ".ps1", ".sql", ".xml"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-DOC_EXTS = {".pdf"}
+DOC_EXTS = {".pdf", ".docx"}
+DOC_MIMES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 # 文件头签名 -> 规范 MIME，避免伪造扩展名或 Content-Type
 MAGIC = (
@@ -73,7 +82,73 @@ def _pdf_text(blob: bytes) -> str:
         doc.close()
 
 
-DOC_EXTRACTORS = {".pdf": _pdf_text}
+DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+# 正文解压后的上限。原始体积已被 MAX_DOC_BYTES(10MB) 卡住，但 zip 里一个条目
+# 就能压到几 GB（zip bomb），所以读的时候按解压后的字节数封顶。
+# 16MB 约合几百万字，而注入模型的只有 MAX_INJECT_CHARS 那么多——再大只是白吃内存。
+MAX_DOCX_XML_BYTES = 16 * 1024 * 1024
+# Word/WPS 写出的 document.xml 只有 <?xml?> 声明，从不带 DTD 或实体定义。
+# 出现这两种声明就说明文件是手工构造的：内部实体会被解析器展开（billion laughs），
+# 外部实体会让服务器去取远端资源。一律拒绝，而不是"试着解析看看"。
+# 整份都要查不能只查开头——DOCTYPE 前允许有任意长的注释，卡前 4KB 会被绕过。
+DOCX_FORBIDDEN = re.compile(rb"<!\s*(?:doctype|entity)", re.IGNORECASE)
+
+
+def _docx_document_xml(blob: bytes) -> bytes:
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            if "word/document.xml" not in z.namelist():
+                raise UploadError("该 .docx 缺少正文（word/document.xml 不存在），"
+                                  "可能是 .xlsx/.pptx 改了扩展名")
+            with z.open("word/document.xml") as f:
+                # 按解压后的字节数封顶，多读 1 字节就用来判定"超了"。
+                # 不信任 file_size：那是 zip 头里自报的，改小它就能带着真炸弹过关。
+                xml = f.read(MAX_DOCX_XML_BYTES + 1)
+    except UploadError:
+        raise
+    except RuntimeError as e:  # 加密条目：zipfile 只抛裸 RuntimeError
+        raise UploadError("该 .docx 设了打开密码，无法提取文字。请去掉密码或另存一份再传") from e
+    except (zipfile.BadZipFile, ValueError, zlib.error) as e:
+        raise UploadError("该 .docx 打不开（不是有效的 zip 容器），可能是老版 .doc —— "
+                          "请用 Word/WPS 另存为 .docx 后再传") from e
+    if len(xml) > MAX_DOCX_XML_BYTES:
+        raise UploadError("该 .docx 正文解压后远超正常文档大小，已拒绝解析")
+    return xml
+
+
+def _docx_text(blob: bytes) -> str:
+    """提取 .docx 正文，只用标准库。
+
+    不引 python-docx：冻结版 EXE 少一个隐藏导入点（这类依赖在打包后"本地能跑、
+    线上炸"是本项目反复踩过的），而且这里只要文字，zip 里的 word/document.xml
+    顺着 w:p 走一遍就够——表格单元格本身也是 w:p，所以表里的内容一起读到。
+    """
+    xml = _docx_document_xml(blob)
+    if DOCX_FORBIDDEN.search(xml):
+        raise UploadError("该 .docx 正文声明了 XML 实体或 DTD，出于安全拒绝解析")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as e:
+        raise UploadError(f".docx 正文无法解析：{e}") from e
+
+    lines = []
+    for para in root.iter(DOCX_NS + "p"):
+        parts = []
+        for node in para.iter():
+            tag = node.tag
+            if tag == DOCX_NS + "t":
+                parts.append(node.text or "")
+            elif tag == DOCX_NS + "tab":
+                parts.append("\t")
+            elif tag == DOCX_NS + "br":
+                parts.append("\n")
+        text = "".join(parts)
+        if text.strip():
+            lines.append(text)
+    return "\n".join(lines)
+
+
+DOC_EXTRACTORS = {".pdf": _pdf_text, ".docx": _docx_text}
 
 
 def detect_kind(filename: str, blob: bytes):
@@ -92,8 +167,8 @@ def detect_kind(filename: str, blob: bytes):
         return "text", "text/plain"
 
     if ext in DOC_EXTS:
-        # 内容是否真是 PDF 交给解析器判定，不必再维护一份文件头签名
-        return "doc", "application/pdf"
+        # 内容是否真是该格式交给解析器判定，不必再维护一份文件头签名
+        return "doc", DOC_MIMES[ext]
 
     raise UploadError(
         f"不支持的文件类型 {ext or '(无扩展名)'}。"
@@ -187,8 +262,9 @@ class UploadStore:
         if kind == "doc":
             text = DOC_EXTRACTORS[ext](blob)
             if not text.strip():
-                raise UploadError(
-                    f"{filename} 未提取到文字，可能是扫描版（整页图片）PDF，需要先做 OCR")
+                hint = ("可能是扫描版（整页图片）PDF，需要先做 OCR" if ext == ".pdf"
+                        else "可能整篇都是贴图，没有可选中的文字")
+                raise UploadError(f"{filename} 未提取到文字，{hint}")
             # 转成文本后走既有的预览与注入链路，模型看到的仍是可读文字
             blob, ext, kind, mime = text.encode("utf-8"), ".txt", "text", "text/plain"
 

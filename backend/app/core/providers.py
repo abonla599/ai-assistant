@@ -53,7 +53,8 @@ def looks_placeholder(key: str) -> bool:
 
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改
 PRESETS = {
-    "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "supports_vision": False},
+    "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
+                 "model": "deepseek-flash", "supports_vision": True},
     "dashscope": {"label": "阿里云百炼 Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus", "supports_vision": False},
     "dashscope-vl": {"label": "阿里云百炼 Qwen 视觉", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max", "supports_vision": True},
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "supports_vision": True},
@@ -69,13 +70,16 @@ def _seed_from_env() -> list:
     key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
     if looks_placeholder(key):
         return []
+    # deepseek-flash 是 api.deepseek.com 现在列出的、实测能吃图的那一个
+    # （2026-09-20 用真截图验过：prompt_tokens 计入图像、能读出图中文字）；
+    # 同端点的 deepseek-v4-pro 会直接回"我无法查看这张图片"，别拿它当视觉模型。
     return [{
         "id": "deepseek-chat",
-        "label": "DeepSeek Chat",
+        "label": "deepseek-flash",
         "base_url": (os.getenv("DEEPSEEK_BASE_URL") or PRESETS["deepseek"]["base_url"]).strip(),
         "api_key": key,
-        "model": "deepseek-chat",
-        "supports_vision": False,
+        "model": "deepseek-flash",
+        "supports_vision": True,
         "is_default": True,
     }]
 

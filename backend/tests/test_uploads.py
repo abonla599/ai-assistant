@@ -1,7 +1,9 @@
 """附件上传与注入测试。"""
+import io
 import json
 import re
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -153,6 +155,171 @@ def test_garbage_named_pdf_is_rejected():
     assert "PDF" in res.json()["detail"]
 
 
+# ---------- .docx ----------
+
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _docx_blob(document_xml: str, body_part: str = "word/document.xml") -> bytes:
+    """手工搭一个 .docx（本质是 zip）。不借 python-docx：测试不能依赖一个
+    生产代码并不需要的包，否则测试通过与否和生产环境的行为脱节。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("_rels/.rels", "<Relationships/>")
+        z.writestr(body_part, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                              + document_xml)
+    return buf.getvalue()
+
+
+def _wdoc(body: str) -> str:
+    return f'<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>'
+
+
+def _para(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_docx_upload_is_parsed_into_text():
+    blob = _docx_blob(_wdoc(
+        _para("实验一 网络协议分析")
+        + "<w:p><w:r><w:t>目的：</w:t><w:tab/><w:t>掌握 Wireshark 抓包</w:t></w:r></w:p>"
+        + "<w:p><w:r><w:t>第一行</w:t><w:br/><w:t>第二行</w:t></w:r></w:p>"
+        # 表格单元格里的文字也是 w:p，必须一起读到：实验数据常放在表里
+        + '<w:tbl><w:tr><w:tc>' + _para("端口") + '</w:tc><w:tc>' + _para("8080") + '</w:tc></w:tr></w:tbl>'))
+    res = _upload("实验报告（实验1）.docx", blob,
+                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "text"
+    assert body["name"] == "实验报告（实验1）.docx"
+    preview = body["preview"]
+    assert "实验一 网络协议分析" in preview
+    assert "目的：\t掌握 Wireshark 抓包" in preview, "w:tab 丢了会让字段挤成一坨"
+    assert "第一行\n第二行" in preview, "w:br 是软换行，不能和下一行粘在一起"
+    assert "端口" in preview and "8080" in preview
+
+
+def test_docx_xml_escapes_are_decoded():
+    blob = _docx_blob(_wdoc(_para("a &amp; b &lt;tag&gt; &#26816;&#26597;")))
+    preview = _upload("t.docx", blob).json()["preview"]
+    assert preview == "a & b <tag> 检查"
+
+
+def test_legacy_doc_named_docx_tells_the_user_to_resave():
+    """老 .doc 是 OLE 复合文档，不是 zip。光说"打不开"没出路，得给出另存为。"""
+    res = _upload("旧报告.docx", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 200)
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert "另存为 .docx" in detail
+
+
+def test_zip_without_document_body_names_the_real_problem():
+    """xlsx/pptx 同样是 zip。只说"打不开"会让人以为是文件损坏。"""
+    blob = _docx_blob("<x/>", body_part="xl/workbook.xml")
+    res = _upload("成绩表.docx", blob)
+    assert res.status_code == 400
+    assert "缺少正文" in res.json()["detail"]
+
+
+def test_docx_declaring_an_entity_is_refused():
+    """内部实体会被解析器展开（billion laughs），外部实体让服务器去取远端资源。
+
+    Word/WPS 不会写出这种声明，所以拒绝它不损失任何真实文档。
+    """
+    xml = ('<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY a "' + "A" * 40 + '">]>'
+           + _wdoc(_para("&a;")))
+    res = _upload("bomb.docx", _docx_blob(xml))
+    assert res.status_code == 400
+    assert "实体" in res.json()["detail"]
+
+
+def test_entity_declaration_hidden_behind_a_long_comment_is_still_refused():
+    """正对照：DOCTYPE 前面允许有任意长的注释，只查文件开头会被绕过。"""
+    xml = ('<?xml version="1.0"?>' + "<!--" + "x" * 9000 + "-->"
+           + '<!DOCTYPE w:document [<!ENTITY a "AAAA">]>' + _wdoc(_para("&a;")))
+    res = _upload("sneaky.docx", _docx_blob(xml))
+    assert res.status_code == 400
+    assert "实体" in res.json()["detail"]
+
+
+def test_docx_decompressed_bomb_is_refused():
+    """原始体积不到 10MB 上限，解压后却有 20MB：zip bomb。
+
+    按解压后的字节数封顶才拦得住——file_size 是 zip 头自报的，改小它就能过关。
+    夹具大小写死 20MB、不从 MAX_DOCX_XML_BYTES 反推：否则把上限一抬，夹具跟着
+    变成几十 GB 的字符串，测的就不再是这件事了。
+    """
+    from app.core.uploads import MAX_DOCX_XML_BYTES
+
+    assert MAX_DOCX_XML_BYTES < 20 * 1024 * 1024, \
+        f"解压上限已抬到 {MAX_DOCX_XML_BYTES}，这份 20MB 夹具不再是炸弹"
+    blob = _docx_blob(_wdoc("<w:p/>" * (20 * 1024 * 1024 // 6 + 1)))
+    assert len(blob) < 1024 * 1024, "夹具必须远小于 10MB，否则测的是体积上限而不是炸弹"
+    res = _upload("zipbomb.docx", blob)
+    assert res.status_code == 400
+    assert "远超正常文档" in res.json()["detail"]
+
+
+def test_image_only_docx_says_why_there_is_no_text():
+    blob = _docx_blob(_wdoc(
+        '<w:p><w:r><w:drawing>'
+        '<wp:inline xmlns:wp="urn:wp"/></w:drawing></w:r></w:p>'))
+    res = _upload("扫描件.docx", blob)
+    assert res.status_code == 400
+    assert "未提取到文字" in res.json()["detail"]
+
+
+def test_doc_extension_tables_stay_in_step():
+    """DOC_EXTS / DOC_MIMES / DOC_EXTRACTORS 三份清单必须同一批扩展名。
+
+    detect_kind 用第一份放行、第二份报 MIME，save() 用第三份取解析器；
+    少一个键就是"选择器能选、上传却 500"。
+    """
+    from app.core.uploads import DOC_EXTS, DOC_EXTRACTORS, DOC_MIMES
+
+    assert DOC_EXTS and set(DOC_EXTS) == set(DOC_MIMES) == set(DOC_EXTRACTORS)
+    # 正对照：故意漏一个键时上面这条必须变红
+    assert ".docx" in DOC_EXTS and ".pdf" in DOC_EXTS
+
+
+# ---------- 附件怎么进模型 ----------
+
+def test_image_without_a_vision_model_is_an_explicit_refusal():
+    """界面上那句"当前模型不支持图片输入"就是这道闸门。
+
+    静默把图丢掉更糟：用户会以为模型看不懂这张图，而不是自己选的模型根本读不了图。
+    """
+    from app.core.uploads import UploadError, build_user_content, store as upload_store
+
+    rec = upload_store.save("shot.png", FAKE_PNG, "image/png", owner="u_gate")
+    with pytest.raises(UploadError) as e:
+        build_user_content("解读一下", [rec["id"]], False, owner="u_gate")
+    assert "不支持图片输入" in str(e.value)
+    assert "1 张" in str(e.value), "得说清被拦下几张，否则多张附件要一张张试"
+
+
+def test_image_with_a_vision_model_reaches_the_model_as_a_data_uri():
+    from app.core.uploads import build_user_content, store as upload_store
+
+    rec = upload_store.save("shot.png", FAKE_PNG, "image/png", owner="u_ok")
+    content = build_user_content("解读一下", [rec["id"]], True, owner="u_ok")
+    assert isinstance(content, list), "带图必须是多模态数组，不能还是纯字符串"
+    assert content[0] == {"type": "text", "text": "解读一下"}
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_text_and_image_attachments_coexist_in_one_turn():
+    from app.core.uploads import build_user_content, store as upload_store
+
+    txt = upload_store.save("数据.csv", b"a,b\n1,2", "text/csv", owner="u_mix")
+    img = upload_store.save("shot.png", FAKE_PNG, "image/png", owner="u_mix")
+    content = build_user_content("对照看看", [txt["id"], img["id"]], True, owner="u_mix")
+    assert content[0]["text"].startswith("对照看看")
+    assert "数据.csv" in content[0]["text"] and "a,b" in content[0]["text"]
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 # ---------- 前端 accept 与后端白名单必须一致 ----------
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "app" / "web" / "static"
@@ -189,6 +356,22 @@ def test_picker_accept_only_offers_types_the_server_accepts(element_id):
         else:
             assert token.startswith("."), f"文件选择器只应列扩展名，出现 MIME {token}"
             detect_kind("sample" + token, b"arbitrary bytes")   # 不抛错即后端接受
+
+
+def test_picker_offers_every_type_the_server_accepts():
+    """反方向也要对上：后端支持的扩展名，选择器必须列出来。
+
+    两边各留一份清单迟早对不上——后端加了 .docx 而 accept 没加时，桌面浏览器
+    会把 .docx 直接过滤掉，用户以为功能没做；而在安卓壳里 accept 常被忽略，
+    选得上却换来一句"不支持的文件类型"（2026-09-20 就是这么撞上的）。
+    """
+    from app.core.uploads import DOC_EXTS, TEXT_EXTS
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    offered = set(_accept_of(html, "fileInput"))
+    assert offered == TEXT_EXTS | DOC_EXTS, (
+        f"选择器缺 {sorted((TEXT_EXTS | DOC_EXTS) - offered)}、"
+        f"多 {sorted(offered - (TEXT_EXTS | DOC_EXTS))}")
 
 
 def test_file_picker_does_not_offer_images():

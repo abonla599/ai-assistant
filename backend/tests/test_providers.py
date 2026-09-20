@@ -282,3 +282,35 @@ def test_adding_a_default_provider_clears_the_previous_star():
     stars = [m["id"] for m in after if m["default"]]
     assert len(stars) == 1, f"新增带 is_default 的 provider 后剩 {len(stars)} 颗 ★：{stars}"
     assert stars == [added["id"]]
+
+
+def test_seeded_deepseek_is_the_vision_capable_one(monkeypatch):
+    """首次播种那条必须真能吃图，且 PRESETS 与它口径一致。
+
+    2026-09-20 实测：api.deepseek.com 的 /v1/models 只列 deepseek-flash 与
+    deepseek-v4-pro。拿真截图打 deepseek-flash，prompt_tokens 计入了图像并读出
+    图中文字；打 deepseek-v4-pro 它回"我无法查看这张图片"。播种时把
+    supports_vision 抄成 False，新机器上传第一张图就只会得到一句"不支持图片输入"
+    ——界面显示的是 DeepSeek，实际能力却被自己的配置锁住了。
+    """
+    from app.core import providers
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real-looking-key-123456")
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    seeded = providers._seed_from_env()
+    assert len(seeded) == 1
+    rec = seeded[0]
+    assert rec["model"] == "deepseek-flash"
+    assert rec["label"] == "deepseek-flash", "设置页「模型名」这栏显示的就是它，别写对不上的花名"
+    assert rec["supports_vision"] is True
+    preset = providers.PRESETS["deepseek"]
+    assert (preset["model"], preset["supports_vision"]) == \
+        (rec["model"], rec["supports_vision"]), "同一个厂商留了两份答案"
+
+
+def test_placeholder_deepseek_key_seeds_nothing(monkeypatch):
+    """正对照：上面那条不是恒真——密钥是占位符时一条都不播种。"""
+    from app.core import providers
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "your-key-here")
+    assert providers._seed_from_env() == []
