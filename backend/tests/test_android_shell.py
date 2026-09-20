@@ -112,6 +112,7 @@ def test_every_runtime_receiver_registration_names_an_export_flag():
 
 SHELL_RES = REPO_ROOT / "android" / "app" / "src" / "main" / "res"
 MAIN_ACTIVITY = SHELL_SRC / "xyz" / "fenever" / "assistant" / "MainActivity.java"
+SHELL_BRIDGE = SHELL_SRC / "xyz" / "fenever" / "assistant" / "ShellBridge.java"
 SHELL_EVENTS = SHELL_SRC / "xyz" / "fenever" / "assistant" / "core" / "ShellEvents.java"
 SHORTCUT_PLAN = SHELL_SRC / "xyz" / "fenever" / "assistant" / "core" / "ShortcutPlan.java"
 SHORTCUTS_XML = SHELL_RES / "xml" / "shortcuts.xml"
@@ -139,34 +140,81 @@ def _wanted_entries() -> list:
     return [values[n] for n in names]
 
 
+def _invocations(src: str, name: str) -> list:
+    """这个方法被【调用】的位置：`name(` 与 `::name` 两种写法都算，定义那一行不算。"""
+    hits = []
+    for m in re.finditer(r"(?<!\w)" + re.escape(name) + r"\s*(?:\(|$)", src):
+        line_start = src.rfind("\n", 0, m.start()) + 1
+        head = src[line_start:m.start()]
+        if re.search(r"\b(void|public|private|protected)\b", head):
+            continue                                   # 这是定义，不是调用
+        hits.append(m.start())
+    for m in re.finditer(r"::\s*" + re.escape(name) + r"\b", src):
+        hits.append(m.start())
+    return sorted(hits)
+
+
 def test_nothing_checks_for_an_update_unless_the_user_asks():
     """「不点检查更新就拿不到最新安装包」这条承诺的下半段：没有任何自动触发。
 
-    唯一的调用点必须在 isCheckUpdateLaunch 的判据后面。今天多一处"顺手在 onResume 里查一下"，
-    这句话就变成谎，而且没人会报错——GitHub 那个接口是按来源 IP 限 60 次/小时的，
-    自动化的第一个代价是把配额自己烧光。
-    """
-    src = _code(MAIN_ACTIVITY)
-    assert len(re.findall(r"void\s+startUpdateCheck\s*\(", src)) == 1, "定义本身应当只有一处"
-    # 只数【真调用】（后面紧跟分号）：注释里那句 {@link #startUpdateCheck()} 不是调用点，
-    # 把它算进来会让这条锁在"谁都没多写一处"的情况下天天红。
-    invocations = [m.start() for m in re.finditer(r"\bstartUpdateCheck\s*\(\s*\)", src)
-                   if src[m.end():].lstrip().startswith(";")]
-    assert len(invocations) == 1, (
-        f"startUpdateCheck 应当只有【一个】调用点（现在 {len(invocations)} 个），"
-        "多出来的那一处就是「不点也会检查更新」")
-    line = src[:invocations[0]].count("\n") + 1
-    window = "\n".join(src.splitlines()[max(0, line - 9):line - 1])
-    assert "isCheckUpdateLaunch" in window, (
-        f"MainActivity.java:{line} 的 startUpdateCheck 不在用户动作的判据后面")
+    能点燃这条链路的入口恰好三个——长按图标的快捷方式、桌面组件那颗按钮、设置里那一行
+    （走桥）——每一个都是"用户自己点的"。今天多一处"顺手在 onResume 里查一下"，这句话
+    就变成谎，而且没人会报错：GitHub 那个接口按来源 IP 限 60 次/小时，自动化的第一个代价
+    是把配额自己烧光。
 
-    # 其它任何文件都不许触发它（开机广播、到点通知、组件刷新是最容易"顺手"加的地方）。
-    # 只锁 startUpdateCheck 这一个符号：core/ 里出现 ReleasePlan 是它自己的类名，不是触发点。
-    others = [p for p in SHELL_SRC.rglob("*.java") if p != MAIN_ACTIVITY]
+    判据是"可数"而不是"看着像"：startUpdateCheck 只容许一个调用者，
+    那个调用者（requestUpdateCheck）只容许两处引用，且每处都必须贴着它自己的用户动作判据。
+    """
+    main = _code(MAIN_ACTIVITY)
+    bridge = _code(SHELL_BRIDGE)
+
+    starts = _invocations(main, "startUpdateCheck")
+    assert len(starts) == 1, (
+        f"startUpdateCheck 只容许一个调用者（现在 {len(starts)} 个）："
+        "多出来的那一处就是「不点也会检查更新」")
+    assert "void requestUpdateCheck()" in main, "唯一那个调用者必须在 requestUpdateCheck 里"
+    body = main[main.index("void requestUpdateCheck()"):]
+    assert starts[0] > main.index("void requestUpdateCheck()") and \
+        starts[0] < main.index("void requestUpdateCheck()") + body.index("\n    }") + 1, \
+        "startUpdateCheck 的调用点跑出了 requestUpdateCheck 的方法体"
+
+    from_main = _invocations(main, "requestUpdateCheck")
+    from_bridge = _invocations(bridge, "requestUpdateCheck")
+    assert len(from_main) == 1 and len(from_bridge) == 1, (
+        f"requestUpdateCheck 的引用数变了：壳内 {len(from_main)}、桥里 {len(from_bridge)}"
+        "（每多一处就要在这里说清它是哪个用户动作）")
+
+    line = main[:from_main[0]].count("\n") + 1
+    window = "\n".join(main.splitlines()[max(0, line - 9):line - 1])
+    assert "isCheckUpdateLaunch" in window, (
+        f"MainActivity.java:{line} 的 requestUpdateCheck 不在用户动作的判据后面")
+    b_line = bridge[:from_bridge[0]].count("\n") + 1
+    b_window = "\n".join(bridge.splitlines()[max(0, b_line - 12):b_line - 1])
+    assert "@JavascriptInterface" in b_window and "checkUpdate" in b_window, (
+        f"ShellBridge.java:{b_line} 的 requestUpdateCheck 不是从桥方法里来的——"
+        "桥方法是页面里【人点出来的】，绕开它就没有自动触发")
+
+    others = [p for p in SHELL_SRC.rglob("*.java")
+              if p not in (MAIN_ACTIVITY, SHELL_BRIDGE)]
     assert len(others) >= 8, "没扫到别的壳源码文件，这条锁在空转"
     for path in others:
-        assert "startUpdateCheck" not in _code(path), (
-            f"{path.name} 里出现了 startUpdateCheck：它会在没人点的时候检查更新")
+        body = _code(path)
+        assert "startUpdateCheck" not in body and "requestUpdateCheck" not in body, (
+            f"{path.name} 里出现了触发更新的符号：它会在没人点的时候跑")
+
+
+def test_bridge_advertises_the_update_capability_the_page_depends_on():
+    """capabilities() 必须报 update 与 version，网页那一行全靠这两个键决定画法。
+
+    少一个键不会让任何东西崩：app.js 只认不到 caps.update，于是所有手机上的这一行
+    永远退化成"去下载页"，而 v0.16 明明能真的查——这是一条会静默生效的回归。
+    """
+    bridge = _code(SHELL_BRIDGE)
+    block = bridge[bridge.index("public String capabilities()"):]
+    block = block[:block.index("\n    }")]
+    assert '"update"' in block and "1L" in block, f"capabilities 没报 update：{block}"
+    assert '"version"' in block and "BuildConfig.VERSION_NAME" in block, \
+        "capabilities 没报 version：设置那一行就没地方显示装的是哪一版"
 
 
 def test_the_release_endpoint_is_named_exactly_once():

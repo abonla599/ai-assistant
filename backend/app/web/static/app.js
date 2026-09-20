@@ -1391,6 +1391,45 @@ function renderAccounts() {
   $("accountsVal").textContent = readIdentities().length + " 个已登录";
 }
 
+/** 设置 → 设备 → 检查更新。
+ *
+ *  同一行有两个元素（button 与 a），永远只露一个，差别在【这一行能不能真的办事】：
+ *  1) 新壳（capabilities 带 update）→ 露 button，调桥，走的是与长按图标、桌面组件
+ *     完全同一条路；
+ *  2) 旧壳（v0.14/v0.15 的 capabilities 只有 shell）→ 认不到 update，露那个 a，
+ *     href 直接指向下载页。少了这一档，这一行在装不到新壳的手机上就是个看起来能点的
+ *     死按钮：桥里没有 checkUpdate 这个方法，点了连一句错都不会显示；
+ *  3) 浏览器（没有壳）→ 两个都藏。那里没有"安装包"可更新，页面本身永远是从服务器
+ *     现加载的那一版，摆一行只会让人以为网页能自更新。
+ *
+ *  下载页地址写在 index.html 那个 a 上，不在这里：
+ *  test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。
+ *  点下去不改这一行的文字：原生那侧已经立刻弹了一条"正在检查更新…"的 Toast，
+ *  这里再写一个"正在检查…"就会在对话框关掉之后一直挂着假状态。 */
+function renderUpdateRow() {
+  const btn = $("rowUpdate"), link = $("rowUpdateLink");
+  if (!btn || !link) return;
+  const caps = SHELL.present ? (SHELL.capabilities() || {}) : {};
+  const ver = typeof caps.version === "string" && caps.version ? "v" + caps.version : "";
+  const native = SHELL.present && !!caps.update;
+  const shown = native ? btn : (SHELL.present ? link : null);
+
+  [btn, link].forEach((el) => {
+    el.classList.toggle("hidden", el !== shown);
+    // 露出来的这颗是这一组最后一行：另一颗只是 display:none，:last-child 看不见它，
+    // 不补这一条的话卡片底下会多出一条分隔线。
+    el.classList.toggle("set-only", el === shown);
+  });
+  if (!shown) { $("updateVal").textContent = ""; $("updateLinkVal").textContent = ""; return; }
+
+  if (native) {
+    $("updateVal").textContent = ver;
+    btn.onclick = () => { SHELL.checkUpdate(); };
+  } else {
+    $("updateLinkVal").textContent = (ver || "当前版本") + " · 去下载页";
+  }
+}
+
 /** 提醒页（设置 → 设备 → 提醒）。
  *  没有桥时这一页只剩一句说明：提醒是壳在手机上排的，网页自己存一份就变成第二个
  *  事实来源，而且那一份永远不会响——按了没反应的表单比没有表单更坏。 */
@@ -1880,6 +1919,7 @@ function bind() {
   $("rowPersona").onclick = () => openSetPage("persona");
   $("rowMemory").onclick = () => openSetPage("memory");
   $("rowReminders").onclick = () => openSetPage("reminders");
+  renderUpdateRow();
   // 改密码复用首层那套三步找回：这里再放一份字段就是第二个要各自校验、
   // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
   // 所以先把层打开，再翻到找回那张。

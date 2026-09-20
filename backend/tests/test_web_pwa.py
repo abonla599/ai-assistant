@@ -1844,3 +1844,35 @@ def test_the_neutral_state_hides_the_sheet_so_it_cannot_show_an_empty_slab():
     hidden = _declared_rules(css, ".auth.pending .auth-sheet")
     assert any("display: none" in r or "display:none" in r for r in hidden), (
         "中性态没收起 .auth-sheet：表单藏了，面板的常驻内边距会露出一块空板")
+
+
+def test_the_update_row_exists_and_never_becomes_a_dead_button():
+    """设置 → 设备 那行「检查更新」必须在，且它的去向由【壳报没报 update】决定。
+
+    三种坏法都不会报错：
+    ① 行被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
+    ② 无条件走原生那条（不看 caps.update）——旧壳的桥里没有 checkUpdate 这个方法，
+       点一下什么也不发生，页面连一句错都不显示，而它看起来和新壳上一模一样；
+    ③ 把下载页地址搬回 app.js ——那是 test_frontend_uses_relative_api_paths_only
+       要拦的形状（那里拦的是绝对 URL，本条只负责"退路还得在"）。
+    """
+    html = _html()
+    assert 'id="rowUpdate"' in html, "设置 → 设备 里那行「检查更新」没了"
+    assert 'id="rowUpdateLink"' in html, "旧壳那条退路（去下载页）没了"
+    assert 'href="https://github.com/abonla599/ai-assistant/releases/latest"' in html,         "退路指向的不是 releases/latest，写死文件名的链接下一次发版就腐烂"
+    for ident in ("rowUpdate", "rowUpdateLink"):
+        assert f'class="set-row hidden" id="{ident}"' in html,             f"#{ident} 默认必须是藏起来的：没有壳（手机浏览器）时这一行没有能办的事"
+
+    js = _js("app.js", "shell.js")
+    assert "rowUpdateLink" in js and "updateLinkVal" in js, "那一行只写了 markup，没有代码在管它"
+    assert "checkUpdate" in js, "新壳那条路断了"
+
+    body = js[js.index("function renderUpdateRow()"):]
+    # 判"有没有参与判断"，不判"这个标识符在不在"：只查 caps.update 出现过一次的锁，
+    # 把 `!!caps.update` 换成 `true` 也照样绿——那等于没锁。
+    assert "!!caps.update" in body, "分流不看壳报的能力，旧壳上就会摆一个死按钮"
+    shown = [x for x in body.splitlines() if "const shown =" in x]
+    assert shown, "读不到那一行选谁的决定"
+    assert "SHELL.present" in shown[0] and "null" in shown[0], (
+        "没有壳（手机浏览器）时这一行必须整个藏掉；摆一行「检查更新」会让人以为"
+        "网页能自更新，而界面本来每次都是从服务器现加载的那一版：" + shown[0].strip())

@@ -251,8 +251,20 @@ public class MainActivity extends Activity {
         if (intent == null) return;
         if (ShellEvents.isCheckUpdateLaunch(intent.getStringExtra("open_from"),
                 intent.getDataString())) {
-            startUpdateCheck();
+            requestUpdateCheck();
         }
+    }
+
+    /**
+     * 三条入口共用的那一个门：长按图标的快捷方式、桌面组件那颗按钮、设置里那一行
+     * （{@code ShellBridge.checkUpdate}）。
+     *
+     * <p>{@code startUpdateCheck()} 全仓只有这里调一次，所以"有没有人绕过用户动作自己查"
+     * 这件事是可数的——见 backend/tests/test_android_shell.py 那条锁。
+     */
+    void requestUpdateCheck() {
+        if (isFinishing() || isDestroyed()) return;
+        startUpdateCheck();
     }
 
     // ---------- 检查更新：拉发布页 → 确认 → 下载 → 交给系统安装 ----------

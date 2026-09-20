@@ -71,6 +71,10 @@ const SHELL = (() => {
       if (present) call("setOwner", String(user || ""));
     },
     listReminders() { return rows("listReminders"); },
+    /* 设置里那颗「检查更新」。只有 capabilities().update 在时才该被调用——
+       老壳没这个方法，call() 会拿到 null 并回 {ok:false,error:"bad-reply"}，
+       所以调用方必须先看过能力再决定这一行是走原生还是去下载页（app.js renderUpdateRow）。 */
+    checkUpdate() { return call("checkUpdate"); },
     addReminder(reminder) {
       const r = reminder || {};
       return call("scheduleReminder", JSON.stringify({

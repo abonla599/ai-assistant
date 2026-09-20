@@ -322,8 +322,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .set-last { margin-top: 18px; }
 .set-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px;
   padding: 0 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent;
-  color: inherit; text-align: left; cursor: pointer; font-size: 15px; }
-.set-row:last-child { border-bottom: 0; }
+  color: inherit; text-align: left; cursor: pointer; font-size: 15px;
+  text-decoration: none; }   /* 这一行既可能是 button 也可能是链接（旧壳的「去下载页」），
+                                 不写这条的话后者带下划线，看着像两种不同的东西 */
+.set-row:last-child, .set-row.set-only { border-bottom: 0; }
 .set-row:hover { background: var(--bg-hover); }
 .set-ico { width: 20px; flex: none; display: grid; place-items: center; color: var(--text-2); }
 .set-ico svg { width: 19px; height: 19px; }

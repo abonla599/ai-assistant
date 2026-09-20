@@ -202,6 +202,29 @@ public final class ShellBridge {
         if (!sameOrigin()) return "null";
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("shell", 1L);
+        // update=1 是说"设置里那一行点了真的会去查"。v0.15 及更早的壳没有这个键，
+        // 网页据此把同一行退化成打开下载页——缺这一档，那一行在旧壳上就是个死按钮，
+        // 而它看起来和新壳上一模一样。version 顺带报出去，行上要显示装的是哪一版。
+        out.put("update", 1L);
+        out.put("version", BuildConfig.VERSION_NAME);
+        return MiniJson.encode(out);
+    }
+
+    /**
+     * 网页上那颗「检查更新」。
+     *
+     * <p>桥方法跑在 WebView 的 JS 桥线程上，而对话框必须挂 Activity，所以这里只转投一次主线程，
+     * 判断与弹窗全在 {@link MainActivity#requestUpdateCheck()} 那一侧——长按图标那条快捷方式、
+     * 桌面组件那颗按钮、和这一行，三条入口走的是同一条路，不另起第二套。
+     */
+    @JavascriptInterface
+    public String checkUpdate() {
+        if (!sameOrigin()) return refused("origin");
+        if (!(activity instanceof MainActivity)) return refused("no-host");
+        final MainActivity host = (MainActivity) activity;
+        host.runOnUiThread(host::requestUpdateCheck);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", Boolean.TRUE);
         return MiniJson.encode(out);
     }
 
