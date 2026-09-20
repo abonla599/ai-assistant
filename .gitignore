@@ -52,6 +52,9 @@ generate_docx.py
 # （这里曾经有一条 !tools/make-invite.bat 例外，随邀请码机制一起删除了。）
 /tools/*
 !/tools/start-ai-stack.bat
+# 同理：这条 .bat 的无闪窗包装（wscript 层）也是开机自启的真身的一部分，
+# 不进仓库就等于换一台机器开机又退回"闪一下 cmd 窗"的老样子。
+!/tools/start-ai-stack-hidden.vbs
 server.log
 tunnel.log
 PATH_backup_*.txt

@@ -41,8 +41,14 @@ AI 智能助手 —— 崩溃守护看门狗
 ------------------------------------------------------------------------------
 注册成计划任务（每分钟一次；登录型任务，不用存密码）—— 请本人确认后执行
 ------------------------------------------------------------------------------
+必须经 deploy\watchdog-hidden.vbs 这一层，不要把 action 直接写成 powershell.exe。
+原因：-WindowStyle Hidden 是 PowerShell 在控制台窗口**已经创建并显示之后**才生效的，
+而本机默认终端是 Windows Terminal，所以任务每分钟闪一次约 2 秒的终端窗口。
+wscript 是 GUI 子系统宿主，自己不分控制台，Run(..., 0, ...) 把 SW_HIDE 在
+CreateProcess 那一刻就传下去，窗口从一开始就是隐藏的。实测记录见 git 提交说明。
+
   schtasks /Create /F /TN "AI助手-崩溃守护" /SC MINUTE /MO 1 ^
-    /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Users\34426\ai-assistant\deploy\watchdog.ps1"
+    /TR "wscript.exe \"C:\Users\34426\ai-assistant\deploy\watchdog-hidden.vbs\""
 
   schtasks /Query /TN "AI助手-崩溃守护" /V /FO LIST     # 看它注册成什么样
   schtasks /Run     /TN "AI助手-崩溃守护"               # 立刻手动触发一次
@@ -50,8 +56,8 @@ AI 智能助手 —— 崩溃守护看门狗
 
 同一件事的 PowerShell 写法（能把"hidden / 错过就补跑 / 不许并发"表达得更准）：
 
-  $act  = New-ScheduledTaskAction -Execute 'powershell.exe' `
-          -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\Users\34426\ai-assistant\deploy\watchdog.ps1'
+  $act  = New-ScheduledTaskAction -Execute 'wscript.exe' `
+          -Argument '"C:\Users\34426\ai-assistant\deploy\watchdog-hidden.vbs"'
   $trig = New-ScheduledTaskTrigger -Once -At '00:00' -RepetitionInterval (New-TimeSpan -Minutes 1)
   $set  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
           -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
