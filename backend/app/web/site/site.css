@@ -75,7 +75,7 @@ html[data-theme="dark"] {
 html[data-theme="light"] {
   --bg: #ffffff; --bg-soft: #f6f7fb; --surface: #ffffff;
   --ink: #17191f; --ink-soft: #5b6472; --line: #e4e7ee;
-  --brand: #0f9d76; --brand-2: #5566f0; --brand-3: #2bb3a3;
+  --brand: #0a7d5e; --brand-2: #5566f0; --brand-3: #2bb3a3;
   --brand-ink: #ffffff; --glow: rgba(15,157,118,.14);
   --shadow: 0 14px 34px rgba(20,26,44,.10);
   --lift: 0 22px 40px -24px rgba(20,26,44,.28);
@@ -96,8 +96,8 @@ html[data-theme="light"] {
   --bloom: rgba(85,102,240,.055);
   --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
   --fade: linear-gradient(180deg, rgba(15,157,118,0), rgba(15,157,118,.045));
-  --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0f9d76 100%);
-  --cta: linear-gradient(115deg,#0f9d76 0%,#0f8d8f 52%,#5566f0 100%);
+  --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0a7d5e 100%);
+  --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
   --cta-ink: #ffffff;
   --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
   --sheen: rgba(255,255,255,.6);
@@ -110,7 +110,7 @@ html[data-theme="light"] {
   html:not([data-theme]) {
     --bg: #ffffff; --bg-soft: #f6f7fb; --surface: #ffffff;
     --ink: #17191f; --ink-soft: #5b6472; --line: #e4e7ee;
-    --brand: #0f9d76; --brand-2: #5566f0; --brand-3: #2bb3a3;
+    --brand: #0a7d5e; --brand-2: #5566f0; --brand-3: #2bb3a3;
     --brand-ink: #ffffff; --glow: rgba(15,157,118,.14);
     --shadow: 0 14px 34px rgba(20,26,44,.10);
     --lift: 0 22px 40px -24px rgba(20,26,44,.28);
@@ -129,8 +129,8 @@ html[data-theme="light"] {
     --bloom: rgba(85,102,240,.055);
     --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
     --fade: linear-gradient(180deg, rgba(15,157,118,0), rgba(15,157,118,.045));
-    --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0f9d76 100%);
-    --cta: linear-gradient(115deg,#0f9d76 0%,#0f8d8f 52%,#5566f0 100%);
+    --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0a7d5e 100%);
+    --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
     --cta-ink: #ffffff;
     --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
     --sheen: rgba(255,255,255,.6);
