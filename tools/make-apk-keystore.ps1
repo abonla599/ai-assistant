@@ -46,19 +46,42 @@ if (Test-Path $keystore) {
 
 New-Item -ItemType Directory -Path $Dir -Force | Out-Null
 
-# Random, machine-generated: nobody types these into a phone, and a weak one here
-# only has to survive a public repository plus a bot that tries to reuse the key.
-function New-Secret { (-join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })) }
+# Cryptographically random, 32 chars from a 65-symbol alphabet (~195 bits).
+#
+# NOT Get-Random: that is System.Random, a seeded PRNG whose state an attacker can
+# enumerate. These two passwords are the only thing standing between whoever ends up
+# holding release.jks and the ability to publish updates to every installed phone -
+# and that particular failure cannot be undone. The entropy has to come from the OS
+# CSPRNG, not from a shuffle of a character range.
+function New-Secret {
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789!@#%^*_-+="
+    -join ($bytes | ForEach-Object { $alphabet[[int]$_ % $alphabet.Length] })
+}
 $storePass = New-Secret
-$keyPass = New-Secret
+# Same password for the key and the store, on purpose: keytool writes PKCS12 by
+# default, and PKCS12 has no separate key password - it prints a warning and quietly
+# uses the store password instead. Two different values here would hand back a
+# keystore that Gradle cannot sign with, which is exactly the "it built, it just
+# can't be installed" class of problem this script exists to end.
+$keyPass = $storePass
 
+# 3072-bit RSA: 2048 is only the floor Android accepts, and this key has to stay
+# trustworthy for the whole lifetime of every installed copy.
+#
 # 10000 days: Android refuses to install an APK whose signing certificate expires
 # before 2033, so a short validity would silently brick future releases.
 & $keytool -genkeypair -v `
     -keystore $keystore -storepass $storePass `
-    -keypass $keyPass -alias $Alias -keyalg RSA -keysize 2048 -validity 10000 `
+    -keypass $keyPass -alias $Alias -keyalg RSA -keysize 3072 -validity 10000 `
     -dname "CN=ai-assistant, OU=app, O=fenever, L=NA, ST=NA, C=CN"
 if ($LASTEXITCODE -ne 0) { throw "keytool failed with exit code $LASTEXITCODE" }
+
+# The .jks is worthless without the passwords, but a readable copy of both on a
+# shared machine turns "someone got my disk" into "someone can ship updates to my
+# users". Strip inherited ACLs and keep only this account.
+icacls $keystore /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
 $fingerprint = (& $keytool -list -keystore $keystore -storepass $storePass -alias $Alias -v |
     Select-String "SHA256:").Line.Trim()
@@ -66,19 +89,31 @@ $fingerprint = (& $keytool -list -keystore $keystore -storepass $storePass -alia
 $bytes = [System.IO.File]::ReadAllBytes($keystore)
 $b64 = [System.Convert]::ToBase64String($bytes)
 
+# The four values go into a file next to the keystore, not onto stdout. Printing
+# them means they live in terminal scrollback, in any session recording, and the
+# moment someone pastes them wrong there is no copy to re-read - while the file can
+# be locked to this account with the same ACL as the keystore itself.
+$secretsFile = Join-Path $Dir "secrets-to-paste.txt"
+@(
+    "Paste these into GitHub: repo -> Settings -> Secrets and variables -> Actions -> New repository secret"
+    "Then delete this file. The keystore works without it once the secrets are in."
+    ""
+    "APK_KEYSTORE_BASE64=$b64"
+    "APK_KEYSTORE_PASSWORD=$storePass"
+    "APK_KEY_ALIAS=$Alias"
+    "APK_KEY_PASSWORD=$keyPass"
+    ""
+    "Certificate: $fingerprint"
+) | Set-Content -Path $secretsFile -Encoding ASCII
+
+icacls $secretsFile /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
+
 Write-Output ""
-Write-Output "Keystore created: $keystore"
-Write-Output "Certificate:      $fingerprint"
+Write-Output "Keystore:   $keystore"
+Write-Output "Secrets in: $secretsFile   (only this Windows account can read it)"
+Write-Output "Certificate: $fingerprint"
 Write-Output ""
-Write-Output "Copy these FOUR secrets into GitHub (Settings -> Secrets and variables -> Actions):"
-Write-Output "  APK_KEYSTORE_BASE64  = $b64"
-Write-Output "  APK_KEYSTORE_PASSWORD = $storePass"
-Write-Output "  APK_KEY_ALIAS         = $Alias"
-Write-Output "  APK_KEY_PASSWORD      = $keyPass"
-Write-Output ""
-Write-Output "Then BACK UP this folder to somewhere that survives the machine:"
-Write-Output "  $Dir"
-Write-Output "Passwords are shown once and never stored by this script. If the terminal"
-Write-Output "scrolled past them, read them back with:"
-Write-Output "  keytool -list -keystore `"$keystore`" -alias $Alias -v"
-Write-Output "(that prints the passwords only if you typed them in; they live in GitHub now.)"
+Write-Output "Next: open that file, paste the four values as repository secrets, then BACK UP"
+Write-Output "      $Dir to something that survives this machine, then delete the secrets file."
+Write-Output "      Losing the keystore means every installed copy must be uninstalled - there"
+Write-Output "      is no way to rotate a signing key without that one-time break."
