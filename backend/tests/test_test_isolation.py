@@ -40,12 +40,19 @@ def test_real_memory_store_is_not_what_tests_open():
 def test_env_isolation_covers_every_redirectable_store():
     """conftest 声称能指走的存储，就得真的指走了。
 
-    清单来自 test_paths 那份 stores 的同一批环境变量：那里守的是"每一份都能被指走
-    且默认落在项目根之外会被重建抹光"，这里守的是"跑测试时每一份都被指走了"。
-    少一个就是这次的 bug——新存储加进产品代码时，没人记得去 conftest 补一行。
+    清单**从 `paths.DATA_PATH_ENV_VARS` 派生**，不再手抄一份：这一处此前抄过一遍，
+    而产品代码每加一份存储都要靠人记得来这儿补一行——不补就正好是这次的 bug 形状
+    （CHROMA_DB_PATH 漏了指走，本机测试直接摸到用户那 71 条真实记忆）。
+    派生之后，加存储而忘在 conftest 补一行，红的就是这一条。
+
+    反馈与偏好那两份例外：它们在导入期就算成模块常量，conftest 走的是
+    `monkeypatch.setattr(module, "FEEDBACK_FILE", …)`，环境变量指不走它们。
     """
-    covered = ["SESSION_DB_PATH", "USERS_DB_PATH", "PROVIDERS_DB_PATH",
-               "UPLOAD_DIR", "CHROMA_DB_PATH", "TASKS_DB_PATH", "USAGE_DB_PATH"]
+    from app.core.paths import DATA_PATH_ENV_VARS
+
+    module_constanted = {"FEEDBACK_FILE", "PREFERENCE_FILE"}
+    covered = [v for v in DATA_PATH_ENV_VARS.values() if v not in module_constanted]
+    assert len(covered) >= 7, f"派生出来的清单短得不像话，这条锁在空转：{covered}"
     missing = [v for v in covered if not os.getenv(v)]
     assert not missing, f"这些存储在跑测试时没有被指走：{missing}"
 

@@ -210,3 +210,43 @@ def execute_code(code: str, language: str = "python", max_retries=2) -> str:
     tail = f"\n退出码: {exit_code}" if exit_code else ""
     # 返回给模型的文本（模型会看到这个字符串）
     return f"输出:\n{out}\n错误:\n{err}{tail}"
+
+
+# ---------- 日程：今天该干什么 ----------
+# 两条都标 needs_user，理由是同一句：日程是"某个具体的人"的数据，归属人只能由执行器
+# 从凭据里注入。参数表里刻意不出现 user_id——多一个这样的口子，就等于请模型编一个归属人。
+from app.core import schedule as _schedule
+
+
+@register_tool(
+    name="today_plan",
+    description="读这个人今天的日程清单（事项、时间、做完没有）。返回值第一行是服务端的今天"
+                "与星期几。问「今天该干什么」「还有什么没做」之前先调它，别凭对话里的印象猜；"
+                "要把「明天」「下周三」换算成日期，也以它给的那天为基准。",
+    parameters={"type": "object", "properties": {}},
+    needs_user=True,
+)
+def today_plan(user_id: str):
+    return _schedule.render_for_model(user_id)
+
+
+@register_tool(
+    name="plan_add",
+    description="往这个人的日程里追加一条。他说「记得提醒我交周报」「明天下午三点开会」时调用。"
+                "day 省略就是今天；要写别的日子，先调 today_plan 拿到今天再换算，别凭印象猜日期。"
+                "at 只收 24 小时的 HH:MM，不知道几点就别填。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "一句话事项，不超过 200 字"},
+            "at": {"type": "string", "description": "时间 HH:MM，例如 15:00；省略=不定点"},
+            "day": {"type": "string", "description": "YYYY-MM-DD，省略=今天"},
+        },
+        "required": ["text"],
+    },
+    needs_user=True,
+)
+def plan_add(user_id: str, text: str, at: str = "", day: str = ""):
+    item = _schedule.add_item(user_id, text, at=at, day=day)
+    return {"day": _schedule.normalize_day(day), "text": item["text"],
+            "at": item["at"], "id": item["id"]}

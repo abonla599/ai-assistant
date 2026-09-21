@@ -153,37 +153,31 @@ def test_ensure_parent_creates_the_missing_directory(tmp_path):
 # 的第三档），这件事光读文档猜不准，所以把它打印出来。下面两条钉的是：这张表
 # 必须**全**（漏一份就等于那份永远不出现在日志里），以及它必须说真话。
 
-ALL_STORES = {"会话", "身份库", "模型服务配置", "附件",
-              "长期记忆向量库", "任务清单", "用量账本", "反馈原文", "偏好摘要"}
-
-
 def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
     from app.core.paths import DATA_PATH_ENV_VARS, resolve_all_data_paths
 
-    assert set(DATA_PATH_ENV_VARS) == ALL_STORES, \
-        "启动日志的目录与测试覆盖面各有一份清单，加存储时会漏一个"
+    # 每份存储的默认文件名。以前这一处、上面那张表、还有断言里的标签映射各抄了一份，
+    # 加一份存储要改三处，漏一处就是这条锁自己过时。现在只有两份：环境变量名来自
+    # DATA_PATH_ENV_VARS（产品代码里的那一份），文件名来自下面这一份，两边必须一一对齐。
+    FILENAMES = {"会话": "sessions.json", "身份库": "users.json",
+                 "模型服务配置": "providers.json", "附件": "uploads",
+                 "长期记忆向量库": "chroma_db", "任务清单": "tasks.json",
+                 "用量账本": "usage.json", "日程": "schedule.json"}
+    # 反馈与偏好是导入期算好的模块常量，指不走环境变量，所以不在 FILENAMES 里
+    assert set(FILENAMES) | {"反馈原文", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \
+        f"存储清单与文件名表对不上：{set(FILENAMES) ^ (set(DATA_PATH_ENV_VARS) - {'反馈原文', '偏好摘要'})}"
 
-    redirected = {
-        "SESSION_DB_PATH": tmp_path / "x" / "sessions.json",
-        "USERS_DB_PATH": tmp_path / "x" / "users.json",
-        "PROVIDERS_DB_PATH": tmp_path / "x" / "providers.json",
-        "UPLOAD_DIR": tmp_path / "x" / "uploads",
-        "CHROMA_DB_PATH": tmp_path / "x" / "chroma_db",
-        "TASKS_DB_PATH": tmp_path / "x" / "tasks.json",
-        "USAGE_DB_PATH": tmp_path / "x" / "usage.json",
-    }
-    for var, value in redirected.items():
-        monkeypatch.setenv(var, str(value))
+    redirected = {label: tmp_path / "x" / name for label, name in FILENAMES.items()}
+    for label, value in redirected.items():
+        monkeypatch.setenv(DATA_PATH_ENV_VARS[label], str(value))
 
     got = dict(resolve_all_data_paths())
-    assert set(got) == ALL_STORES, f"这张表漏了存储：{ALL_STORES ^ set(got)}"
-    label_of = {"SESSION_DB_PATH": "会话", "USERS_DB_PATH": "身份库",
-                "PROVIDERS_DB_PATH": "模型服务配置",
-                "UPLOAD_DIR": "附件", "CHROMA_DB_PATH": "长期记忆向量库", "TASKS_DB_PATH": "任务清单", "USAGE_DB_PATH": "用量账本"}
-    for var, value in redirected.items():
-        assert got[label_of[var]] == os.path.abspath(str(value)), f"{label_of[var]} 没跟着 {var} 走"
-    # 反馈与偏好是导入期算好的模块常量（conftest 会把它们指到临时目录），
-    # 这里只要求它们出现在表里并且是绝对路径——它们进的是同一份日志。
+    assert set(got) == set(DATA_PATH_ENV_VARS), \
+        f"这张表漏了存储：{set(DATA_PATH_ENV_VARS) ^ set(got)}"
+    for label, value in redirected.items():
+        assert got[label] == os.path.abspath(str(value)), f"{label} 没跟着 {DATA_PATH_ENV_VARS[label]} 走"
+    # 反馈与偏好的常量在 conftest 里被指到临时目录，这里只要求它们出现在表里并且
+    # 是绝对路径——它们进的是同一份日志。
     for label in ("反馈原文", "偏好摘要"):
         assert os.path.isabs(str(got[label])), f"{label} 不是绝对路径"
 
@@ -194,11 +188,11 @@ def test_log_data_locations_tells_the_two_reasons_apart(capsys, tmp_path, monkey
     两者对运维的意思完全相反——前者是"我故意的"，后者是"你以为在 data/ 底下，
     其实这台机器上还躺着一份项目根的老文件"。混成一句 ⚠️ 就等于没说。
     """
-    from app.core.paths import log_data_locations
+    from app.core.paths import DATA_PATH_ENV_VARS, log_data_locations
 
     log_data_locations()
     out = capsys.readouterr().out
-    for label in ALL_STORES:
+    for label in DATA_PATH_ENV_VARS:
         assert label in out, f"启动日志里没有 {label}"
     assert "只允许一个服务进程" in out, "单写者规则必须跟日志一起说，否则没人知道它在防什么"
     assert "项目根" in out

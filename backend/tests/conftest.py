@@ -39,6 +39,7 @@ os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 # 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
 os.environ["USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "usage.json")
+os.environ["SCHEDULE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "schedule.json")
 
 with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
     json.dump([{

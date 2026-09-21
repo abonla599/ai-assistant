@@ -90,6 +90,7 @@ DATA_PATH_ENV_VARS = {
     "长期记忆向量库": "CHROMA_DB_PATH",
     "任务清单": "TASKS_DB_PATH",
     "用量账本": "USAGE_DB_PATH",
+    "日程": "SCHEDULE_DB_PATH",
     "反馈原文": "FEEDBACK_FILE",
     "偏好摘要": "PREFERENCE_FILE",
 }
@@ -113,6 +114,7 @@ def resolve_all_data_paths() -> list:
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
     from app.preference_analyzer import PREFERENCE_FILE
     from app.agents.task_store import _default_path as tasks_path
+    from app.core.schedule import _default_path as schedule_path
     from app.core.usage import _default_path as usage_path
     from app.session.session_store import _default_path as sessions_path
 
@@ -124,6 +126,7 @@ def resolve_all_data_paths() -> list:
         "长期记忆向量库": chroma_dir(),
         "任务清单": tasks_path(),
         "用量账本": usage_path(),
+        "日程": schedule_path(),
         "反馈原文": FEEDBACK_FILE,
         "偏好摘要": PREFERENCE_FILE,
     }
@@ -137,7 +140,7 @@ def _display_width(text: str) -> int:
 
 
 def log_data_locations() -> None:
-    """启动时把七份数据的绝对路径打一遍；不在 data/ 下的说明它为什么不在。
+    """启动时把每一份可变数据的绝对路径打一遍；不在 data/ 下的说明它为什么不在。
 
     只读不改：这条不建目录、不碰文件，因此对 `import` 没有任何副作用，测试里跑也安全。
     先解析再打印，是因为解析会触发兄弟模块导入（其中 providers 会自己打一行日志），

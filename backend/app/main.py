@@ -541,6 +541,51 @@ def replace_session_messages(session_id: str, req: SessionMessagesRequest,
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
 
+# ---------- 日程（"今天该干什么"那份清单） ----------
+# 归属人一律从凭据里取（principal.user_id），请求体与查询串里都没有 user_id 这个口子：
+# 与记忆/会话/附件同一口径，见 app/core/schedule.py 的模块注释。
+from app.core import schedule
+
+
+class ScheduleItem(BaseModel):
+    text: str
+    at: Optional[str] = None            # 24 小时的 HH:MM，或干脆不填
+    done: bool = False
+
+
+class ScheduleRequest(BaseModel):
+    day: Optional[str] = None           # 空 = 服务端本地日期的今天
+    items: List[ScheduleItem] = []
+
+
+@app.get("/v1/schedule")
+def get_schedule(day: Optional[str] = None, principal: Principal = CurrentPrincipal):
+    """这一天的清单，外加这个人有过安排的那些天（给日期选择器用）。
+
+    坏日期回 400，不回"一份空清单"：后者与"那天确实没安排"长得一模一样，界面会把
+    一句问错了的话渲染成一句真话。
+    """
+    try:
+        target = schedule.normalize_day(day)
+        return {"day": target,
+                "items": schedule.plan(principal.user_id, target),
+                "days": schedule.days_for(principal.user_id)}
+    except schedule.ScheduleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/v1/schedule")
+def put_schedule(req: ScheduleRequest, principal: Principal = CurrentPrincipal):
+    """整天一次替换（幂等）。为什么不是逐条增删，写在 schedule.set_plan 的注释里。"""
+    try:
+        target = schedule.normalize_day(req.day)
+        rows = schedule.set_plan(principal.user_id,
+                                 [item.model_dump() for item in req.items], day=target)
+    except schedule.ScheduleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"day": target, "items": rows, "count": len(rows)}
+
+
 # ---------- 导出下载（一次性票据） ----------
 # 前端 blob: + <a download> 在 Android WebView 壳里存不下文件（壳收不到 blob 下载
 # 回调，也不会给下载请求带 Authorization），所以导出必须换成一条免登录、真实、
