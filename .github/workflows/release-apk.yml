@@ -68,12 +68,45 @@ jobs:
           printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "APK_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
+      # 单独一步先把钥匙本身验一遍。Assemble 失败时报的是"签不出来"，而真正的原因通常
+      # 在这把钥匙上：口令不对、alias 不对、或那 4764 个字符在粘贴时坏了一个。
+      # 判据走 ::error::/::notice:: 而不是普通输出——日志正文要登录才能读，annotations
+      # 未鉴权也能看见，"CI 红了但没人知道为什么"这件事不该需要人来翻。
+      - name: Verify the restored key is usable
+        env:
+          APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
+        run: |
+          set -uo pipefail
+          out=$("$JAVA_HOME/bin/keytool" -list -keystore "$APK_KEYSTORE" -storetype PKCS12 \
+                  -storepass "$APK_KEYSTORE_PASSWORD" -alias "$APK_KEY_ALIAS" -v 2>&1)
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            printf '%s\n' "$out" | tail -6 | sed 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::error::keytool: $line"; done
+            echo "::error::落盘的签名密钥读不出来（rc=$rc）：口令、alias、base64 三者之一不对"
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -m1 'SHA256:' | tr -d ' \t' | sed 's/%/%25/g' \
+            | while IFS= read -r line; do echo "::notice::pinned signing key: $line"; done
+
       - name: Assemble release APK
         env:
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
           APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
-        run: gradle -p android --no-daemon --stacktrace assembleRelease
+        run: |
+          set -uo pipefail
+          gradle -p android --no-daemon --stacktrace assembleRelease 2>&1 \
+            | tee "$RUNNER_TEMP/assemble.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            # 把 "What went wrong" 那一段搬进 annotations，理由与上一步相同
+            awk '/What went wrong/{flag=1} /^BUILD FAILED/{flag=0} flag' "$RUNNER_TEMP/assemble.log" \
+              | head -20 | sed 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::error::gradle: $line"; done
+          fi
+          exit "$rc"
 
       # 把签进包里的那把钥匙的指纹打进日志：以后再出"用户装不上"，第一件事就是
       # 比对两个 Release 的这行输出，而不是靠人回忆签名是哪把。
