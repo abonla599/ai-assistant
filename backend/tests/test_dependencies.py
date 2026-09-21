@@ -74,3 +74,29 @@ def test_optional_deps_are_actually_optional_in_code():
     for module, rationale in OPTIONAL_DEPS.items():
         assert module in text, f"{module} 已不在代码里被导入，应从 OPTIONAL_DEPS 删除"
         assert rationale.strip(), f"{module} 的可选理由不能是空的"
+
+
+def test_there_is_exactly_one_dependency_manifest():
+    """依赖清单只许有一份，而且 CI 与 Docker 必须装同一份。
+
+    仓库根原先躺着一份 118 行的 pip freeze 转储（UTF-16、零注释），`Dockerfile`
+    COPY 的正是它，而 CI 装的是 `backend/requirements.txt` —— 两份的 numpy、
+    onnxruntime、fastapi 版本互不相同。症状不是报错，是"容器里跑出来的行为和
+    CI 绿的那套不是一回事"，而且没人会去查：两边都装得上，都起得来。
+    这属于本仓反复栽的那种第二个事实来源，只不过这次藏在依赖声明里。
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    stray = [p.name for p in root.glob("requirements*.txt")]
+    assert not stray, f"仓库根又长出一份依赖清单：{stray}（唯一的一份在 backend/ 下）"
+
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY backend/requirements.txt" in dockerfile, \
+        "Docker 不再从 backend/ 取清单：它会在根目录找那份不存在的文件"
+    assert "pip install --no-cache-dir -r /app/requirements.txt" in dockerfile, \
+        "Docker 装依赖那一步的清单路径被改动了，和上面 COPY 的目标对不上就是空装"
+
+    ci = (root / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "backend/requirements.txt" in ci, "CI 换了清单，这条锁就管不到它了"
+    # 解释器也要一致：容器此前用 3.11，而 CI/venv/打包用的都是 3.12
+    assert re.search(r"FROM python:3\.12", dockerfile), \
+        "容器的 Python 版本又和 CI/打包那份错开了（chromadb 对上限敏感）"
