@@ -65,7 +65,9 @@ def test_app_admin_health_and_docs_still_work():
     assert client.get("/app/").status_code == 200
     assert client.get("/admin/").status_code == 200
     health = client.get("/health")
-    assert health.status_code == 200 and health.json() == {"status": "healthy"}
+    # 判据是"答得出那张 checks 表"，不是某个具体的 status 值：CI 里没有真密钥，
+    # 钉死 ok 会让这条锁随配置漂移。
+    assert health.status_code == 200 and health.json()["checks"]
     assert client.get("/docs").status_code == 200
     assert client.get("/openapi.json").status_code == 200
 

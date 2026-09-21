@@ -268,6 +268,29 @@ function Test-TunnelReady {
     }
 }
 
+function Get-BackendSelfCheck {
+    # /health 回的是逐项自检（模型服务/密钥库/账本/记忆后端/限流账/数据落点），
+    # 不再只有一句 healthy。
+    #
+    # 为什么看门狗要读它：这一轮加的东西全都能在「进程活着」的状态下坏掉——密钥库
+    # 文件读不动、账本写不进去、嵌入后端降级成全零伪嵌入、新写的限流账没登记。
+    # 只看进程在不在，就等于 2026-09-20 那次 Error 1033 的翻版：每分钟巡检全绿，
+    # 而外面已经不对了。
+    #
+    # 判据只能从 checks 里读，不能靠 HTTP 状态码：后端刻意让 /health 永远 200，
+    # 因为坏的是配置，重启修不好它，而「非 200 就拉起」会把正在进行的对话一起带走。
+    param([int] $PortNumber)
+    try {
+        $resp = Invoke-WebRequest -Uri ('http://127.0.0.1:{0}/health' -f $PortNumber) `
+                                  -TimeoutSec 5 -UseBasicParsing
+        return ($resp.Content | ConvertFrom-Json)
+    } catch {
+        # 连不上、超时都不在这里报警：那是端口探测（Test-PortListening）与
+        # Invoke-Guard 的活。这里再报一次只会让同一个故障有两串日志。
+        return $null
+    }
+}
+
 function Get-Counter {
     # 读一个存在状态文件里的整数计数。
     # 为什么要单独写一个函数而不是 [int]$State[$Key]：Read-State 对每个值都套了一层
@@ -487,6 +510,23 @@ try {
                 Start-Process -FilePath $BackendExe -WorkingDirectory $ProjectRoot `
                     -WindowStyle Hidden -PassThru
             }
+
+        # 进程活着只算及格。接着问一句"东西齐不齐"——上面那些故障没有任何一种会让
+        # 进程消失，所以这一段不是 Invoke-Guard 的补充，是另一种判据。
+        # 只记日志、不动拉起预算：自检报 broken 时拉起一个新进程，得到的是一模一样的
+        # broken，而这一轮对话的人莫名其妙就断了。
+        $health = Get-BackendSelfCheck -PortNumber $Port
+        if ($health) {
+            foreach ($item in $health.checks.PSObject.Properties) {
+                if ($item.Value.status -eq 'ok') { continue }
+                if (-not (Test-ShouldLog -State $state -Key ('seen:health-' + $item.Name))) { continue }
+                $level = 'WARN'
+                if ($item.Value.status -eq 'broken') { $level = 'ERROR' }
+                Write-Log $level ('后端自检报出 ' + $item.Value.status + '：' + $item.Name +
+                                  '（' + $item.Value.detail + '）—— 这类故障进程照样活着，' +
+                                  '重启修不好它，需要人去配置或磁盘上改。')
+            }
+        }
     }
 
     if (-not $SkipTunnel) {

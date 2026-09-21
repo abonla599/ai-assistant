@@ -103,6 +103,9 @@ async def lifespan(app: FastAPI):
     # "所有数据都在 data/ 下吗"取决于本机有没有一个老 preference.txt，光看文档猜不出来。
     from app.core.paths import log_data_locations
     log_data_locations()
+    # 紧接着打一行"齐不齐"：出事时人在看日志，而不是去猜当时 /health 回过什么。
+    from app.core.selfcheck import log_startup_summary
+    log_startup_summary()
     # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
     # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
     from app.tools.availability import start_probe
@@ -271,9 +274,17 @@ def start_background_scheduler():
 
 
 # ---------- API 端点 ----------
+# 同步 def：自检要读盘（密钥库、账本、chroma 的集合元数据）。挂在 async 上就是
+# 把阻塞 I/O 放回事件循环——那正是 524 的根因，而且会连带冻住流式回答。
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+def health_check():
+    """进程活着只是及格线；这里报的是"那几样会静默坏掉的东西齐不齐"。
+
+    状态码不随检查结果变化（永远 200）：坏的是配置，重启修不好它，而"非 200 就拉起"
+    的守护会因此每分钟杀掉一次正在进行的对话。判据给日志和运维，不给进程管理器。
+    """
+    from app.core.selfcheck import run
+    return run()
 
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,

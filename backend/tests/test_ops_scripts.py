@@ -159,3 +159,27 @@ def test_the_replacement_connector_is_launched_with_usable_arguments():
     assert "-RedirectStandardError" in starts[0], (
         "不接住 stderr，「用法错误」「端口被占」这类启动即失败就完全无痕"
     )
+
+
+def test_the_watchdog_asks_whether_the_backend_is_complete():
+    """后端那条守的是「进程在不在」，而这一轮加的东西全都能在进程活着时坏掉。
+
+    密钥库读不动、账本写不进、嵌入降级成全零伪嵌入、新限流账没登记——四种都没有
+    任何进程级症状。这和 2026-09-20 那次 Error 1033 是同一个形状：巡检每分钟全绿，
+    外面早就不对了。所以这里两头都要锁：它得去问，而且问到了也不许动手拉起重启。
+    """
+    code = _code(WATCHDOG.read_text(encoding="utf-8"))
+
+    probe = _region(code, "function Get-BackendSelfCheck", "function Get-Counter", "自检探测函数")
+    assert "/health" in probe, "没问 /health，问的还是端口"
+    assert "ConvertFrom-Json" in probe, "只看了状态码：后端刻意永远回 200，判据在 checks 里"
+    assert "-TimeoutSec" in probe, "没有超时的话，一个卡住的后端会把整轮巡检一起拖住"
+
+    verdict = _region(code, "$health = Get-BackendSelfCheck", "$SkipTunnel", "自检判决那一段")
+    assert "Test-ShouldLog" in verdict, "不节流的话，一个坏掉的配置每分钟刷一条 ERROR，真告警就淹了"
+    assert "'broken'" in verdict and "'ok'" in verdict, "没有按状态分级，就退化成一句「好像不对」"
+    for forbidden in ("Start-Process", "Invoke-Guard"):
+        assert forbidden not in verdict, (
+            f"自检报 broken 就 {forbidden}：坏的是配置，重启修不好它，"
+            f"只会把正在进行的对话每分钟带走一次"
+        )

@@ -116,10 +116,16 @@ def test_feedback_only_answers_for_the_callers_own_message(client, enforced):
 
 
 def test_health_check():
-    """健康检查"""
+    """健康检查：从"进程还在"升级成"东西齐不齐"。
+
+    六项判据各自是什么、为什么状态码不随判决走，全在 app/core/selfcheck.py 与
+    test_selfcheck.py 里；这里只认这个端点还答得出话、并且给的是那张 checks 表。
+    """
     res = client.get("/health")
     assert res.status_code == 200
-    assert res.json()["status"] == "healthy"
+    body = res.json()
+    assert body["status"] in ("ok", "degraded", "broken"), body
+    assert body["checks"], "只剩一句 status，等于退回「进程活着就算好」"
 
 
 def test_root():
