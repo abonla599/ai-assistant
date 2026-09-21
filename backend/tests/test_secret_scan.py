@@ -213,12 +213,22 @@ def test_ci_runs_this_gate():
 
     tests.yml 按目录跑 `pytest backend/tests/`，不点名文件——所以这里验的是"它没有
     退回点名清单"，而不是"我的文件在清单上"。
+
+    判据从"找同时含 run: 与 pytest 的那一行"改成"按 YAML 取出跑 pytest 的那一步的
+    shell 正文"。上一版那把尺子在命令被写成 `run: |` + 缩进块之后读到的是空清单
+    （把失败抄成 annotation 就得那么写，见 test_android_shell.py 里那条），
+    于是这条锁红成"形状变了：[]"——红是对的（它确实该跟着改），但红话说得不像人话，
+    下一个人会以为是自己数错了行。
     """
-    workflow = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-    step = [line for line in workflow.splitlines() if "pytest" in line and "run:" in line]
-    assert len(step) == 1, f"CI 里的 pytest 步骤形状变了：{step}"
-    assert "backend/tests/" in step[0], "CI 必须按目录跑，新增测试文件才自动被覆盖"
-    assert "test_secret_scan" not in workflow, "别退回点名清单：那会让新写的锁一条都不执行"
+    import yaml
+
+    text = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    steps = [s for s in doc["jobs"]["test"]["steps"] if "pytest" in (s.get("run") or "")]
+    assert len(steps) == 1, f"跑 pytest 的步骤不是恰好一条：{[s.get('name') for s in steps]}"
+    script = steps[0]["run"]
+    assert "backend/tests/" in script, "CI 必须按目录跑，新增测试文件才自动被覆盖"
+    assert "test_secret_scan" not in text, "别退回点名清单：那会让新写的锁一条都不执行"
 
 
 def test_git_add_f_mode_still_lands_in_the_scanned_set(tmp_path):

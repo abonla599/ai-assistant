@@ -127,17 +127,60 @@ def test_twenty_opens_still_mean_one_trip_to_github(monkeypatch):
 
 def test_a_failed_refresh_keeps_the_last_good_answer_but_retries_later(monkeypatch):
     """GitHub 挂了这 10 分钟里，不再逐个请求去替它挡枪，而是继续用上一次的结果。"""
+    import time
+
     fake = _Urlopen(GOOD, urllib.error.URLError("boom"), GOOD)
     monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
 
     assert releases.probe(have="0.16")["latest"] == "0.18"
-    releases._fetched_at = 0.0                      # 假装缓存到期
+    releases._fetched_at = time.monotonic() - releases.CACHE_SECONDS   # 假装缓存到期
     stale = releases.probe(have="0.16")
     assert stale["ok"] and stale["latest"] == "0.18", "读不到就清空，等于把用户已有的答案弄丢"
     assert "URLError" in stale["reason"], "用了旧数据就该说清楚这次没读到"
-    releases._fetched_at = 0.0
+    releases._fetched_at = time.monotonic() - releases.CACHE_SECONDS
     assert releases.probe(have="0.16")["latest"] == "0.18"
     assert len(fake.calls) == 3
+
+
+def test_a_machine_that_just_booted_still_probes(monkeypatch):
+    """刚开机的机器上 monotonic 只有几秒——缓存哨兵不能拿 0.0 当"该拉了"。
+
+    这不是假想出来的边界，是 CI 抓的（runner 是一台刚开的虚拟机，monotonic 远小于
+    CACHE_SECONDS）：`now - 0.0 >= 600` 在那台机器上为假，于是"从没拉过"被判成
+    "缓存还新"，而 `_payload` 是空的。九条用例当场全红，而线上对应的症状是
+    **每次重启后的头 10 分钟里那张卡片永远不弹**——不弹、不报错、没人知道。
+    """
+    fake = _Urlopen(GOOD)
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(releases.time, "monotonic", lambda: 5.0)        # 开机 5 秒
+
+    out = releases.probe(have="0.16")
+    assert len(fake.calls) == 1, "刚起来的机器一次都不去拉：那这 10 分钟里没人能看到卡片"
+    assert out["ok"] and out["has_update"] is True, out
+
+
+def test_a_fresh_process_with_a_small_clock_probes():
+    """上一条测的是"reset 之后的模块"，这条测的是**刚 import 进来的模块**那一行初值。
+
+    为什么要开子进程：autouse 的 cold_cache 夹具会把模块状态重写成"刚起来"的样子，
+    于是在主进程里把 `_fetched_at = None` 改回 `0.0`，上面那条照样绿——而生产要跑的
+    恰恰是那一行初值（进程起来之后没人替它 reset）。判据只能在新解释器里读它。
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend = Path(releases.__file__).resolve().parents[1].parent
+    code = (
+        "import app.core.releases as r\n"
+        "r.time.monotonic = lambda: 5.0\n"                 # 一台刚开的机器
+        "r._fetch = lambda: ({'version': '0.18', 'url': 'u', 'asset_name': 'a',\n"
+        "                     'asset_url': 'd', 'size': 1}, '')\n"
+        "print('PROBED' if r.probe(have='0.16')['ok'] else 'SILENT')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(backend), timeout=120)
+    assert "PROBED" in out.stdout, f"新进程 + 小钟 = 不去拉：{out.stdout}{out.stderr}"
 
 
 def test_the_url_we_hand_back_is_fetched_over_the_system_trust_store(monkeypatch):

@@ -30,7 +30,12 @@ MAX_BYTES = 256 * 1024
 
 _lock = threading.Lock()
 _payload = None                 # 上一次**成功**拉到的那份
-_fetched_at = 0.0               # monotonic；失败也推进它，见 _refresh 的注释
+# monotonic 读数；None = 这一世还没试过。**这里不能用 0.0 当"该拉了"的哨兵**：
+# monotonic 是从开机算的，刚起来的机器上 now 本身就小于 CACHE_SECONDS，
+# 于是 `now - 0.0 >= 600` 为假——"该拉一次"被判成"缓存还新"，而 `_payload` 是空的。
+# 症状是每次重启后的头 10 分钟里那张卡片永远不弹，且一句错都不报。
+# （不是假想：CI 就是这么抓到的，runner 是一台刚开的虚拟机。）
+_fetched_at = None
 
 
 def _numeric(segments):
@@ -112,7 +117,7 @@ def probe(have: str = None) -> dict:
     global _payload, _fetched_at
     now = time.monotonic()
     with _lock:
-        stale = (now - _fetched_at) >= CACHE_SECONDS
+        stale = _fetched_at is None or (now - _fetched_at) >= CACHE_SECONDS
     reason = ""
     if stale:
         payload, why = _fetch()
@@ -145,8 +150,12 @@ def probe(have: str = None) -> dict:
 
 
 def reset_for_tests() -> None:
-    """把缓存清空——测试用它等价于"换一台刚起来的机器"。"""
+    """把缓存清空——测试用它等价于"换一台刚起来的机器"。
+
+    刚起来 = `_fetched_at` 是 None，不是 0.0：后者在 monotonic 还很小（真·刚开机、
+    或 CI 的虚拟机）时会被判成"缓存还新"，那正是这条缓存要防的反面。
+    """
     global _payload, _fetched_at
     with _lock:
         _payload = None
-        _fetched_at = 0.0
+        _fetched_at = None
