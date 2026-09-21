@@ -11,6 +11,7 @@
 3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与登录的响应，以及管理员
    轮换的响应。任何端点都不许复述调用方刚提交的密码或令牌。
 """
+import re
 import time
 from collections import defaultdict
 from typing import List, Optional
@@ -18,7 +19,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.core import authz
+from app.core import authz, usage
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
 from app.core.auth import AuthError
@@ -38,6 +39,9 @@ router = APIRouter(tags=["身份"])
 # 话术已经是"尝试次数过多，请稍后再试"。判据是两条反转过的锁
 # （test_a_correct_login_does_not_pay_back_the_failure_budget 与
 # test_a_successful_register_does_not_pay_back_the_failure_budget）。
+# day 参数只认这一种写法；放宽=任何垃圾都换回一份 200 空表
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 FAILURE_WINDOW_SECONDS = 600
 MAX_FAILURES_PER_WINDOW = 10
 
@@ -386,6 +390,37 @@ def logout(request: Request, principal: Principal = CurrentPrincipal):
     """
     _store().revoke(authz._credential(request))
     return {"status": "logged_out"}
+
+
+def _blank_totals() -> dict:
+    return {k: 0 for k in ("calls", "ok", "failed", "prompt_tokens", "completion_tokens",
+                           "total_tokens", "reasoning_tokens", "cached_tokens", "unknown_usage")}
+
+
+def _today() -> str:
+    from datetime import datetime
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+@router.get("/v1/admin/usage")
+def admin_usage(day: str = None, _: Principal = RequireAdmin):
+    """账本的读取面：谁、几次、多少 token、谁的钱。
+
+    `day` 只收 `YYYY-MM-DD`：这个值会直接当键去查字典，宽松一点就是"随便传什么
+    都能拿到一份 200 空表"，那既不报错也看不出自己问错了。
+    """
+    if day is not None and not _DAY_RE.match(day.strip()):
+        raise HTTPException(status_code=400, detail="day 要写成 YYYY-MM-DD")
+    target = day.strip() if day else None
+    rows = usage.snapshot(target)
+    totals = {"operator": _blank_totals(), "user": _blank_totals()}
+    for row in rows:
+        bucket = totals.setdefault(row.get("paid_by") or "operator", _blank_totals())
+        for field in ("calls", "ok", "failed", "prompt_tokens", "completion_tokens",
+                      "total_tokens", "reasoning_tokens", "cached_tokens", "unknown_usage"):
+            bucket[field] += row.get(field, 0)
+    return {"day": target or _today(), "rows": rows, "totals": totals,
+            "days": usage.days()}
 
 
 @router.get("/v1/admin/users")
