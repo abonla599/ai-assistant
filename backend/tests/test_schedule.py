@@ -23,22 +23,8 @@ from fastapi.testclient import TestClient
 from app.core import schedule
 from app.main import app
 
-
-@pytest.fixture
-def isolated_schedule(tmp_path, monkeypatch):
-    """把日程文件挪进临时目录，并连进程内那份字典一起还原。
-
-    与 test_admin_page 里账本那条同一套写法：`schedule` 是模块级全局，只设 env
-    不还原的话，我这几条用例写的东西会留给后面别人的断言。
-    """
-    prev_plans, prev_path = schedule._plans, schedule._PATH
-    path = tmp_path / "schedule.json"
-    monkeypatch.setenv("SCHEDULE_DB_PATH", str(path))
-    schedule.restore(path=str(path))
-    try:
-        yield path
-    finally:
-        schedule._plans, schedule._PATH = prev_plans, prev_path
+# isolated_schedule 夹具在 conftest：流式那条路（test_stream_tools）也要验同一份存储，
+# 两处各自定义就是两份口径。
 
 
 # ---------- 存储层 ----------

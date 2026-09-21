@@ -217,6 +217,37 @@ def test_chat_stream_endpoint_passes_the_tool_schema(real_stream_chat):
     assert "calculator" in names, f"清单里没有计算器：{sorted(names)}"
 
 
+# ---------- 3b. 标了 needs_user 的工具，身份也得从端点交下来 ----------
+
+def test_a_needs_user_tool_runs_through_the_endpoint(real_stream_chat, isolated_schedule):
+    """日程这类工具只有拿到"登录的是谁"才可能跑成。
+
+    与上一条是同一个缺口的两面：清单交下来了、身份没交下来，模型拿回的是
+    一句「缺少身份」，而界面上的表现是"它不肯记"——不报错，只是没用。
+    """
+    from app.core import schedule
+
+    first = [_chunk(tool_calls=[_tool_call_delta(
+        call_id="call_add", name="plan_add",
+        arguments='{"text": "交周报", "at": "15:00"}')])]
+    second = [_chunk(content="记下了")]
+    completions = real_stream_chat([first, second])
+
+    res = client.post("/v1/chat/stream", json={
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "下午三点交周报，记一下"}],
+    })
+    assert res.status_code == 200, f"{res.status_code} {res.text[:200]}"
+
+    tool_msgs = [m for m in completions.calls[1]["messages"] if m.get("role") == "tool"]
+    assert tool_msgs, f"没有工具结果回灌：{[m.get('role') for m in completions.calls[1]['messages']]}"
+    assert tool_msgs[0]["content"].startswith("✓"), \
+        f"工具没跑成，模型看到的是：{tool_msgs[0]['content']!r}"
+    rows = schedule.plan("default_user")          # 全局 client 是 bootstrap 身份
+    assert [r["text"] for r in rows] == ["交周报"], rows
+    assert rows[0]["at"] == "15:00"
+
+
 # ---------- 4. 打桩函数不许比真身"更能收" ----------
 
 def test_the_autouse_stub_is_no_wider_than_the_real_signature():

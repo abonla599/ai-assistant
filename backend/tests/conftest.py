@@ -289,3 +289,23 @@ def sandbox_language():
         return language
 
     return _require
+
+
+@pytest.fixture
+def isolated_schedule(tmp_path, monkeypatch):
+    """把日程文件挪进临时目录，并连进程内那份字典一起还原。
+
+    `app.core.schedule` 是模块级全局（与 usage 同形），只设 env 不还原的话，一条用例
+    写的安排会留给后面别人的断言。放这里而不是放某个测试文件：流式那条路
+    （test_stream_tools）也要验它，两处各自 fixture 就是两份口径。
+    """
+    from app.core import schedule
+
+    prev_plans, prev_path = schedule._plans, schedule._PATH
+    path = tmp_path / "schedule.json"
+    monkeypatch.setenv("SCHEDULE_DB_PATH", str(path))
+    schedule.restore(path=str(path))
+    try:
+        yield path
+    finally:
+        schedule._plans, schedule._PATH = prev_plans, prev_path

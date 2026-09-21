@@ -182,6 +182,24 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
         assert os.path.isabs(str(got[label])), f"{label} 不是绝对路径"
 
 
+def test_both_hand_written_lists_name_every_store():
+    """`.env.example` 与部署指南里那两份"能指走的数据"清单，不许漏掉任何一份存储。
+
+    清单的**唯一来源**是 DATA_PATH_ENV_VARS（启动日志按它打），那两份是抄给人看的。
+    抄的东西会腐烂：这一轮加日程时，两处都已经缺了 任务清单 与 用量账本 两项——
+    没人会去查一份"看起来挺全"的清单缺了哪几行。
+    """
+    from app.core.paths import DATA_PATH_ENV_VARS
+
+    root = Path(__file__).resolve().parents[2]
+    sources = {"../.env.example": root / ".env.example",
+               "安装部署指南": root / "docs" / "安装部署指南.md"}
+    for name, path in sources.items():
+        text = path.read_text(encoding="utf-8")
+        missing = [var for var in DATA_PATH_ENV_VARS.values() if var not in text]
+        assert not missing, f"{name} 里没有这些存储的环境变量：{missing}"
+
+
 def test_log_data_locations_tells_the_two_reasons_apart(capsys, tmp_path, monkeypatch):
     """这条日志的价值全在"说清为什么"：被指走 ≠ 读的是历史数据。
 
