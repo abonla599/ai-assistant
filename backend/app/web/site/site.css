@@ -458,8 +458,11 @@ figcaption { font-size: var(--step--1); color: var(--ink-soft); margin-top: 14px
    让下一个人以为这块能手滑。触摸横滑由 site.js 监听 touch 实现。 */
 html.js .stage { grid-auto-flow: column; grid-auto-columns: 100%; display: flex; overflow: hidden;
   transition: transform .55s var(--ease-out); }
-html.js .slide { flex: 0 0 100%; opacity: .28; transform: scale(.93);
-  transition: opacity .55s var(--ease-out), transform .55s var(--ease-out); }
+/* 实拍图一律不透明。原来给非当前张压到 .28 + scale(.93) 是想做"两侧淡出"，
+   但手机上轨道窄、相邻两张会露边，四张里三张是半透明的，整块看着就像没加载出来
+   ——他第一次在手机上看就是这个反馈。轮播本来就靠 translateX 把别的张推到视口外，
+   淡不淡出都不影响"当前这张"，所以直接取消：图片是内容，不是装饰层。 */
+html.js .slide { flex: 0 0 100%; }
 html.js .slide.is-active { opacity: 1; transform: none; }
 html.js .slide.is-active .phone { box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--brand) 20%, transparent), inset 0 1px 0 var(--hairline); }
 html.js .slide:not(.is-active) img { pointer-events: none; }
