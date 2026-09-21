@@ -118,6 +118,8 @@ from app.memory.memory_router import router as memory_router
 # 身份端点：邀请码注册 + 管理面。哪个端点免凭据由 authz.PUBLIC_PATHS 说了算，
 # 这里只负责挂载，不在此处再判一遍凭据。
 from app.core.auth_router import router as auth_router
+from app.core.auth_router import (chat_allowed, note_chat, chat_retry_after,
+                                  _client_ip, _too_many)
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_admin, mount_pwa
@@ -308,6 +310,18 @@ def _fail_reason(e: BaseException) -> str:
                                     for names, text in groups))
 
 
+def _throttle_chat(http: Request, principal: Principal) -> None:
+    """第五本限流账：60 秒 20 次，键 `IP + 登录身份`。
+
+    顺序是**先判断、再记账、才叫模型**——反过来写的话，被挡下的那一次也会把
+    真金白银花出去，而那正是这本账要挡的事。判据在 test_chat_throttle.py 里。
+    """
+    ip = _client_ip(http)
+    if not chat_allowed(ip, principal.user_id):
+        raise _too_many(chat_retry_after(ip, principal.user_id))
+    note_chat(ip, principal.user_id)
+
+
 def _prepare_chat(request: ChatRequest, principal: Principal):
     """解析模型服务、拼装附件。
 
@@ -357,7 +371,8 @@ def _require_session_owner(session_id, principal: Principal) -> None:
 
 
 @app.post("/v1/chat")
-def chat(request: ChatRequest, principal: Principal = CurrentPrincipal):
+def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrincipal):
+    _throttle_chat(http, principal)
     _require_session_owner(request.session_id, principal)
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
@@ -396,7 +411,7 @@ from fastapi.responses import StreamingResponse
 import json as json_module
 
 @app.post("/v1/chat/stream")
-def stream_chat_endpoint(request: ChatRequest,
+def stream_chat_endpoint(request: ChatRequest, http: Request,
                          principal: Principal = CurrentPrincipal):
     """流式聊天端点，返回 Server-Sent Events
 
@@ -404,6 +419,10 @@ def stream_chat_endpoint(request: ChatRequest,
     留在事件循环里会让一个慢请求冻住整台服务（线上 524）。
     """
     from app.core.streaming import stream_chat
+
+    # 节流同样必须在这里判，理由和下面那条归属一样：流一开，状态码就锁死在 200，
+    # 那时再挡只能断流，而 429 与 Retry-After 根本送不出去。
+    _throttle_chat(http, principal)
 
     # 归属必须在这里判，不能在 generate() 里判：流一开始 HTTP 状态就锁死在 200，
     # 那时再发现 session_id 不是你的，只能静默不落盘（原先正是这样）。

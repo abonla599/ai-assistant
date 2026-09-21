@@ -78,10 +78,23 @@ _RESET_FAILS = defaultdict(list)
 # 每本账配自己的窗口：_prune 是内存闸门，拿十分钟那把尺子去过 24 小时那两本，就是
 # 在来源数超过 4096 时把整桶有效记录提前丢掉——配额被悄悄放宽，是一条 fail-open。
 # 这份元组同时是"账本有哪几本"的唯一清单：新加一本忘了加进来，就是只胀不收。
+# 第五本：聊天节流。键是 `IP + 登录身份`，不是单独 IP——同一家共用一个出口的人
+# 不该互相挡；而"换个身份就能重来一轮"是这个选择自带的口子，写在这行是为了别把
+# 它当成密不透风的防线（真正花钱的那本在 app/core/usage.py，两件事互补）。
+CHAT_WINDOW_SECONDS = 60
+MAX_CHAT_CALLS_PER_WINDOW = 20
+_CHATS = defaultdict(list)
+
+
+def _chat_key(ip: str, user_id: str) -> str:
+    return f"{ip}|{user_id or 'anon'}"
+
+
 _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_REGISTERS, REGISTER_WINDOW_SECONDS),
             (_RESETS, RESET_WINDOW_SECONDS),
-            (_RESET_FAILS, FAILURE_WINDOW_SECONDS))
+            (_RESET_FAILS, FAILURE_WINDOW_SECONDS),
+            (_CHATS, CHAT_WINDOW_SECONDS))
 
 
 def _store():
@@ -175,6 +188,31 @@ def _client_ip(request: Request) -> str:
     if real:
         return real
     return request.client.host if request.client else "unknown"
+
+
+
+
+def chat_allowed(ip: str, user_id: str) -> bool:
+    """只看，不记账。记账是 note_chat()，两件事分开才能在"挡下时不花钱"上测得出来。"""
+    moment = _now()
+    _prune(moment)
+    return (len(_recent(_CHATS, _chat_key(ip, user_id), CHAT_WINDOW_SECONDS, moment))
+            < MAX_CHAT_CALLS_PER_WINDOW)
+
+
+def note_chat(ip: str, user_id: str) -> None:
+    """记一次尝试。调用点在**放行之后、叫模型之前**，所以失败的、模型报错的那次
+    一样占额度——成功还不还预算是这四本旧账定下来的裁决，第五本沿用。"""
+    _CHATS[_chat_key(ip, user_id)].append(_now())
+
+
+def chat_retry_after(ip: str, user_id: str) -> int:
+    key = _chat_key(ip, user_id)
+    moment = _now()
+    stamps = _recent(_CHATS, key, CHAT_WINDOW_SECONDS, moment)
+    if not stamps:
+        return CHAT_WINDOW_SECONDS
+    return max(1, int(CHAT_WINDOW_SECONDS - (moment - min(stamps))) + 1)
 
 
 def _too_many(retry_after: int) -> HTTPException:

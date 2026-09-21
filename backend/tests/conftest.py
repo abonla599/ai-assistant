@@ -111,6 +111,12 @@ def _stub_llm_calls(monkeypatch):
             yield piece
 
     monkeypatch.setattr(streaming, "stream_chat", fake_stream)
+
+    # 第五本限流账是进程内的单调时钟状态：不清的话，整套跑下来前面的测试把
+    # (127.0.0.1, default_user) 那 20 次额度用光，后面每一个 /v1/chat 都吃 429。
+    # 那不是产品坏了，是账本在测试之间串味——它自己的判据在 test_chat_throttle.py。
+    from app.core import auth_router as _auth_router
+    _auth_router._CHATS.clear()
     yield
 
 
