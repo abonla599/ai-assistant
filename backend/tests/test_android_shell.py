@@ -478,6 +478,29 @@ def test_each_signing_step_asserts_exactly_one_thing():
     assert "sha256sum" not in unlock and "[ -z" not in unlock, "第三步只查钥匙能不能打开"
 
 
+def test_a_manual_run_can_never_publish_a_release():
+    """workflow_dispatch 是"再验一次签名"的按钮，不是发版按钮。
+
+    为什么要在意这个：重贴 secret 之后要能自己点一下就知道红不红，而不是我每试一次
+    就把 v0.17 这个 tag 删了重钉一次。但 dispatch 事件里没有 tag，Release 的名字与
+    包里 versionName 无从对上——所以发版那一步必须只认 tag 事件，
+    而签名那几步在两种事件下都得真跑到。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    steps = {s["name"]: s for s in doc["jobs"]["release"]["steps"] if s.get("name")}
+    guard = "startsWith(github.ref, 'refs/tags/')"
+
+    for gated in ("Publish GitHub Release", "Check tag matches versionName"):
+        assert guard in (steps[gated].get("if") or ""), \
+            f"{gated} 没有只认 tag：手工触发会发出一份名字对不上版本号的公开 Release"
+    for always in (MISSING, CORRUPTED, UNREADABLE, "Assemble release APK"):
+        assert steps[always].get("if") is None, \
+            f"{always} 被加了 if：手工触发时正好跳过要验的那几步"
+
+
 def test_no_signing_key_lives_in_the_repository():
     """密钥文件一旦进了这个公开仓库，就等于把"能给他的用户发更新"的能力公开送人。
 

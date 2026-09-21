@@ -37,6 +37,7 @@ jobs:
       # tag 与实际装进 APK 的版本号必须对上，否则发出去的 Release 名字会和包内
       # versionName 不一致，事后谁也说不清用户装的到底是哪一版。
       - name: Check tag matches versionName
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eu
           declared=$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' android/app/build.gradle)
@@ -146,7 +147,10 @@ jobs:
              "ai-assistant-${GITHUB_REF_NAME#v}.apk"
           ls -l "ai-assistant-${GITHUB_REF_NAME#v}.apk"
 
+      # 手工 Run workflow 只用来验签名链，绝不发版：dispatch 事件里没有 tag，
+      # Release 的名字与包里 versionName 无从对上，发出去就是一个名字错乱的公开版本。
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
