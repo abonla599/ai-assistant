@@ -99,7 +99,6 @@ class ReActAgent:
                 response = get_llm_response(
                     model=self.model,
                     messages=messages,
-                    tools=self.tools_schema,
                     temperature=0.7
                 )
             except Exception as e:
@@ -199,11 +198,17 @@ class ReActAgent:
 """
 
     def _extract_tool_calls(self, response: str) -> List[Dict[str, Any]]:
-        """
-        从LLM响应中提取工具调用
-        支持两种格式：
-        1. 原生tool_calls格式（OpenAI/DeepSeek API格式）
-        2. JSON标记格式（备选）
+        """从模型的**文本回复**里找 ```json 代码块形式的工具调用。
+
+        只认这一种。原先这段注释写着"支持两种格式：1. 原生 tool_calls 格式"——那是
+        假的，而且假在根上：`core/llm_client.get_llm_response` 返回的是
+        `response.choices[0].message.content`，原生 `tool_calls` 在源头就被丢掉了，
+        这一层根本收不到。真要支持得先改那个签名（它有一条锁在 test_api.py 上），
+        不是在这里多写一句注释。
+
+        同一条理由，下面调用时不再传 tools：传了模型会生成结构化工具调用，而我们
+        把它扔掉——等于为一件不发生的事付钱。工具清单仍然写在系统提示里，
+        文本协议那条路照常走。
         """
         # 尝试解析为包含tool_calls的响应
         # 这里简化处理，实际使用时需要根据LLM API的具体响应格式调整

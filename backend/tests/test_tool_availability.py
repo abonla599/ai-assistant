@@ -8,6 +8,8 @@ DuckDuckGo（三个端点 curl 全 000）。清单照原样传给模型，模型
 所以这里钉的是：传给模型的清单 = 现在真能用的那几个。而且是**测出来的**，不是写死的
 名单——写死的那份在你装上 Docker 的第二天就变成新的谎。
 """
+from pathlib import Path
+
 import pytest
 
 from app.tools import availability
@@ -120,3 +122,19 @@ def test_help_does_not_advertise_what_cannot_run(monkeypatch):
     out = execute_tool("help", {})
     assert "execute_code" not in out, f"help 还在推荐必失败的工具：{out}"
     assert "calculator" in out
+
+
+def test_both_chat_paths_omit_the_tools_key_when_there_are_no_tools():
+    """两条聊天路径对"没有工具时该发什么"必须给同一个答案。
+
+    流式那条一直是对的（空数组不传，有些兼容网关对 tools=[] 直接 400），非流式那条
+    无条件传 `tools=self.tools_schema` —— 症状只在工具全被判为不可用时出现：界面走
+    流式没事，走非流式的调用方（以及以后任何直连 /v1/chat 的东西）400。
+    一条路径对一条路径错，正是本项目栽过两次的那个形状。
+    """
+    root = Path(__file__).resolve().parent.parent
+    pipeline = (root / "app" / "pipeline.py").read_text(encoding="utf-8")
+    streaming = (root / "app" / "core" / "streaming.py").read_text(encoding="utf-8")
+    assert "if self.tools_schema:" in pipeline, "非流式又无条件传 tools 了"
+    assert "if tools:" in streaming, "流式那条的守卫被改掉了"
+    assert 'tool_choice' in pipeline and 'tool_choice' in streaming

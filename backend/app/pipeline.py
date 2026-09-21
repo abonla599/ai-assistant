@@ -136,12 +136,14 @@ class ChatPipeline:
             msgs = list(messages)
 
             for turn in range(max_turns):
-                response = client.chat.completions.create(
-                    model=provider["model"],
-                    messages=msgs,
-                    tools=self.tools_schema,  # 传递工具定义
-                    tool_choice="auto"
-                )
+                kwargs = {"model": provider["model"], "messages": msgs}
+                if self.tools_schema:
+                    # 空数组不传：有些兼容网关对 tools=[] 直接 400。流式那条
+                    # (core/streaming.py) 一直是对的，两侧此前不一致——
+                    # 症状是"界面配得上、非流式接口 400"，只在工具全被禁用时出现。
+                    kwargs["tools"] = self.tools_schema
+                    kwargs["tool_choice"] = "auto"
+                response = client.chat.completions.create(**kwargs)
                 rounds += 1
                 u = getattr(response, "usage", None)
                 if u is not None:
