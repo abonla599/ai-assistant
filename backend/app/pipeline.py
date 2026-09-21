@@ -10,6 +10,7 @@ from app.core import usage   # 账本：与流式那一条同一个口径，别�
 # 复用 memory_router 已选定的后端单例：本模块此前自行 new 了第二个 MemoryManager，
 # 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
 from app.memory.memory_router import memory_manager
+from app.memory import signals
 from app.preference_analyzer import read_preference
 from app.tools.registry import get_available_tools_schema
 from app.tools.executor import execute_tool
@@ -66,8 +67,8 @@ class ChatPipeline:
         final_reply = self._call_model_with_tool_loop(model, enriched_messages,
                                                       provider_id=provider_id)
 
-        # 4. 自动保存对话摘要到记忆
-        self.save_interaction(user_input, final_reply)
+        # 4. 按信号自动保存记忆（多数轮次什么都不存，那是设计意图）
+        self.save_interaction(user_input)
 
         msg_id = str(uuid.uuid4())
         return {"reply": final_reply, "message_id": msg_id,
@@ -186,13 +187,23 @@ class ChatPipeline:
                               paid_by=provider.get("paid_by") or "operator",
                               tool_rounds=max(0, rounds - 1), ok=ok, **billed)
 
-    def save_interaction(self, user_input: str, ai_reply: str):
-        """将本轮对话摘要存入记忆"""
+    def save_interaction(self, user_input: str):
+        """按信号存记忆：只有这句话值得长期记住，才进库。
+
+        判据在 `app/memory/signals.py` 那一个地方。AI 的回答不再进摘要——那是模型
+        说过的话，不是关于这个人的事实；会话历史里本来就有全文，把它截 100 字塞进
+        向量库只制造检索噪声。
+        """
+        if self.memory is None:
+            return
+        signal = signals.classify(user_input)
+        if signal is None:
+            return
         try:
-            if self.memory is None:
+            hits = self.memory.search_memory(self.user_id, signal.quote, top_k=3)
+            if signals.is_repeat(signal.quote, [doc for doc, _, _ in hits]):
                 return
-            # 简单摘要：直接使用用户输入的前100字符作为记忆内容（后期可用模型摘要）
-            summary = f"用户问: {user_input[:100]}；AI答: {ai_reply[:100]}"
-            self.memory.add_memory(self.user_id, summary)
+            self.memory.add_memory(self.user_id, signal.quote,
+                                   metadata={"kind": signal.kind, "scope": signal.scope})
         except Exception as e:
             print(f"记忆保存失败: {e}")

@@ -474,10 +474,10 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
                     request.session_id, principal.user_id, "assistant",
                     full_text, message_id, used_memory_ids)
 
-            # 把本轮问答写入长期记忆，与非流式路径保持一致
+            # 按信号写长期记忆，判据与非流式路径同一处（pipeline.save_interaction）
             if pipe is not None:
                 try:
-                    pipe.save_interaction(user_text, full_text)
+                    pipe.save_interaction(user_text)
                 except Exception as e:
                     print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
                           file=sys.stderr, flush=True)
