@@ -10,8 +10,8 @@ android {
         applicationId "xyz.fenever.assistant"
         minSdk 23
         targetSdk 34
-        versionCode 16
-        versionName "0.16"
+        versionCode 17
+        versionName "0.17"
 
         // 壳里只钉地址，不写任何口令：公开仓库的 Actions 产物任何人都能下载，
         // 把 ACCESS_TOKEN 编进来等于把助手的付费调用额度公开送人。
