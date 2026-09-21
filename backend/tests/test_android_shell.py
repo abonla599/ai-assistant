@@ -385,6 +385,11 @@ def _run_bash_e(script: str, env: dict):
                           timeout=120, env=full)
 
 
+MISSING = "SIGNING KEY MISSING -> 没贴上来：secret APK_KEYSTORE_BASE64"
+CORRUPTED = "SIGNING KEY CORRUPTED -> 重贴 secret APK_KEYSTORE_BASE64（粘贴掉字了）"
+UNREADABLE = "SIGNING KEY UNREADABLE -> 重贴 secret APK_KEYSTORE_PASSWORD / APK_KEY_ALIAS"
+
+
 def test_the_key_diagnostic_reports_instead_of_just_going_red(tmp_path):
     """keytool 读不出密钥时，那一步必须把原因写成 annotation，而不是静默中止。"""
     fake_bin = tmp_path / "bin"
@@ -396,7 +401,7 @@ def test_the_key_diagnostic_reports_instead_of_just_going_red(tmp_path):
                        "exit 1\n", encoding="utf-8")
     keytool.chmod(0o755)
 
-    run = _run_bash_e(_workflow_step("Verify the restored key is usable"), {
+    run = _run_bash_e(_workflow_step(UNREADABLE), {
         "JAVA_HOME": fake_bin.parent.as_posix(),
         "APK_KEYSTORE": (tmp_path / "release.jks").as_posix(),
         "APK_KEYSTORE_PASSWORD": "whatever",
@@ -410,29 +415,67 @@ def test_the_key_diagnostic_reports_instead_of_just_going_red(tmp_path):
 
 
 def test_a_mangled_paste_is_named_as_a_paste_problem(tmp_path):
-    """base64 掉一个字符时，报的必须是"粘贴坏了"，而不是往后漂成"口令不对"。"""
+    """base64 掉一个字符时，报的必须是「粘贴坏了」，而不是往后漂成「口令不对」。"""
     import base64
     import hashlib
 
-    runner_temp = tmp_path / "runner"
-    runner_temp.mkdir()
-    github_env = tmp_path / "github_env"
-    github_env.write_text("", encoding="utf-8")
     payload = base64.b64encode("一把假密钥的字节".encode("utf-8")).decode()
     good = hashlib.sha256("一把假密钥的字节".encode("utf-8")).hexdigest()
 
-    env = {"RUNNER_TEMP": runner_temp.as_posix(), "GITHUB_ENV": github_env.as_posix(),
-           "KEY_B64": payload, "EXPECTED_SHA": good}
+    def paste(value, expected):
+        """按顺序跑「落盘」与「核指纹」两步，返回第二步的结果。
 
-    broken = _run_bash_e(_workflow_step("Restore the pinned signing key"),
-                         {**env, "KEY_B64": payload[:-2] + "AA"})
-    assert broken.returncode != 0, "指纹不一致却放行了"
-    assert "::error::" in broken.stdout and "粘贴" in broken.stdout, broken.stdout
+        第二步读的是第一步写在 RUNNER_TEMP 里的那个文件，所以两步必须连着跑——
+        单独跑第二步会因为文件不存在而红，那是测试脚手架的错，不是产品的错。
+        """
+        runner_temp = tmp_path / f"runner-{value[-2:]}-{expected[:6]}"
+        runner_temp.mkdir(exist_ok=True)
+        env_file = runner_temp / "github_env"
+        env_file.write_text("", encoding="utf-8")
+        env = {"RUNNER_TEMP": runner_temp.as_posix(), "GITHUB_ENV": env_file.as_posix(),
+               "KEY_B64": value, "EXPECTED_SHA": expected}
+        first = _run_bash_e(_workflow_step(MISSING), env)
+        if first.returncode != 0:
+            return first
+        return _run_bash_e(_workflow_step(CORRUPTED), env)
 
-    matched = _run_bash_e(_workflow_step("Restore the pinned signing key"), env)
-    assert matched.returncode == 0, f"指纹一致反而失败了：{matched.stdout} {matched.stderr}"
-    written = github_env.read_text(encoding="utf-8")
-    assert "APK_KEYSTORE=" in written and (runner_temp / "release.jks").exists(), written
+    mangled = paste(payload[:-2] + "AA", good)
+    assert mangled.returncode != 0, "指纹不一致却放行了"
+    assert "::error::" in mangled.stdout and "粘贴" in mangled.stdout, mangled.stdout
+
+    intact = paste(payload, good)
+    assert intact.returncode == 0, f"指纹一致反而失败了：{intact.stdout} {intact.stderr}"
+
+    absent = paste("", good)
+    assert absent.returncode != 0 and "缺少 secret" in absent.stdout, absent.stdout
+
+
+def test_each_signing_step_asserts_exactly_one_thing():
+    """三步各查一件事，而且**结论写在步骤名里**——这是这套诊断能被远程读懂的唯一途径。
+
+    未鉴权调 /actions/runs/{id}/jobs 时 `output` 整个是空的（2026-09-21 实测），
+    ::error:: 的正文只有登录的人看得见。所以"哪一步红了"必须自己就是那句话：
+    MISSING = 没贴、CORRUPTED = 贴坏、UNREADABLE = 口令或 alias 不对。
+    一步只断言一件事，否则名字就开始说谎。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    steps = doc["jobs"]["release"]["steps"]
+    names = [s.get("name") for s in steps]
+    ordered = [MISSING, CORRUPTED, UNREADABLE]
+    assert all(n in names for n in ordered), f"三步不齐：{names}"
+    assert names.index(MISSING) < names.index(CORRUPTED) < names.index(UNREADABLE)
+    assert names.index(UNREADABLE) < names.index("Assemble release APK"), \
+        "验钥匙得排在构建之前：让 gradle 去报「签不出来」就晚了"
+    for n in ordered:
+        assert "->" in n and ("secret" in n or "PASSWORD" in n), f"步骤名没点名要重贴哪个：{n}"
+
+    presence, digest, unlock = (_workflow_step(n) for n in ordered)
+    assert "sha256sum" not in presence, "第一步不该顺带核指纹：那会让 CORRUPTED 那步永远轮不到红"
+    assert "[ -z" not in digest and "-z \"" not in digest, "第二步不该顺带查空"
+    assert "sha256sum" not in unlock and "[ -z" not in unlock, "第三步只查钥匙能不能打开"
 
 
 def test_no_signing_key_lives_in_the_repository():

@@ -53,9 +53,27 @@ jobs:
       # 证书 SHA-256 指纹就不相同，于是"检查更新"永远装不上，只能卸载重装。
       # 宁可发布失败，也不再发一把新钥匙签的包：那等于给所有老用户再造一次"必须重装"，
       # 而这件事一旦发生就收不回来。
-      - name: Restore the pinned signing key
+      # 三步各查一件事，而且结论写在**步骤名**里。为什么不用 ::error:: 的 annotations：
+      # 未鉴权调 /actions/runs/{id}/jobs 时整个 output 字段是空的（2026-09-21 实测），
+      # 错误正文只有登录的人看得见。而这几步存在的意义恰恰是"红得让人看懂"——
+      # 不用登录，看哪一步红了就知道该重贴哪个 secret。
+      - name: "SIGNING KEY MISSING -> 没贴上来：secret APK_KEYSTORE_BASE64"
         env:
           KEY_B64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+        run: |
+          set -eu
+          if [ -z "${KEY_B64:-}" ]; then
+            echo "::error::缺少 secret APK_KEYSTORE_BASE64。没有钉住的签名密钥，这次构建"
+            echo "::error::只能签出一把新钥匙，老用户装不上——所以宁可停在这里。"
+            echo "::error::生成与填写办法见 tools/make-apk-keystore.ps1，然后到仓库"
+            echo "::error::Settings -> Secrets and variables -> Actions -> New repository secret 贴进去。"
+            exit 1
+          fi
+          printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "APK_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: "SIGNING KEY CORRUPTED -> 重贴 secret APK_KEYSTORE_BASE64（粘贴掉字了）"
+        env:
           # 这不是秘密：它是那把密钥**文件**的 SHA-256，知道摘要推不出内容。它存在的理由
           # 是把"粘贴时坏了一个字符"从一次猜谜变成一句明说——base64 掉一个字符通常照样
           # 解得开，于是失败点会漂到后面的 keytool / gradle 上，报的是"口令不对"或
@@ -63,28 +81,15 @@ jobs:
           EXPECTED_SHA: 7b62bf68a3427963c6f8d8ecbe5fa6164458eb0020f3dc608216e14e1952c5a5
         run: |
           set -eu
-          if [ -z "${KEY_B64:-}" ]; then
-            echo "::error::缺少 secret APK_KEYSTORE_BASE64。没有钉住的签名密钥，这次构建"
-            echo "::error::只能签出一把新钥匙，老用户装不上——所以宁可停在这里。"
-            echo "::error::生成与填写办法见 tools/make-apk-keystore.ps1，然后到仓库"
-            echo "::error::Settings → Secrets and variables → Actions → New repository secret 贴进去。"
-            exit 1
-          fi
-          printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
           got=$(sha256sum "$RUNNER_TEMP/release.jks" | cut -d' ' -f1)
           if [ "$got" != "$EXPECTED_SHA" ]; then
             echo "::error::解出来的密钥与登记的指纹不一致：期望 $EXPECTED_SHA，实得 $got"
             echo "::error::这几乎总是粘贴时掉了或换了一个字符：打开 ai-assistant-keystore"
-            echo "::error::\secrets-to-paste.txt，把 APK_KEYSTORE_BASE64 那一整行重抄一遍覆盖。"
+            echo "::error::目录里的 secrets-to-paste.txt，把 APK_KEYSTORE_BASE64 那一整行重抄覆盖。"
             exit 1
           fi
-          echo "APK_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      # 单独一步先把钥匙本身验一遍。Assemble 失败时报的是"签不出来"，而真正的原因通常
-      # 在这把钥匙上：口令不对、alias 不对、或那 4764 个字符在粘贴时坏了一个。
-      # 判据走 ::error::/::notice:: 而不是普通输出——日志正文要登录才能读，annotations
-      # 未鉴权也能看见，"CI 红了但没人知道为什么"这件事不该需要人来翻。
-      - name: Verify the restored key is usable
+      - name: "SIGNING KEY UNREADABLE -> 重贴 secret APK_KEYSTORE_PASSWORD / APK_KEY_ALIAS"
         env:
           APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
@@ -92,7 +97,7 @@ jobs:
           set -uo pipefail
           # 显式关掉 -e。Actions 默认用 `bash -e` 跑 run 块：keytool 一失败整步就地中止，
           # 下面那些 ::error:: 一个都发不出来。第一次用它查案就是这么栽的——步骤红了、
-          # annotations 是空的，等于白加一层。
+          # 什么正文都没留下。
           set +e
           out=$("$JAVA_HOME/bin/keytool" -list -keystore "$APK_KEYSTORE" -storetype PKCS12 \
                   -storepass "$APK_KEYSTORE_PASSWORD" -alias "$APK_KEY_ALIAS" -v 2>&1)
@@ -101,7 +106,6 @@ jobs:
             printf '%s\n' "$out" | tail -6 | sed 's/%/%25/g' \
               | while IFS= read -r line; do echo "::error::keytool: $line"; done
             echo "::error::密钥文件本身是对的（上一步刚核过指纹），读不出来只能是口令或 alias 不对"
-            echo "::error::要检查的是 APK_KEYSTORE_PASSWORD 与 APK_KEY_ALIAS 这两个 secret。"
             exit 1
           fi
           printf '%s\n' "$out" | grep -m1 'SHA256:' | tr -d ' \t' | sed 's/%/%25/g' \
