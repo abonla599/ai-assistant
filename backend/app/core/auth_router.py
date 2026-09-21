@@ -185,13 +185,22 @@ def _note_reset(ip: str) -> None:
     _RESETS[ip].append(_now())
 
 
+LOOPBACK = ("127.0.0.1", "::1")
+
+
 def _client_ip(request: Request) -> str:
     # 只信 Cloudflare 那一个头。X-Forwarded-For 是一条可被追加的链，取首项等于
     # 取攻击者写的第一句假话；cf-connecting-ip 由边缘改写，才是可信来源。
+    #
+    # 但"边缘改写过"这件事得有个判据，否则它只是一句信仰：现网的形状是后端只绑
+    # 回环、公网流量必须经 cloudflared 从 127.0.0.1 转进来，所以**对端不是回环**
+    # 就意味着这个请求没走隧道——那它带来的 cf-connecting-ip 是客户端自己写的。
+    # 少这一道，哪天有人把 PORT/HOST 改成对外监听，五本限流账就同时变成可绕过的。
+    peer = request.client.host if request.client else ""
     real = request.headers.get("cf-connecting-ip", "").strip()
-    if real:
+    if real and peer in LOOPBACK:
         return real
-    return request.client.host if request.client else "unknown"
+    return peer or "unknown"
 
 
 

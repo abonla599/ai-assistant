@@ -96,7 +96,8 @@ class Orchestrator:
                 print(f"[Orchestrator] 子任务内容: {subtask}")
 
                 # 使用Executor（内部调用ReAct Agent）执行单个子任务
-                result = self.executor.execute_task(subtask)
+                # user_id 往下传：子任务里的工具要知道是谁在调（needs_user 那类不给身份就拒绝）
+                result = self.executor.execute_task(subtask, user_id=task.user_id)
 
                 # 保存结果
                 task.results.append(result)

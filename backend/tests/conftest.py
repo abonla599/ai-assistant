@@ -188,7 +188,12 @@ def _auth_env_pristine(request):
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    # 对端写成回环，是为了让测试夹具长得像现网：真实部署里后端只绑 127.0.0.1，
+    # 公网流量一律由 cloudflared 从回环转进来。auth_router._client_ip 因此只在
+    # "对端是回环"时才认 CF-Connecting-IP——夹具若用 TestClient 默认的
+    # client="testclient"，那条判据会把每个请求都当成直连源站，五本限流账的
+    # 按来源计费在测试里就全落回同一个桶（这次改判据时三条预算测试就是这么红的）。
+    return TestClient(app, client=("127.0.0.1", 54321))
 
 @pytest.fixture
 def sample_messages():

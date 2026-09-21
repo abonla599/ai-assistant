@@ -259,17 +259,10 @@ def start_background_scheduler():
     bg_thread.start()
     print("🚀 后台偏好分析定时任务已启动（只重算偏好摘要，不改写记忆权重）")
 
-    # 启动反馈文件监听器（仅当 auto_weight_adjuster 可用时）
-    if auto_weight_adjuster is not None and FEEDBACK_FILE:
-        watcher_thread = threading.Thread(
-            target=auto_weight_adjuster.start_feedback_watcher,
-            kwargs={"feedback_file_path": FEEDBACK_FILE},
-            daemon=True
-        )
-        watcher_thread.start()
-        print("🔁 实时反馈闭环监听器已启动！")
-    else:
-        print("⚠️ 实时反馈监听未启动（缺少 auto_weight_adjuster 或 watchdog）")
+    # 这里原来还起一条"实时反馈闭环监听器"线程，并打印"🔁 实时反馈闭环监听器已启动！"。
+    # 它没做事：调用时没传 callback，auto_weight_adjuster 退化成默认 lambda，只往
+    # stdout 印一句"未提供回调函数"。真正改权重的是 /v1/feedback 的同步路径，需求已经
+    # 被它覆盖。留着的结果是一行永远在说谎的启动日志——本项目最贵的那类东西。
 
 
 
@@ -925,4 +918,10 @@ install_site(app)
 
 # ---------- 启动入口 ----------
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 默认绑回环。此前这里硬写 0.0.0.0，而 `.env.example` 写着 `HOST=127.0.0.1` 却
+    # 没有任何代码读它——配置说谎 + 局域网里任何人都能直连源站。打包版
+    # (run_backend.py) 一直绑的是 127.0.0.1，源码跑没理由更宽。
+    # 对外只应经 Cloudflare 隧道；真要换部署形态，改这个环境变量，不是改代码。
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

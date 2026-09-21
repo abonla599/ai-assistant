@@ -35,7 +35,10 @@ from fastapi.testclient import TestClient
 from app.core.auth import RESET_FAIL, auth_store
 from app.main import app
 
-client = TestClient(app)
+# 对端必须是回环：现网所有请求都由 cloudflared 从 127.0.0.1 转进来，
+# `_client_ip` 因此只在回环对端时才认 CF-Connecting-IP（见 conftest 里同一条注释）。
+# 用默认的 client="testclient" 会让下面每一本限流账都落回同一个桶。
+client = TestClient(app, client=("127.0.0.1", 54321))
 
 # enforced fixture 把 bootstrap 口令设成这个值，管理端点在它之下才有意义
 BOOT = {"Authorization": "Bearer boot-token"}
@@ -942,3 +945,32 @@ def test_no_endpoint_can_grant_the_admin_role():
 
     for path in ("/v1/admin/users/x/role", "/v1/admin/promote"):
         assert client.post(path, json={"role": "admin"}).status_code == 404, path
+
+
+def test_a_forged_source_header_from_outside_the_tunnel_is_ignored():
+    """CF-Connecting-IP 只在请求真的来自隧道时才算数。
+
+    上一版把这条写成"谁带这个头就信谁"，理由是对的（边缘会覆写它）但判据是空的：
+    哪天 HOST/PORT 被改成对外监听（`main.py` 以前就硬写过 0.0.0.0，`.env.example`
+    里那句 HOST=127.0.0.1 根本没人读），任何人都能给自己发一张"我不是我"的假来源，
+    五本限流账同时作废——而登录、注册、找回三题全都挂在这五本账上。
+
+    判据用"对端是不是回环"：现网后端只绑 127.0.0.1，公网流量必须经 cloudflared
+    从回环进来，所以对端不是回环就说明这个请求没走隧道。
+    """
+    from app.core.auth_router import MAX_REGISTRATIONS_PER_SOURCE as CAP
+
+    outside = TestClient(app, client=("203.0.113.7", 44444))   # 直连源站的访客
+    payload = {"username": "", "password": PW, **RECOVERY}
+
+    def forged(name, fake_ip):
+        body = dict(payload, username=name)
+        return outside.post("/v1/auth/register", json=body,
+                            headers={"CF-Connecting-IP": fake_ip})
+
+    for i in range(CAP):
+        # 每次都换一个假来源：头若被信了，这 CAP 次会各自开一个桶、全部成功
+        assert forged(f"伪造{i}", f"198.51.100.{i}").status_code == 200
+    blocked = forged("伪造超额", "198.51.100.250")
+    assert blocked.status_code == 429, (
+        "假造的 CF-Connecting-IP 被当成了真来源：每个来源一个预算变成了无限预算")

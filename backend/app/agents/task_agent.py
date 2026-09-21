@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # backend 目录
 
 import json
 from app.core.llm_client import get_llm_response
+from app.tools.executor import execute_tool
 
 class TaskAgent:
     """
@@ -15,12 +16,17 @@ class TaskAgent:
     - 接收任务描述
     - 循环调用 LLM + 工具，直到得到最终答案
     """
-    def __init__(self, name: str, model: str, tools_schema: list, tools: dict, system_prompt: str = ""):
+    def __init__(self, name: str, model: str, tools_schema: list, tools: dict,
+                 system_prompt: str = "", user_id: str = None):
+        # user_id 一路从凭据里带下来：工具执行必须知道"是谁在调"，否则 needs_user
+        # 那类工具（查某个人自己的数据）只能一律拒绝。缺身份是 fail-closed，
+        # 不是"当成没身份的人"。
         self.name = name
         self.model = model
         self.tools_schema = tools_schema
         self.tools = tools
         self.system_prompt = system_prompt
+        self.user_id = user_id
         self.max_turns = 8
         self.verbose = True
 
@@ -70,13 +76,11 @@ class TaskAgent:
                     if self.verbose:
                         print(f"    [{self.name}] 调用工具: {tool_name}({tool_args})")
 
-                    # 执行工具
-                    tool_info = self.tools.get(tool_name)
-                    if tool_info:
-                        func = tool_info["function"] if isinstance(tool_info, dict) else tool_info
-                        result = func(**tool_args)
-                    else:
-                        result = f"未知工具: {tool_name}"
+                    # 执行工具走执行器，不直接 call 注册表里的函数对象。差三件事：
+                    # ① needs_user 的工具必须由服务端补身份，模型自己填的 user_id 作废；
+                    # ② 输出要按上下文预算截断；③ 未知工具/参数错误要回一句模型读得懂的话。
+                    # 绕过它，这三条同时失效。
+                    result = execute_tool(tool_name, tool_args, user_id=self.user_id)
 
                     # 将结果反馈给模型
                     messages.append({"role": "assistant", "content": response})

@@ -45,7 +45,9 @@ def _top_level_imports():
 def _declared_names():
     """requirements.txt 里声明的发行包名（去掉版本约束与行内注释）。"""
     names = set()
-    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig 不是讲究：这份清单文件头带 BOM，用 "utf-8" 读会把第一行读成
+    # "﻿annotated-doc"，strip() 去不掉 U+FEFF——于是清单的第一项对这条锁永久隐形。
+    for line in REQUIREMENTS.read_text(encoding="utf-8-sig").splitlines():
         line = line.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
@@ -100,3 +102,21 @@ def test_there_is_exactly_one_dependency_manifest():
     # 解释器也要一致：容器此前用 3.11，而 CI/venv/打包用的都是 3.12
     assert re.search(r"FROM python:3\.12", dockerfile), \
         "容器的 Python 版本又和 CI/打包那份错开了（chromadb 对上限敏感）"
+
+
+def test_the_manifest_is_parsed_from_its_first_line():
+    """正向对照：清单第一项必须被认出来。
+
+    上一版这条锁用 encoding="utf-8" 读一份带 BOM 的文件，于是第一行变成
+    "\ufeffannotated-doc"——它既匹配不上任何 import，也永远不会让谁变红，
+    整份清单的第一项就这样对检查隐形了。这类"检不到东西的检查看起来全绿"
+    是本仓最贵的失败形状，所以这里不判"读法对不对"，直接判结果：第一项在不在。
+    """
+    names = _declared_names()
+    assert names, "清单解析为空，下面两条断言都是空的"
+    assert not [n for n in names if "\ufeff" in n], f"有包名带 BOM 残留：{sorted(n for n in names if chr(0xFEFF) in n)}"
+    first_line = next(l.split("#", 1)[0].strip() for l in
+                      REQUIREMENTS.read_text(encoding="utf-8-sig").splitlines()
+                      if l.strip() and not l.lstrip().startswith("#"))
+    first_name = re.split(r"[<>=!~;\[ ]", first_line, maxsplit=1)[0].strip().lower()
+    assert first_name in names, f"清单第一行 {first_line!r} 没被解析出包名，那第一项就检不到"

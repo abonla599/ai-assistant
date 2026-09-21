@@ -9,6 +9,9 @@
 """
 import pytest
 
+import re
+from pathlib import Path
+
 from app.tools.executor import execute_tool
 
 # 导入 builtin_tools 触发 @register_tool 装饰器执行，否则注册表是空的
@@ -218,3 +221,31 @@ def test_zero_exit_code_adds_no_noise(monkeypatch):
     result = builtin_tools.execute_code("print('hi')", "python")
     assert "退出码" not in result
     assert "hi" in result
+
+
+# ---------- 智能体那条路不许有第二套工具 ----------
+
+def test_the_agent_path_has_no_second_tool_registry():
+    """`agents/` 里不许再养一套平行的工具。
+
+    这里原先是 `agents/temp_tools.py`：calculator 用裸 `eval`（同一件事在
+    builtin_tools 里已经修过一遍，第二份就把那个修复绕回去了），web_search 是一张
+    写死的问答表——"马斯克""火箭回收"命中就返回背好的句子——而它的 schema 对模型
+    写着"搜索互联网获取信息"。模型于是把自己的幻觉当成检索结果引用进回答，
+    全程没有任何报错。这正是本项目最贵的那类失败：效果没了，还一声不响。
+    """
+    root = Path(__file__).resolve().parent.parent
+    agents = root / "app" / "agents"
+    assert not (agents / "temp_tools.py").exists(), "平行工具表又回来了"
+
+    src = (agents / "executor.py").read_text(encoding="utf-8")
+    assert "from app.tools.registry import" in src, "Executor 不再取全局注册表"
+    assert "get_available_tools_schema" in src, \
+        "取的是全量清单而不是按可用性筛过的那份：没 Docker 时 execute_code 又会出现在模型眼前"
+
+    for name in ("task_agent.py", "react_agent.py", "executor.py", "orchestrator.py"):
+        body = (agents / name).read_text(encoding="utf-8")
+        assert not re.search(r"\beval\(", body), f"{name} 里出现了 eval"
+    task = (agents / "task_agent.py").read_text(encoding="utf-8")
+    assert "execute_tool(tool_name, tool_args, user_id=self.user_id)" in task, (
+        "TaskAgent 又绕过执行器直接 call 注册表里的函数：needs_user 与输出预算同时失效")
