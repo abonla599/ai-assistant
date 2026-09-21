@@ -161,7 +161,7 @@ class ChatPipeline:
                         args = json.loads(tool_call.function.arguments)
                         print(f"[Pipeline] 调用工具: {name}({args})")
                         try:
-                            result = execute_tool(name, args)
+                            result = execute_tool(name, args, user_id=self.user_id)
                         except Exception as e:
                             result = f"工具执行错误: {e}"
                         # 将工具结果作为 tool 消息添加

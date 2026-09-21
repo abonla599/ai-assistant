@@ -1,12 +1,16 @@
 # 全局工具注册表
 tools_registry = {}
 
-def register_tool(name: str, description: str, parameters: dict, available=None):
+def register_tool(name: str, description: str, parameters: dict, available=None,
+                  needs_user: bool = False):
     """
     装饰器：将函数注册为工具。
     name: 工具唯一名，如 "calculator"
     description: 工具描述，给模型看
     parameters: JSON Schema 格式的参数定义
+    needs_user: 这条工具读写的是"某个具体的人"的数据。标了它，执行器会把**服务端算出来的**
+               当前登录者塞进去，模型给的同名参数一律作废——否则 schema 里多一个 user_id，
+               就等于请模型编一个归属人。
     available: 可选，无参可调用，返回这个工具"现在能不能真跑成"。
                依赖外部条件的工具（要 Docker、要够得着某个搜索源）必须给出：
                否则模型每次都会看见它、调用它、拿回一句失败，再凭失败硬答。
@@ -16,7 +20,8 @@ def register_tool(name: str, description: str, parameters: dict, available=None)
             "function": func,
             "description": description,
             "parameters": parameters,
-            "available": available
+            "available": available,
+            "needs_user": needs_user,
         }
         return func
     return decorator

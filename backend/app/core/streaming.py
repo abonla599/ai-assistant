@@ -122,7 +122,7 @@ def stream_chat(
                 # 与 pipeline.py 那行 [Pipeline] 调用工具 同一用途：这条路上曾经静默了
                 # 几个月，出事只能靠猜"到底有没有执行"。
                 print(f"[Stream] 调用工具: {slot['name']}({slot['arguments']})", flush=True)
-                result = _run_tool(slot["name"], slot["arguments"])
+                result = _run_tool(slot["name"], slot["arguments"], user_id=user_id)
                 msgs.append({"role": "tool", "tool_call_id": slot["id"],
                              "content": result})
 
@@ -138,7 +138,7 @@ def stream_chat(
                           paid_by=provider.get("paid_by") or "operator",
                           tool_rounds=max(0, rounds - 1), ok=ok, **billed)
 
-def _run_tool(name: str, raw_arguments: str) -> str:
+def _run_tool(name: str, raw_arguments: str, user_id: str = None) -> str:
     """执行一个工具调用，永远回一个字符串。
 
     工具炸了不能把整条 SSE 打断：那时用户看到的是半句话加一个断流，而模型永远
@@ -149,6 +149,6 @@ def _run_tool(name: str, raw_arguments: str) -> str:
     except json.JSONDecodeError as e:
         return f"工具参数不是合法 JSON，没能执行：{e}"
     try:
-        return str(execute_tool(name, args))
+        return str(execute_tool(name, args, user_id=user_id))
     except Exception as e:  # 工具内部任何异常都只影响这一次调用
         return f"工具执行错误: {e}"
