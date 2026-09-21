@@ -4,8 +4,12 @@
 证明功能对，而在于**不让注释重新变成第二个事实来源**——下面这条就是为一次真实闪退写的。
 """
 
+import os
 import re
+import shutil
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHELL_SRC = REPO_ROOT / "android" / "app" / "src" / "main" / "java"
@@ -351,6 +355,84 @@ def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
     generator = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
     assert "-storetype PKCS12" in generator, \
         "生成脚本靠 JDK 默认格式，而 gradle 写死了 PKCS12——两边有一边会先漂"
+
+
+def _workflow_step(name: str) -> str:
+    """取 release-apk.yml 里那一步的 shell 正文（原样，不改一个字符）。"""
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    for step in doc["jobs"]["release"]["steps"]:
+        if step.get("name") == name:
+            return step["run"]
+    raise AssertionError(f"发布流里没有这一步：{name}")
+
+
+def _run_bash_e(script: str, env: dict):
+    """按 Actions 的方式跑一段 shell：`bash -e`。
+
+    为什么必须真跑而不是读文本：第一次写"把失败翻译成人话"那两步时忘了 Actions 默认
+    带 `-e`，keytool 一非零整步就地中止，::error:: 一个都没发出去——诊断本身坏了，
+    而且坏得没有任何声音（步骤是红的，annotations 是空的）。读文本看不出这件事。
+    """
+    import subprocess
+
+    if not shutil.which("bash"):
+        pytest.skip("这台机器上没有 bash，跑不了这段 shell")
+    full = {**os.environ, **env}
+    return subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                          timeout=120, env=full)
+
+
+def test_the_key_diagnostic_reports_instead_of_just_going_red(tmp_path):
+    """keytool 读不出密钥时，那一步必须把原因写成 annotation，而不是静默中止。"""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    keytool = fake_bin / "keytool"
+    keytool.write_text("#!/bin/sh\n"
+                       "echo 'keytool error: java.io.IOException: ' >&2\n"
+                       "echo 'keystore was tampered with, or password was incorrect' >&2\n"
+                       "exit 1\n", encoding="utf-8")
+    keytool.chmod(0o755)
+
+    run = _run_bash_e(_workflow_step("Verify the restored key is usable"), {
+        "JAVA_HOME": fake_bin.parent.as_posix(),
+        "APK_KEYSTORE": (tmp_path / "release.jks").as_posix(),
+        "APK_KEYSTORE_PASSWORD": "whatever",
+        "APK_KEY_ALIAS": "ai-assistant",
+    })
+    assert run.returncode != 0, "钥匙读不出来却成功了：这一步白加了"
+    assert "::error::" in run.stdout, (
+        f"没有任何 annotation，红得没有原因（多半是 -e 抢在中止前）：\n"
+        f"stdout={run.stdout!r}\nstderr={run.stderr!r}")
+    assert "tampered" in run.stdout, f"keytool 的原话没被搬出来：{run.stdout!r}"
+
+
+def test_a_mangled_paste_is_named_as_a_paste_problem(tmp_path):
+    """base64 掉一个字符时，报的必须是"粘贴坏了"，而不是往后漂成"口令不对"。"""
+    import base64
+    import hashlib
+
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    github_env = tmp_path / "github_env"
+    github_env.write_text("", encoding="utf-8")
+    payload = base64.b64encode("一把假密钥的字节".encode("utf-8")).decode()
+    good = hashlib.sha256("一把假密钥的字节".encode("utf-8")).hexdigest()
+
+    env = {"RUNNER_TEMP": runner_temp.as_posix(), "GITHUB_ENV": github_env.as_posix(),
+           "KEY_B64": payload, "EXPECTED_SHA": good}
+
+    broken = _run_bash_e(_workflow_step("Restore the pinned signing key"),
+                         {**env, "KEY_B64": payload[:-2] + "AA"})
+    assert broken.returncode != 0, "指纹不一致却放行了"
+    assert "::error::" in broken.stdout and "粘贴" in broken.stdout, broken.stdout
+
+    matched = _run_bash_e(_workflow_step("Restore the pinned signing key"), env)
+    assert matched.returncode == 0, f"指纹一致反而失败了：{matched.stdout} {matched.stderr}"
+    written = github_env.read_text(encoding="utf-8")
+    assert "APK_KEYSTORE=" in written and (runner_temp / "release.jks").exists(), written
 
 
 def test_no_signing_key_lives_in_the_repository():

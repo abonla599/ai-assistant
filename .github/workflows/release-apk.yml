@@ -56,6 +56,11 @@ jobs:
       - name: Restore the pinned signing key
         env:
           KEY_B64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+          # 这不是秘密：它是那把密钥**文件**的 SHA-256，知道摘要推不出内容。它存在的理由
+          # 是把"粘贴时坏了一个字符"从一次猜谜变成一句明说——base64 掉一个字符通常照样
+          # 解得开，于是失败点会漂到后面的 keytool / gradle 上，报的是"口令不对"或
+          # "签不出来"，谁也不会想到是复制粘贴的问题（v0.17 第一次就这么绕了一圈）。
+          EXPECTED_SHA: 7b62bf68a3427963c6f8d8ecbe5fa6164458eb0020f3dc608216e14e1952c5a5
         run: |
           set -eu
           if [ -z "${KEY_B64:-}" ]; then
@@ -66,6 +71,13 @@ jobs:
             exit 1
           fi
           printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          got=$(sha256sum "$RUNNER_TEMP/release.jks" | cut -d' ' -f1)
+          if [ "$got" != "$EXPECTED_SHA" ]; then
+            echo "::error::解出来的密钥与登记的指纹不一致：期望 $EXPECTED_SHA，实得 $got"
+            echo "::error::这几乎总是粘贴时掉了或换了一个字符：打开 ai-assistant-keystore"
+            echo "::error::\secrets-to-paste.txt，把 APK_KEYSTORE_BASE64 那一整行重抄一遍覆盖。"
+            exit 1
+          fi
           echo "APK_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
       # 单独一步先把钥匙本身验一遍。Assemble 失败时报的是"签不出来"，而真正的原因通常
@@ -78,13 +90,18 @@ jobs:
           APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
           set -uo pipefail
+          # 显式关掉 -e。Actions 默认用 `bash -e` 跑 run 块：keytool 一失败整步就地中止，
+          # 下面那些 ::error:: 一个都发不出来。第一次用它查案就是这么栽的——步骤红了、
+          # annotations 是空的，等于白加一层。
+          set +e
           out=$("$JAVA_HOME/bin/keytool" -list -keystore "$APK_KEYSTORE" -storetype PKCS12 \
                   -storepass "$APK_KEYSTORE_PASSWORD" -alias "$APK_KEY_ALIAS" -v 2>&1)
           rc=$?
           if [ "$rc" -ne 0 ]; then
             printf '%s\n' "$out" | tail -6 | sed 's/%/%25/g' \
               | while IFS= read -r line; do echo "::error::keytool: $line"; done
-            echo "::error::落盘的签名密钥读不出来（rc=$rc）：口令、alias、base64 三者之一不对"
+            echo "::error::密钥文件本身是对的（上一步刚核过指纹），读不出来只能是口令或 alias 不对"
+            echo "::error::要检查的是 APK_KEYSTORE_PASSWORD 与 APK_KEY_ALIAS 这两个 secret。"
             exit 1
           fi
           printf '%s\n' "$out" | grep -m1 'SHA256:' | tr -d ' \t' | sed 's/%/%25/g' \
@@ -97,6 +114,7 @@ jobs:
           APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
         run: |
           set -uo pipefail
+          set +e                      # 同上：失败要能被翻译出来，而不是让 -e 抢着中止
           gradle -p android --no-daemon --stacktrace assembleRelease 2>&1 \
             | tee "$RUNNER_TEMP/assemble.log"
           rc=${PIPESTATUS[0]}
