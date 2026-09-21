@@ -31,4 +31,19 @@ jobs:
       # "忘了往清单里加一行"而悄悄失去守护。路径写错或用例被清空时 pytest 以 5 退出，
       # 所以这条命令不会退化成"零用例也绿"。
       - name: Run tests
-        run: python -m pytest backend/tests/ -q --tb=short
+        run: |
+          # 关掉 -e。今天这条管道以 tee 结尾，`bash -e` 还咬不到它（管道的退出码取最后一个
+          # 命令，而 tee 总是成功）——但"把 ::error:: 发出去"不该依赖"管道末尾恰好是个
+          # 会成功的命令"这种巧合：哪天有人把 tee 拿掉、或改成 `pytest ...; rc=$?`，
+          # -e 就会抢在 annotation 之前中止整步。发布流那三步第一次就是这么栽的。
+          # 也就是说：撤掉下面这行，本仓那条锁今天不会红（判据见 test_android_shell.py 的说明）。
+          set +e
+          python -m pytest backend/tests/ -q --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          rc=${PIPESTATUS[0]}
+          # 未鉴权读不到日志正文，但读得到 annotations（2026-09-21 实测：/check-runs/{id}/annotations
+          # 匿名可取，而 jobs 的 output 是空的）。所以"哪一条锁红了"的载体是 ::error::，
+          # 不是那三百行日志——问这件事的人可能就在手机上。
+          # head -40：一屏读得完；sed 把 % 转成 %25，否则消息里的 % 会打断 workflow 命令语法。
+          grep -E '^(FAILED|ERROR)' "$RUNNER_TEMP/pytest.log" | head -40 | sed 's/%/%25/g' \
+            | while IFS= read -r line; do echo "::error title=pytest 红了一条::$line"; done
+          exit $rc

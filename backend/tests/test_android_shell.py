@@ -541,3 +541,64 @@ def test_the_keystore_generator_refuses_to_overwrite():
     assert "REFUSING TO OVERWRITE" in script, "覆盖前不再拦一道"
     assert "exit 2" in script, "拦下来却不以非零退出：脚本照样被下一步当成成功"
     assert "-validity 10000" in script, "证书有效期缩短会让未来的包签不上（Android 要求签名证书有效到 2033 之后）"
+
+
+def test_the_ci_test_step_names_the_lock_that_went_red(tmp_path):
+    """CI 的「Run tests」必须把红的那条锁的**名字**送进一个不登录也看得见的地方。
+
+    2026-09-21 实测两次：未鉴权调 /actions/runs/{id}/jobs 时 `output` 整个是空的，
+    annotations 里只有 "Process completed with exit code 1"。于是"哪条测试红了"这个问题
+    要先登录、再翻三百行日志才有答案——而这件事发生在我手机上（只想知道哪红了的时候）。
+    发布流那边靠"结论写进步骤名"绕过了它；pytest 没法拆成多步，所以换个载体：
+    把 FAILED / ERROR 那几行原样抄成 ::error::，它们进 annotations，
+    而 /check-runs/{id}/annotations 未鉴权可读（同一轮实测）。
+
+    这条锁**真跑**那段 shell，喂一个必定失败的假 pytest：既要它保持非零退出
+    （否则红被吞掉，CI 就永远绿着骗人），又要它把测试名报出来；再反过来喂一次全绿，
+    要求这一步跟着绿、且不凭空造错误标注。三种改法会被抓到：撤掉那段 echo、
+    把要抄的前缀写错、把 `exit $rc` 换成 `exit 0`。
+
+    一件它**不**能抓到的事，写下来免得这句话变成谎：那段 shell 里的 `set +e` 今天
+    是保险而不是必需——管道以 tee 结尾，`bash -e` 看的是最后一个命令的退出码，
+    撤掉 set +e 这一步今天照样发得出 annotation。它防的是"下一个人把 tee 拿掉"那天。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "tests.yml")
+                         .read_text(encoding="utf-8"))
+    steps = doc["jobs"]["test"]["steps"]
+    script = next((s.get("run") for s in steps if s.get("name") == "Run tests"), None)
+    assert script, "tests.yml 里没有「Run tests」这一步了：这条锁跟着改名一起失效"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    py = fake_bin / "python"
+    py.write_text("#!/bin/sh\n"
+                  'echo "...."\n'
+                  'echo "FAILED backend/tests/test_demo.py::test_the_demo - AssertionError: 演示"\n'
+                  'echo "1 failed in 0.01s"\n'
+                  "exit 1\n", encoding="utf-8")
+    py.chmod(0o755)
+
+    run = _run_bash_e(script, {
+        "PATH": fake_bin.as_posix() + os.pathsep + os.environ.get("PATH", ""),
+        "RUNNER_TEMP": tmp_path.as_posix(),          # 不许往工作树里写临时文件
+    })
+    assert run.returncode != 0, "pytest 失败了这一步却成功了：CI 会永远绿着骗人"
+    assert "::error" in run.stdout, (
+        "红得没有原因——FAILED 那几行没被抄成 annotation，而未鉴权只能看见 annotations。"
+        f"\nstdout={run.stdout!r}\nstderr={run.stderr!r}")
+    assert "test_the_demo" in run.stdout, f"抄了，但没抄到名字：{run.stdout!r}"
+    assert not list(REPO_ROOT.glob("pytest.log")), "那段 shell 把临时文件写进了工作树"
+
+    # 反过来一遍：全绿时这一步必须跟着绿，而且不许凭空造错误标注。
+    # 只测失败路径的锁会把"永远判红"这种改法放过去——那等于把 CI 变成装饰。
+    py.write_text("#!/bin/sh\n"
+                  'echo "784 passed in 175.10s"\n'
+                  "exit 0\n", encoding="utf-8")
+    ok = _run_bash_e(script, {
+        "PATH": fake_bin.as_posix() + os.pathsep + os.environ.get("PATH", ""),
+        "RUNNER_TEMP": tmp_path.as_posix(),
+    })
+    assert ok.returncode == 0, f"全绿却被判红：{ok.stdout!r} {ok.stderr!r}"
+    assert "::error" not in ok.stdout, "没失败却发了错误标注：下一次没人相信它了"
