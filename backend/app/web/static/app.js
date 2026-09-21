@@ -1224,6 +1224,27 @@ async function runStream(holder) {
   const node = $("messages").querySelector(".messages-inner").lastElementChild;
   if (node) node.classList.add("typing");
   const body = node ? node.querySelector(".msg-body") : null;
+  // 标记"这里正在流式渲染"：markdown.js 的 highlightPending() 补扫会跳过带
+  // data-live 的容器——半截代码块此刻高亮是无效功，流结束后的全量渲染才补。
+  // 摘除在 finally 里，renderMessages 整棵重建之前。
+  if (body) body.setAttribute("data-live", "1");
+
+  /* chunk 到达的频率远高于帧率：每个 chunk 都全量重渲 + 强制滚底，长回复是
+     O(n²)，而且用户在生成期间一旦上翻，下一帧就被拽回底部。改成把「渲染 +
+     滚底」合并进 rAF，每帧最多一次（rAF 不可用时退回定时器，兜底风格同
+     site.js）；滚底只在本来贴底时做，上翻阅读不被打断。 */
+  const host = $("messages");
+  const raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 32); };
+  const cancelRaf = window.cancelAnimationFrame || clearTimeout;
+  let pending = 0;
+  const paint = () => {
+    pending = 0;
+    if (!body) return;
+    // 贴底要先于渲染判断：渲染会撑高滚动区，渲染后再算就永远"不贴底"了。
+    const stick = host.scrollHeight - host.scrollTop - host.clientHeight < 120;
+    MD.render(body, holder.content, true);
+    if (stick) host.scrollTop = host.scrollHeight;
+  };
 
   const lastUser = state.messages[state.messages.length - 2] || {};
   const sent = outbound();
@@ -1238,7 +1259,7 @@ async function runStream(holder) {
         sessionId: pref.sessionId, signal: state.controller.signal },
       (chunk) => {
         holder.content += chunk;
-        if (body) { MD.render(body, holder.content); scrollBottom(); }
+        if (body && !pending) pending = raf(paint);
       });
     if (done && done.message_id) holder.message_id = done.message_id;
     if (done && done.model) holder.model = done.model;
@@ -1267,7 +1288,11 @@ async function runStream(holder) {
       }
     }
   } finally {
+    // 未决的那帧要取消：流结束后 renderMessages 会整棵重建消息区，
+    // 迟到的 paint 会打到已经摘掉的旧节点上。
+    if (pending) cancelRaf(pending);
     if (node) node.classList.remove("typing");
+    if (body) body.removeAttribute("data-live");
     state.streaming = false;
     state.controller = null;
     $("stopBtn").classList.add("hidden");
@@ -1858,12 +1883,6 @@ function autosize(el) {
   el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + "px";
 }
 
-/* ---------------- 注册（设置页那份入口） ----------------
- * 与首屏弹层打的是同一个端点、共用同一条收尾（afterAuth）：这里只负责读自己的
- * 两个字段。两条路都保留是因为场景不同——首屏是"刚打开就得先过这道"，设置页是
- * "已经登录过、想换/再加一个账号"。
- */
-
 /* ---------------- 事件绑定 ---------------- */
 function bind() {
   $("openSidebar").onclick = openSidebar;
@@ -2038,13 +2057,22 @@ function setupKeyboardAware() {
   const vv = window.visualViewport;
   if (!vv || window.innerWidth > 860) return;
 
+  // visualViewport 的 resize/scroll 是成串到来的，每次都直接写 body 高度
+  // 会强制同步布局：用 rAF 合并成每帧最多一次（兜底风格同 runStream）。
+  const raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 32); };
+  let pending = 0;
   const apply = () => {
+    pending = 0;
     document.body.style.height = `${Math.round(vv.height)}px`;
     if (document.activeElement === $("input")) scrollBottom();
   };
-  vv.addEventListener("resize", apply);
-  vv.addEventListener("scroll", apply);
-  $("input").addEventListener("focus", () => setTimeout(apply, 120));
+  const schedule = () => { if (!pending) pending = raf(apply); };
+  vv.addEventListener("resize", schedule);
+  vv.addEventListener("scroll", schedule);
+  // focus 那一下也走 schedule：键盘弹起的 resize 事件与这次补跑会撞在同一帧，
+  // 各自直接 apply 就是同帧双写 body 高度；进 rAF 合并路径后一帧最多执行一次，
+  // setTimeout 仍保证至少补跑一次（rAF 不触发的老 WebView 上兜底路径也在里面）。
+  $("input").addEventListener("focus", () => setTimeout(schedule, 120));
   $("input").addEventListener("blur", () => {
     setTimeout(() => { document.body.style.height = ""; }, 150);
   });

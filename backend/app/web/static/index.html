@@ -464,7 +464,8 @@
 
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
-  <script src="vendor/highlight.min.js"></script>
+  <!-- highlight.js 不在关键路径上：由 markdown.js 在首次遇到代码块时懒加载，
+       样式表仍在这里同步引入（体积小，且避免代码块先裸奔一帧再变色）。 -->
   <script src="markdown.js"></script>
   <script src="api.js"></script>
   <!-- shell.js 必须排在 app.js 之前：它定义的全局 SHELL 是 app.js 里三处 setOwner 与
