@@ -83,7 +83,7 @@ def test_update_memory(enforced):
 def test_summarize_goes_through_the_provider_store(monkeypatch):
     """摘要不许再硬编码 gpt-3.5-turbo：那是绕过 provider 单源的第二份事实来源。
 
-    MemoryManager 的 self.client 是给**嵌入**用的（api_key + apiyi 代理），摘要一直
+    MemoryManager 的 self.client 是给**嵌入**用的（.env 里的 api_key + 嵌入地址），摘要一直
     借用它并写死一个 OpenAI 模型名，等于"界面配的是 DeepSeek，记账记到别人家"，
     而且那个模型名在代理侧多半根本不存在——失败只打印一行警告就退化成截断。
     """
@@ -181,3 +181,45 @@ def test_decay():
     weights = [r["weight"] for r in results]
     # 衰减后权重应该小于原始权重 1.0
     assert all(w < 1.0 for w in weights), f"权重应全部小于1.0，实际: {weights}"
+
+
+def test_the_embedding_endpoint_is_config_not_source():
+    """嵌入口的地址与模型名一律从 .env 读，源码里一个都不写。
+
+    两条理由，缺一条都不该改：① 这个仓库是公开的，"哪家在替我们做嵌入"本身就是不想
+    公开的信息——所以它出现在**任何**被跟踪文件里都算泄露，注释与测试样例也不例外
+    （以前它就写在 memory_manager 的 base_url 里，还散在两份 .env.example 和 spec 注释里）；
+    ② 地址写死在源码里等于第二份事实来源，换服务商要改代码重新打包，而 .env 不用。
+
+    名字在这里是拼出来的：这条锁扫的是全仓被跟踪的文件，写全了自己就第一个红。
+    """
+    import subprocess
+    from pathlib import Path
+
+    vendor = ("api" + "yi").lower()
+    root = Path(__file__).resolve().parents[2]
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=str(root),
+                            capture_output=True, timeout=60)
+    assert listed.returncode == 0, "问不到 git，这条锁就空转了"
+    offenders = []
+    for rel in listed.stdout.split(b"\0"):
+        if not rel:
+            continue
+        path = root / rel.decode()
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in raw[:4096]:
+            continue
+        if vendor in raw.decode("utf-8", "replace").lower():
+            offenders.append(str(rel))
+    assert not offenders, f"这些被跟踪的文件里出现了嵌入服务商的名字：{offenders}"
+
+    src = (Path(__file__).resolve().parent.parent / "app" / "memory"
+           / "memory_manager.py").read_text(encoding="utf-8")
+    # 判据是"读的那一句还在"，不是那个名字在文件里出现过——名字同时也写在提示语里，
+    # 只数名字的话，把 getenv 换掉照样绿（这条锁刚才就是这么被自己骗过一次）。
+    for item in ('os.getenv("EMBEDDINGS_BASE_URL")', 'os.getenv("EMBEDDINGS_MODEL")',
+                 'os.getenv("api_key")'):
+        assert item in src, f"memory_manager 不再从配置读嵌入参数了：{item}"

@@ -34,7 +34,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 本应用嵌入走向云端（apiyi），不加载任何本地模型；以下均是被可选依赖链
+        # 本应用嵌入走的是 .env 里配的云端地址，不加载任何本地模型；以下均是被可选依赖链
         # 拖进来的死重，合计约 600MB。onnxruntime 保留：chromadb 默认 embedding
         # function 可能引用它。
         'torch', 'torchaudio', 'torchvision',

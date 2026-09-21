@@ -45,32 +45,43 @@ class MemoryManager:
                 self.embed_model = "injected"
                 self._dummy_embed = True
             else:
-                api_key = os.getenv("api_key")
+                # 嵌入口的三样（密钥、地址、模型名）一律从配置读，源码里一个都不写死。
+                # 地址原先硬编码在下一行现在的位置上——这个仓库是公开的，"哪家在替我们
+                # 做嵌入"本身就是不想公开的信息，写在源码里等于写在官网上。
+                api_key = (os.getenv("api_key") or "").strip()
+                base_url = (os.getenv("EMBEDDINGS_BASE_URL") or "").strip()
+                embed_model = (os.getenv("EMBEDDINGS_MODEL") or "").strip()
 
-                if api_key:
+                if api_key and not base_url:
+                    print("⚠️ 配了 api_key 但没配 EMBEDDINGS_BASE_URL：嵌入接口不知道该往哪儿打，"
+                          "按未配置云端嵌入处理。")
+
+                if api_key and base_url and embed_model:
                     try:
                         self.client = OpenAI(
                             api_key=api_key,
-                            base_url="https://api.apiyi.com/v1",
+                            base_url=base_url,
                             # 嵌入接口一旦因信任锚不对而握手失败，下面会静默降级成
                             # 伪嵌入：不报错，但语义检索再也读不到记忆。所以这里必须
                             # 与聊天用同一个信任锚，见 app/core/tls.py
                             http_client=httpx.Client(verify=system_ssl_context())
                         )
-                        self.embed_model = "text-embedding-3-small"
-                        # 验证 API 是否可用
-                        self.client.embeddings.create(model=self.embed_model, input=["test"])
-                        print("✅ 使用 OpenAI 嵌入模型")
+                        self.embed_model = embed_model
+                        # 启动时就打一发：地址写错、key 作废、模型名不存在，这些都要在
+                        # 这里露出来，而不是等到第一次写记忆时才发现库是空的。
+                        self.client.embeddings.create(model=embed_model, input=["test"])
+                        print(f"✅ 使用云端嵌入模型 {embed_model}")
                     except Exception as e:
-                        print(f"⚠️ OpenAI 嵌入不可用: {e}，尝试本地模型")
+                        print(f"⚠️ 云端嵌入不可用: {e}，尝试本地模型")
                         self._init_local_embed()
                 else:
-                    print("⚠️ 未配置 api_key，尝试本地模型")
+                    print("⚠️ 未配置云端嵌入（api_key / EMBEDDINGS_BASE_URL / EMBEDDINGS_MODEL "
+                          "缺任意一项），尝试本地模型")
                     self._init_local_embed()
 
                 if self._dummy_embed:
                     print("⚠️ 记忆检索已降级为伪嵌入（全零向量），语义检索结果不可信。"
-                          "请配置 api_key 或安装 sentence-transformers。")
+                          "请补齐 .env 里的三个嵌入配置项，或安装 sentence-transformers。")
 
             self.chroma_client = chromadb.PersistentClient(path=self.persist_dir)
             self.collection = self._open_collection(collection_name)
@@ -167,7 +178,7 @@ class MemoryManager:
             return text
         try:
             # 用哪个模型、打哪个地址、花谁的额度，一律由 provider 单源决定。这里原先
-            # 写死 "gpt-3.5-turbo"、还借用**嵌入**那个客户端（api_key + apiyi 代理），
+            # 写死 "gpt-3.5-turbo"、还借用**嵌入**那个客户端（.env 里的 api_key + 嵌入地址），
             # 是全仓最后一处绕过 providers.py 的模型调用：界面配 DeepSeek 时摘要却按
             # OpenAI 的模型名发出去，多半当场失败，只留一行警告再退化成截断。
             provider = provider_store.resolve()
