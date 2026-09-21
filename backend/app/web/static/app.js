@@ -1431,13 +1431,28 @@ function renderAccounts() {
  *  test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。
  *  点下去不改这一行的文字：原生那侧已经立刻弹了一条"正在检查更新…"的 Toast，
  *  这里再写一个"正在检查…"就会在对话框关掉之后一直挂着假状态。 */
+// 服务端构建戳：/health 里的 build 字段，来自打包前生成的 version.txt。
+// null = 还没取到；"" = 取到了但这台机器没有戳（老包或手工拷走的包）。
+let serverBuild = null;
+
+function fetchServerBuild() {
+  if (serverBuild !== null) return;
+  serverBuild = "";                       // 先占位，避免每次打开设置都发一次请求
+  fetch("/health").then((res) => res.json()).then((j) => {
+    const next = typeof j.build === "string" ? j.build : "";
+    if (next !== serverBuild) { serverBuild = next; renderAboutRows(); }
+  }).catch(() => {});                      // 取不到就维持"网页版"那句，不猜一个号
+}
+
 function renderAboutRows() {
   const btn = $("rowUpdate"), link = $("rowUpdateLink");
   if (!btn || !link) return;
   const caps = SHELL.present ? (SHELL.capabilities() || {}) : {};
-  const ver = typeof caps.version === "string" && caps.version ? "v" + caps.version : "";
+  const shellVer = typeof caps.version === "string" && caps.version ? "v" + caps.version : "";
   const native = SHELL.present && !!caps.update;
-  const shown = native ? btn : (SHELL.present ? link : null);
+  // 浏览器里也露"去下载页"那颗：这一行问的是"有没有新安装包"，跟有没有桥无关。
+  // 只有新壳才调桥去查（它会比对已装的版本），其余一律给链接——包括旧壳和纯浏览器。
+  const shown = native ? btn : link;
 
   [btn, link].forEach((el) => {
     el.classList.toggle("hidden", el !== shown);
@@ -1445,27 +1460,28 @@ function renderAboutRows() {
     // 不补这一条的话卡片底下会多出一条分隔线。
     el.classList.toggle("set-only", el === shown);
   });
-  // 浏览器里两行全藏，这时候最后一行是「服务地址」——同一个理由再判一次，
-  // 不然那一行底下会挂着一条通向看不见的行的分隔线。
-  const conn = $("connRow");
-  if (conn) conn.classList.toggle("set-only", !shown);
 
-  // 版本这一行：唯一来源是壳报上来的 versionName（它来自 android/app/build.gradle）。
-  // 旧壳连 version 都不报时宁可说"未知"，也不许拿一个写死的数字顶上——那是第二个
-  // 事实来源，而且它会一直显示得理直气壮。
+  // 版本这一行：壳在时报壳的 versionName（唯一来源 android/app/build.gradle），
+  // 壳不在或旧壳不报时报**服务端**的构建戳（唯一来源是打包时的 git tag）。
+  // 两个都不许写死在前端：抄一份进来，下次升版必然有一处是旧的，而且它显示得理直气壮。
   const box = $("versionVal");
   if (box) {
-    box.textContent = SHELL.present ? (ver || "未知（这一版壳不上报版本号）")
-                                    : "网页版 · 界面随服务端更新，无需安装";
+    const parts = [];
+    if (shellVer) parts.push("壳 " + shellVer);
+    if (serverBuild) parts.push("服务端 " + serverBuild);
+    box.textContent = parts.length ? parts.join(" · ")
+                                   : "网页版 · 界面随服务端更新，无需安装";
   }
-
-  if (!shown) { $("updateVal").textContent = ""; $("updateLinkVal").textContent = ""; return; }
+  if (serverBuild === null) fetchServerBuild();
 
   if (native) {
-    $("updateVal").textContent = ver;
+    $("updateVal").textContent = shellVer || serverBuild || "当前版本";
+    $("updateLinkVal").textContent = "";
     btn.onclick = () => { SHELL.checkUpdate(); };
   } else {
-    $("updateLinkVal").textContent = (ver || "当前版本") + " · 去下载页";
+    $("updateVal").textContent = "";
+    link.classList.add("set-only");
+    $("updateLinkVal").textContent = (shellVer || serverBuild || "当前版本") + " · 去下载页";
   }
 }
 

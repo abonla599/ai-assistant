@@ -209,12 +209,6 @@
             <div class="set-row set-plain">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.6"/></svg></span>
               <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span></div>
-            <button class="set-row" id="themeBtn">
-              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
-              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
-            <div class="set-row set-plain" id="connRow">
-              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
-              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
             <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
                  只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
                  两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a
@@ -230,6 +224,12 @@
                href="https://github.com/abonla599/ai-assistant/releases/latest">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
               <span class="set-lbl">检查更新</span><span class="set-val" id="updateLinkVal"></span><span class="set-go">↗</span></a>
+            <button class="set-row" id="themeBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
+              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <div class="set-row set-plain set-only" id="connRow">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
+              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
           </div>
 
           <!-- 退出 = 先让服务端作废这一枚令牌，再把这个人从本机清单里去掉。

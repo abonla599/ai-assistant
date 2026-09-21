@@ -282,9 +282,14 @@ def health_check():
 
     状态码不随检查结果变化（永远 200）：坏的是配置，重启修不好它，而"非 200 就拉起"
     的守护会因此每分钟杀掉一次正在进行的对话。判据给日志和运维，不给进程管理器。
+
+    `build` 是这套部署的构建戳（构建时由 git tag 生成，见 app/core/buildinfo.py）。
+    放在这里而不是新开一个端点：这是免鉴权的公开信息（版本号本来就在公开仓库的 tag
+    上），而「设置 → 关于」那一行正是没有登录态的时候也要能显示。
     """
+    from app.core.buildinfo import build_version
     from app.core.selfcheck import run
-    return run()
+    return {"build": build_version(), **run()}
 
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,

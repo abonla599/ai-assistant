@@ -1880,27 +1880,37 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     assert "!!caps.update" in body, "分流不看壳报的能力，旧壳上就会摆一个死按钮"
     shown = [x for x in body.splitlines() if "const shown =" in x]
     assert shown, "读不到那一行选谁的决定"
-    assert "SHELL.present" in shown[0] and "null" in shown[0], (
-        "没有壳（手机浏览器）时这一行必须整个藏掉；摆一行「检查更新」会让人以为"
-        "网页能自更新，而界面本来每次都是从服务器现加载的那一版：" + shown[0].strip())
+    # 2026-09-21 他把这一行点名要放在「版本」旁边，包括手机浏览器里。于是"藏掉"不再是
+    # 答案，但这条锁要防的两件事一件都没松：① 不许有死按钮——没有桥就不许露那颗
+    # button，只能露会真的跳走的 <a>；② 不许让人以为网页能自己更新——所以链接那一颗
+    # 的文字必须写明"去下载页"。
+    assert "native ? btn : link" in shown[0], (
+        "分流不再是「有桥才给 button」，旧壳与浏览器上就会出现点了没反应的死按钮："
+        + shown[0].strip())
+    assert "去下载页" in body, (
+        "浏览器里那颗必须写明是去下载页：只写「检查更新」会被读成"
+        "“这个页面能自己更新”，而界面本来就是每次从服务器现加载的那一版")
 
 
-def test_the_update_row_lives_under_关于_not_设备():
-    """用户点名要把「检查更新」挪到 关于 那一组、且在服务地址下面。
+def test_the_update_row_sits_right_under_the_version_row():
+    """「检查更新」紧跟在「版本」那一行下面——这是 2026-09-21 他点名的位置。
 
-    位置是这次的要求本身，所以钉位置不是吹毛求疵：它在设备组里能跑、在关于组里也能跑，
-    而只有用户找不找得到这一件事区分两种做法。
+    位置本身就是要求，所以钉位置不是吹毛求疵：这一行在设备组里能跑、在服务地址下面
+    也能跑，而"换安装包这件事和这是什么版本是同一个问题的两面"只有挨着才成立。
+    它同时还得留在 关于 组里——挪回设备组会让这条锁当场红，那是有意留的对照。
     """
     html = _html()
     dev = html.index('class="set-group">设备')
     about = html.index('class="set-group">关于')
-    conn = html.index('id="connInfo"')
+    ver = html.index('id="versionVal"')
+    theme = html.index('id="themeBtn"')
     assert about > dev, "分组顺序被改了：正向对照不成立，下面那几条都是空的"
 
     for rid in ('id="rowUpdate"', 'id="rowUpdateLink"'):
         at = html.index(rid)
         assert at > about, f"{rid} 还在「设备」那一组里"
-        assert at > conn, f"{rid} 要排在服务地址下面，不是上面"
+        assert ver < at < theme, (
+            f"{rid} 要排在「版本」下面、「外观」上面（当前 ver={ver} at={at} theme={theme}）")
 
 
 def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():

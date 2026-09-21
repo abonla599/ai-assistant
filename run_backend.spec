@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 # chromadb 用配置项按字符串路径动态导入 chromadb.api.rust，原生实现又在独立包
@@ -18,9 +20,13 @@ a = Analysis(
     # 三个前端目录都要显式列出：漏一个的后果是"源码版全对、EXE 版 404"，
     # 而这条不会让任何测试变红（上次 static 缺失导致 EXE 启动即崩就是同一形状）。
     # site 是官网：漏了它，冻结版的 GET / 会因为找不到 index.html 而 500。
+    # 最后那一项是构建戳：打包前由 `git describe --tags --abbrev=0 > version.txt` 生成。
+    # 它不进版本库——版本号的唯一来源是 git tag，抄一份进 Python 或 JS 就是第二个事实
+    # 来源。文件不在就不列：漏了它「设置 → 关于」只是显示不出服务端版本，不该让构建失败。
     datas=[('backend/app/web/static', 'app/web/static'),
            ('backend/app/web/admin', 'app/web/admin'),
-           ('backend/app/web/site', 'app/web/site')] + chroma_datas + binding_datas + fitz_datas,
+           ('backend/app/web/site', 'app/web/site')] + chroma_datas + binding_datas + fitz_datas \
+          + ([('version.txt', '.')] if os.path.isfile('version.txt') else []),
     hiddenimports=[
         'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto',
         'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto',

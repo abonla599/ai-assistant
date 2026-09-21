@@ -22,8 +22,14 @@ __pycache__/
 *.pyc
 
 # PyInstaller 打包产物（.spec 是构建配置，需要入库，不要忽略）
+# build_new 是 run_backend.spec 里写的工作目录名，和 build/ 同一种东西。
 dist/
 build/
+build_new/
+# 构建戳：打包前由 `git describe --tags --abbrev=0` 生成，随包一起打进去。
+# 版本号的唯一来源是 git tag——把它抄进源码或前端就是第二个事实来源，下次升版
+# 必然有一处是旧的、而且显示得理直气壮。所以只挡不追：文件本来就该每次构建现生成。
+version.txt
 
 # Flutter 编译产物（保留源码，排除编译输出）
 flutter_app/build/
