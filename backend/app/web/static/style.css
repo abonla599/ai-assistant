@@ -39,8 +39,9 @@
 }
 
 [data-theme="light"] {
-  --accent: #0f9d76;
-  --accent-hover: #0c8a67;
+  /* 主按钮白字对比度：#0f9d76 只有 3.4:1（AA 要 4.5:1），压到 #0a7d5e 约 5.1:1 */
+  --accent: #0a7d5e;
+  --accent-hover: #086a4f;
   --accent-soft: #e6f6f0;
   --accent-2: #5566f0;
   --accent-2-soft: #e9ecfd;
