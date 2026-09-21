@@ -1454,12 +1454,10 @@ function renderAboutRows() {
   // 只有新壳才调桥去查（它会比对已装的版本），其余一律给链接——包括旧壳和纯浏览器。
   const shown = native ? btn : link;
 
-  [btn, link].forEach((el) => {
-    el.classList.toggle("hidden", el !== shown);
-    // 露出来的这颗是这一组最后一行：另一颗只是 display:none，:last-child 看不见它，
-    // 不补这一条的话卡片底下会多出一条分隔线。
-    el.classList.toggle("set-only", el === shown);
-  });
+  [btn, link].forEach((el) => el.classList.toggle("hidden", el !== shown));
+  // 这里不再动 set-only（那一类只干一件事：抹掉行底的分隔线）。以前这一行是
+  // 「关于」卡片里的最后一行，另一颗只是 display:none、:last-child 看不见它，
+  // 所以要手动补；现在它挪到了「版本」下面，上下都有行，分隔线本来就该在。
 
   // 版本这一行：壳在时报壳的 versionName（唯一来源 android/app/build.gradle），
   // 壳不在或旧壳不报时报**服务端**的构建戳（唯一来源是打包时的 git tag）。
@@ -1480,7 +1478,6 @@ function renderAboutRows() {
     btn.onclick = () => { SHELL.checkUpdate(); };
   } else {
     $("updateVal").textContent = "";
-    link.classList.add("set-only");
     $("updateLinkVal").textContent = (shellVer || serverBuild || "当前版本") + " · 去下载页";
   }
 }
