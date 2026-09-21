@@ -60,6 +60,9 @@ generate_docx.py
 # `/tools/*` 和下面的 `_diag_*.py` 两条排除，等于永远进不了仓库——每换一次会话就得
 # 重新找一遍 android.jar 与 junit jar 的路径。纯逻辑、只读源码，不含任何凭据。
 !/tools/shell_jvm_tests.py
+# 密钥形态扫描器。它自己必须是**被扫的对象**（写坏了形状规则会当场红），所以它得进
+# 版本库、进 CI 那次 checkout。纯标准库、只读文件，不碰网络也不写盘。
+!/tools/secret_scan.py
 server.log
 tunnel.log
 PATH_backup_*.txt

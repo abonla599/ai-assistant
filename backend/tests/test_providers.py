@@ -13,7 +13,7 @@ client = TestClient(app)
 
 def _payload(**over):
     base = {"label": "Qwen 视觉", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "sk-real-looking-key-123456", "model": "qwen-vl-max",
+            "api_key": "sk-real-looking-key-123456", "model": "qwen-vl-max",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
             "supports_vision": True, "is_default": False}
     base.update(over)
     return base
@@ -62,7 +62,7 @@ UNUSABLE_DEFAULT = {
 }
 USABLE_OTHER = {
     "id": "live-other", "label": "真能用", "base_url": "https://b.invalid/v1",
-    "api_key": "sk-real-looking-key-123456", "model": "deepseek-chat",
+    "api_key": "sk-real-looking-key-123456", "model": "deepseek-chat",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
     "supports_vision": False, "is_default": False,
 }
 
@@ -114,7 +114,7 @@ def test_models_endpoint_default_skips_unusable_provider():
 def test_providers_never_leak_plaintext_key():
     saved = client.post("/v1/providers", json=_payload()).json()["provider"]
     body = client.get("/v1/providers").text
-    assert "sk-real-looking-key-123456" not in body
+    assert "sk-real-looking-key-123456" not in body  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
     # 这两行原本钉的是 `startswith("sk-")` 与"里面有省略号"——那正是被改掉的行为：
     # 前缀认得出厂商、长度框得下爆破面，掩码自己就成了第二个泄露点。现在只许末四位。
     assert saved["api_key_masked"].endswith("3456"), saved["api_key_masked"]
@@ -297,7 +297,7 @@ def test_seeded_deepseek_is_the_vision_capable_one(monkeypatch):
     """
     from app.core import providers
 
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real-looking-key-123456")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-real-looking-key-123456")  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
     seeded = providers._seed_from_env()
     assert len(seeded) == 1
@@ -325,7 +325,7 @@ def test_placeholder_deepseek_key_seeds_nothing(monkeypatch):
 # 值放在同目录的 provider_keys.json。文件与目录仍由 PROVIDERS_DB_PATH 一个变量
 # 指走（密钥文件从记录路径推导，不再新开一个环境变量——两处事实来源会漂移）。
 
-STORED_KEY = "sk-adminkey-99887766554433"
+STORED_KEY = "sk-adminkey-99887766554433"  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
 
 
 def _fresh_store(tmp_path):

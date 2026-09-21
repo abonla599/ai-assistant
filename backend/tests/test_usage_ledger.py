@@ -213,7 +213,7 @@ def test_a_provider_says_whose_money_it_is(tmp_path):
     from app.core.providers import ProviderStore
     store = ProviderStore(path=str(tmp_path / "providers.json"))
     saved = store.upsert({"label": "内置", "base_url": "https://a.invalid/v1",
-                          "api_key": "sk-some-real-looking-key", "model": "m"})
+                          "api_key": "sk-some-real-looking-key", "model": "m"})  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
     def paid_of(ident):
         # 按下标取会读错行：一个空目录的 store 会从 .env 先播种出一条，
         # 那条排在最前，而我这条在后面。
