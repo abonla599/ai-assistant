@@ -34,14 +34,26 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
    两个按钮贴到标题后面。既然 PWA 不再需要，它就该住在本页自己的表里。 */
 .spacer { flex: 1; }
 .top h1 { font-size: 20px; margin: 0; }
+/* 标题与统计数字吃 PWA 那份主渐变（--accent → --accent-2）：同一进程同源服务，
+   视觉也不该有第二套真相。clip 不被支持时整块跳过，字仍是原色。 */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .top h1, .stat b {
+    background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
 .who { color: var(--text-2); font-size: 13px; }
 
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 18px 0 4px;
   padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .tab { flex: 1 1 auto; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px;
-  background: transparent; color: var(--text-2); font-size: 14px; cursor: pointer; }
-.tab:hover { background: var(--bg-hover); color: var(--text); }
-.tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  background: transparent; color: var(--text-2); font-size: 14px; cursor: pointer;
+  transition: background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease; }
+.tab:hover { background: var(--bg-hover); color: var(--text); transform: translateY(-1px); }
+.tab.active { background: linear-gradient(120deg, var(--accent-soft), var(--accent-2-soft));
+  border-color: var(--accent); color: var(--accent); }
 
 .sec { margin-top: 22px; }
 .sec h2 { font-size: 15px; margin: 0 0 4px; }
@@ -52,7 +64,9 @@ input.num { width: 86px; flex: none; }
 
 /* ---------- 卡片与状态 ---------- */
 .card { background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 14px 16px; }
+  border-radius: 20px; padding: 14px 16px;
+  transition: border-color .18s ease, box-shadow .18s ease; }
+.card:hover { border-color: var(--accent); box-shadow: 0 10px 28px -18px var(--accent-2-soft); }
 .stat { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .stat b { font-size: 26px; font-weight: 600; color: var(--accent); }
 .stat span { color: var(--text-3); font-size: 12.5px; }
@@ -77,7 +91,9 @@ td.acts button { margin: 0 2px 2px 0; }
 .task-list { display: flex; flex-direction: column; gap: 8px; }
 .task { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   border: 1px solid var(--line); background: var(--bg-soft);
-  border-radius: 12px; padding: 10px 12px; }
+  border-radius: 14px; padding: 10px 12px;
+  transition: border-color .18s ease, transform .18s ease; }
+.task:hover { border-color: var(--accent); transform: translateY(-1px); }
 .task .tm { flex: 1 1 220px; min-width: 0; }
 .task .tm b { display: block; font-size: 14.5px; font-weight: 600;
   overflow-wrap: anywhere; }
@@ -97,7 +113,16 @@ textarea.req:focus, input:focus, select:focus { border-color: var(--accent); out
 .sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: flex;
   align-items: center; justify-content: center; padding: 16px; z-index: 50; }
 .sheet .card { max-width: 560px; width: 100%; max-height: 86vh; overflow: auto;
-  box-shadow: var(--shadow); }
+  box-shadow: var(--shadow);
+  background: var(--glass-strong);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5); }
+/* 玻璃拟态的回退：老 WebView 没有 backdrop-filter 时退回不透明表面色 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .sheet .card { background: var(--surface); }
+}
+/* 弹层里的卡片不跟外面的 hover 高亮：它是被读的，不是被点的 */
+.sheet .card:hover { border-color: var(--line); box-shadow: none; }
 .sheet h2 { font-size: 15px; margin: 0 0 6px; }
 .sheet p { color: var(--text-2); font-size: 13px; line-height: 1.65; margin: 0 0 10px; }
 .secret { font-family: ui-monospace, Consolas, monospace; font-size: 13px;
@@ -112,4 +137,11 @@ textarea.req:focus, input:focus, select:focus { border-color: var(--accent); out
   .tab { flex: 1 1 44%; padding: 0 8px; font-size: 13.5px; }
   .sheet { padding: 8px; align-items: flex-end; }
   .sheet .card { border-radius: 18px 18px 0 0; max-height: 92vh; }
+}
+
+/* 晕动症退路：本轮加的 hover 浮起与过渡在这里归零（按钮过渡来自共享的
+   /app/style.css，那边的退路块已经覆盖 .btn 一族）。 */
+@media (prefers-reduced-motion: reduce) {
+  .tab, .card, .task { transition: none; }
+  .tab:hover, .task:hover { transform: none; }
 }

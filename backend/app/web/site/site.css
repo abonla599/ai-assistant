@@ -21,7 +21,7 @@
   /* 首屏标题单独一档：窄屏守住 2.15rem（360px 下「AI 智能助手」不折不断），
      宽屏一路给到 4.1rem——落地页的标题得有分量。 */
   --step-display: clamp(2.15rem, 1.55rem + 2.9vw, 4.1rem);
-  --radius: 16px;
+  --radius: 18px;
   --radius-lg: 24px;
   --radius-sm: 10px;
   --radius-pill: 999px;
@@ -40,63 +40,66 @@
 }
 
 html[data-theme="dark"] {
-  --bg: #0b0d12; --bg-soft: #11141c; --surface: #151a25;
-  --ink: #e9ecf4; --ink-soft: #9aa4bb; --line: #232a3a;
-  --brand: #7b9dff; --brand-2: #b493ff; --brand-3: #6fd6ff;
-  --brand-ink: #0b0d12; --glow: rgba(123,157,255,.22);
+  /* 2026-09-21 与 PWA 新版视觉对齐：薄荷绿 → 紫罗兰蓝的主渐变、蓝黑底。
+     brand 是薄荷（链接/焦点/眉标），brand-2 是紫罗兰（渐变另一端），brand-3 只在
+     进度条那类三段渐变里当过渡。底色三档与 style.css 的 --bg/--surface 同值。 */
+  --bg: #0b0e15; --bg-soft: #10141d; --surface: #141824;
+  --ink: #e6e9ed; --ink-soft: #98a1ad; --line: #242a3a;
+  --brand: #2fbf8f; --brand-2: #6c7bff; --brand-3: #55d6b8;
+  --brand-ink: #062518; --glow: rgba(47,191,143,.20);
   --shadow: 0 18px 40px rgba(0,0,0,.45);
   --lift: 0 22px 44px -26px rgba(0,0,0,.7);
-  /* 氛围光：深色可以亮一点，它是这页的底色性格 */
+  /* 氛围光：右上紫罗兰、左下薄荷——与 PWA body 的两团同源；深色可以亮一点，它是这页的底色性格 */
   --atmos-deep:
-    radial-gradient(72% 54% at 80% -10%, rgba(150,110,255,.20) 0%, rgba(150,110,255,0) 62%),
-    radial-gradient(58% 46% at 2% 14%, rgba(56,140,255,.15) 0%, rgba(56,140,255,0) 60%),
-    radial-gradient(86% 60% at 46% 114%, rgba(255,118,180,.10) 0%, rgba(255,118,180,0) 62%);
+    radial-gradient(72% 54% at 80% -10%, rgba(108,123,255,.20) 0%, rgba(108,123,255,0) 62%),
+    radial-gradient(58% 46% at 2% 14%, rgba(47,191,143,.15) 0%, rgba(47,191,143,0) 60%),
+    radial-gradient(86% 60% at 46% 114%, rgba(85,214,184,.08) 0%, rgba(85,214,184,0) 62%);
   --atmos:
-    radial-gradient(44% 36% at 20% 2%, rgba(123,157,255,.26) 0%, rgba(123,157,255,0) 70%),
-    radial-gradient(38% 32% at 86% 24%, rgba(180,147,255,.17) 0%, rgba(180,147,255,0) 68%);
-  --band: rgba(233,236,244,.035);
+    radial-gradient(44% 36% at 20% 2%, rgba(47,191,143,.24) 0%, rgba(47,191,143,0) 70%),
+    radial-gradient(38% 32% at 86% 24%, rgba(108,123,255,.17) 0%, rgba(108,123,255,0) 68%);
+  --band: rgba(108,123,255,.032);
   --glass-a: 84%; --glass-b: 68%;
   --hairline: rgba(255,255,255,.075);
   --grain-a: .085;
-  --glow-0: rgba(123,157,255,0);
-  --bloom: rgba(123,157,255,.20);
+  --glow-0: rgba(47,191,143,0);
+  --bloom: rgba(108,123,255,.18);
   --card-shadow: 0 1px 0 rgba(0,0,0,.25);
-  --fade: linear-gradient(180deg, rgba(233,236,244,0), rgba(233,236,244,.04));
-  --title: linear-gradient(168deg,#ffffff 0%,#dbe4ff 32%,#aac0fb 66%,#8fa9f0 100%);
-  --cta: linear-gradient(115deg,#9fb6ff 0%,#7b9dff 42%,#b493ff 100%);
-  --cta-ink: #0b0d12;
-  --seam: linear-gradient(90deg,rgba(123,157,255,0),rgba(123,157,255,.45) 22%,rgba(180,147,255,.4) 55%,rgba(123,157,255,0));
+  --fade: linear-gradient(180deg, rgba(230,233,237,0), rgba(230,233,237,.04));
+  --title: linear-gradient(168deg,#ffffff 0%,#e2fff4 32%,#8df0cd 66%,#a3b1ff 100%);
+  --cta: linear-gradient(115deg,#2fbf8f 0%,#2fae95 42%,#6c7bff 100%);
+  --cta-ink: #062518;
+  --seam: linear-gradient(90deg,rgba(47,191,143,0),rgba(47,191,143,.45) 22%,rgba(108,123,255,.4) 55%,rgba(47,191,143,0));
   --sheen: rgba(255,255,255,.42);
   color-scheme: dark;
 }
 html[data-theme="light"] {
-  --bg: #ffffff; --bg-soft: #f5f6fa; --surface: #ffffff;
-  --ink: #14161c; --ink-soft: #545b6c; --line: #e5e8f0;
-  --brand: #2f5cff; --brand-2: #6f4bff; --brand-3: #0aa8c9;
-  --brand-ink: #ffffff; --glow: rgba(47,92,255,.14);
+  --bg: #ffffff; --bg-soft: #f6f7fb; --surface: #ffffff;
+  --ink: #17191f; --ink-soft: #5b6472; --line: #e4e7ee;
+  --brand: #0f9d76; --brand-2: #5566f0; --brand-3: #2bb3a3;
+  --brand-ink: #ffffff; --glow: rgba(15,157,118,.14);
   --shadow: 0 14px 34px rgba(20,26,44,.10);
   --lift: 0 22px 40px -24px rgba(20,26,44,.28);
-  /* 同一套色相，透明度砍到深色的三分之一多一点：浅色页要的是纸感洗色，不是光晕 */
+  /* 同一套色相（薄荷/紫罗兰），透明度砍到深色的三分之一多一点：浅色页要的是纸感洗色，不是光晕 */
   --atmos-deep:
-    radial-gradient(72% 54% at 80% -10%, rgba(108,86,209,.08) 0%, rgba(108,86,209,0) 62%),
-    radial-gradient(58% 46% at 2% 14%, rgba(24,110,220,.06) 0%, rgba(24,110,220,0) 60%),
-    radial-gradient(86% 60% at 46% 114%, rgba(10,150,175,.05) 0%, rgba(10,150,175,0) 62%);
+    radial-gradient(72% 54% at 80% -10%, rgba(85,102,240,.08) 0%, rgba(85,102,240,0) 62%),
+    radial-gradient(58% 46% at 2% 14%, rgba(15,157,118,.06) 0%, rgba(15,157,118,0) 60%),
+    radial-gradient(86% 60% at 46% 114%, rgba(43,179,163,.05) 0%, rgba(43,179,163,0) 62%);
   --atmos:
-    radial-gradient(44% 36% at 20% 2%, rgba(47,92,255,.11) 0%, rgba(47,92,255,0) 70%),
-    radial-gradient(38% 32% at 86% 24%, rgba(111,75,255,.07) 0%, rgba(111,75,255,0) 68%);
-  --band: rgba(47,92,255,.042);
+    radial-gradient(44% 36% at 20% 2%, rgba(15,157,118,.11) 0%, rgba(15,157,118,0) 70%),
+    radial-gradient(38% 32% at 86% 24%, rgba(85,102,240,.07) 0%, rgba(85,102,240,0) 68%);
+  --band: rgba(85,102,240,.035);
   --glass-a: 88%; --glass-b: 74%;
   --hairline: rgba(255,255,255,.9);
   --grain-a: .055;
-  --glow-0: rgba(47,92,255,0);
-  /* 浅色下光斑要收着：同一团蓝压到白底上就是一块没化开的污渍 */
-  --bloom: rgba(47,92,255,.055);
+  --glow-0: rgba(15,157,118,0);
+  /* 浅色下光斑要收着：同一团色压到白底上就是一块没化开的污渍 */
+  --bloom: rgba(85,102,240,.055);
   --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
-  --fade: linear-gradient(180deg, rgba(47,92,255,0), rgba(47,92,255,.045));
-  --title: linear-gradient(168deg,#0f1116 0%,#1b2440 42%,#2f5cff 100%);
-  --cta: linear-gradient(115deg,#2f5cff 0%,#4a4ce8 52%,#6f4bff 100%);
+  --fade: linear-gradient(180deg, rgba(15,157,118,0), rgba(15,157,118,.045));
+  --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0f9d76 100%);
+  --cta: linear-gradient(115deg,#0f9d76 0%,#0f8d8f 52%,#5566f0 100%);
   --cta-ink: #ffffff;
-  --seam: linear-gradient(90deg,rgba(47,92,255,0),rgba(47,92,255,.28) 22%,rgba(111,75,255,.22) 55%,rgba(47,92,255,0));
+  --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
   --sheen: rgba(255,255,255,.6);
   color-scheme: light;
 }
@@ -105,31 +108,31 @@ html[data-theme="light"] {
    它没有 data-theme 可继承，漏一个就会在白底上糊一块深色光晕。 */
 @media (prefers-color-scheme: light) {
   html:not([data-theme]) {
-    --bg: #ffffff; --bg-soft: #f5f6fa; --surface: #ffffff;
-    --ink: #14161c; --ink-soft: #545b6c; --line: #e5e8f0;
-    --brand: #2f5cff; --brand-2: #6f4bff; --brand-3: #0aa8c9;
-    --brand-ink: #ffffff; --glow: rgba(47,92,255,.14);
+    --bg: #ffffff; --bg-soft: #f6f7fb; --surface: #ffffff;
+    --ink: #17191f; --ink-soft: #5b6472; --line: #e4e7ee;
+    --brand: #0f9d76; --brand-2: #5566f0; --brand-3: #2bb3a3;
+    --brand-ink: #ffffff; --glow: rgba(15,157,118,.14);
     --shadow: 0 14px 34px rgba(20,26,44,.10);
     --lift: 0 22px 40px -24px rgba(20,26,44,.28);
     --atmos-deep:
-      radial-gradient(72% 54% at 80% -10%, rgba(108,86,209,.08) 0%, rgba(108,86,209,0) 62%),
-      radial-gradient(58% 46% at 2% 14%, rgba(24,110,220,.06) 0%, rgba(24,110,220,0) 60%),
-      radial-gradient(86% 60% at 46% 114%, rgba(10,150,175,.05) 0%, rgba(10,150,175,0) 62%);
+      radial-gradient(72% 54% at 80% -10%, rgba(85,102,240,.08) 0%, rgba(85,102,240,0) 62%),
+      radial-gradient(58% 46% at 2% 14%, rgba(15,157,118,.06) 0%, rgba(15,157,118,0) 60%),
+      radial-gradient(86% 60% at 46% 114%, rgba(43,179,163,.05) 0%, rgba(43,179,163,0) 62%);
     --atmos:
-      radial-gradient(44% 36% at 20% 2%, rgba(47,92,255,.11) 0%, rgba(47,92,255,0) 70%),
-      radial-gradient(38% 32% at 86% 24%, rgba(111,75,255,.07) 0%, rgba(111,75,255,0) 68%);
-    --band: rgba(47,92,255,.042);
+      radial-gradient(44% 36% at 20% 2%, rgba(15,157,118,.11) 0%, rgba(15,157,118,0) 70%),
+      radial-gradient(38% 32% at 86% 24%, rgba(85,102,240,.07) 0%, rgba(85,102,240,0) 68%);
+    --band: rgba(85,102,240,.035);
     --glass-a: 88%; --glass-b: 74%;
     --hairline: rgba(255,255,255,.9);
     --grain-a: .055;
-    --glow-0: rgba(47,92,255,0);
-    --bloom: rgba(47,92,255,.055);
+    --glow-0: rgba(15,157,118,0);
+    --bloom: rgba(85,102,240,.055);
     --card-shadow: 0 1px 2px rgba(20,26,44,.05), 0 10px 22px -18px rgba(20,26,44,.35);
-    --fade: linear-gradient(180deg, rgba(47,92,255,0), rgba(47,92,255,.045));
-    --title: linear-gradient(168deg,#0f1116 0%,#1b2440 42%,#2f5cff 100%);
-    --cta: linear-gradient(115deg,#2f5cff 0%,#4a4ce8 52%,#6f4bff 100%);
+    --fade: linear-gradient(180deg, rgba(15,157,118,0), rgba(15,157,118,.045));
+    --title: linear-gradient(168deg,#0f1116 0%,#12291f 42%,#0f9d76 100%);
+    --cta: linear-gradient(115deg,#0f9d76 0%,#0f8d8f 52%,#5566f0 100%);
     --cta-ink: #ffffff;
-    --seam: linear-gradient(90deg,rgba(47,92,255,0),rgba(47,92,255,.28) 22%,rgba(111,75,255,.22) 55%,rgba(47,92,255,0));
+    --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
     --sheen: rgba(255,255,255,.6);
     color-scheme: light;
   }

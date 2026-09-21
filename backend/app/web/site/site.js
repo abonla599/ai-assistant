@@ -32,7 +32,7 @@
       var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
       root.setAttribute("data-theme", next);
       var meta = document.querySelector('meta[name="theme-color"]');
-      if (meta) meta.setAttribute("content", next === "dark" ? "#0b0d12" : "#ffffff");
+      if (meta) meta.setAttribute("content", next === "dark" ? "#0b0e15" : "#ffffff");
       storeTheme(next);
       syncThemeLabel();
     });
