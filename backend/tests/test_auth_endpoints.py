@@ -31,14 +31,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from fastapi.testclient import TestClient
 from app.core.auth import RESET_FAIL, auth_store
 from app.main import app
+from tests.conftest import peer_client
 
 # 对端必须是回环：现网所有请求都由 cloudflared 从 127.0.0.1 转进来，
 # `_client_ip` 因此只在回环对端时才认 CF-Connecting-IP（见 conftest 里同一条注释）。
 # 用默认的 client="testclient" 会让下面每一本限流账都落回同一个桶。
-client = TestClient(app, client=("127.0.0.1", 54321))
+# 走 peer_client 而不是 TestClient(..., client=...)：后者要 starlette>=0.46，
+# 而清单钉的是 <0.41，CI 装的是旧那份——写错就是全场 TypeError。
+client = peer_client(("127.0.0.1", 54321))
 
 # enforced fixture 把 bootstrap 口令设成这个值，管理端点在它之下才有意义
 BOOT = {"Authorization": "Bearer boot-token"}
@@ -960,7 +962,7 @@ def test_a_forged_source_header_from_outside_the_tunnel_is_ignored():
     """
     from app.core.auth_router import MAX_REGISTRATIONS_PER_SOURCE as CAP
 
-    outside = TestClient(app, client=("203.0.113.7", 44444))   # 直连源站的访客
+    outside = peer_client(("203.0.113.7", 44444))   # 直连源站的访客
     payload = {"username": "", "password": PW, **RECOVERY}
 
     def forged(name, fake_ip):

@@ -186,6 +186,32 @@ def _auth_env_pristine(request):
     yield
 
 
+def peer_client(peer, **kwargs):
+    """一个 TestClient，但每个 http 请求的 `scope["client"]` 被写成指定对端。
+
+    为什么不直接传 `TestClient(app, client=(ip, port))`：那个关键字是 starlette 0.46
+    才有的，而 `backend/requirements.txt` 钉的是 `starlette<0.41`——CI 装的就是那一份，
+    用它写会 `TypeError`，凡是用例碰到这个夹具的全场报错（2026-09-21 就是这样把 CI
+    弄红的：本地跑的是另一套解释器上的 starlette 1.0，两边结论不一样）。包一层 ASGI
+    在哪个版本上都是同一件事：限流账看到的对端就是我们要演的那个。
+    """
+    class _SetPeer:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            # 透明转发：`client.app.routes` 这类自省（test_route_auth_contract 在用）
+            # 不该因为中间包了一层就看不见真 app。
+            return getattr(self._inner, name)
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                scope = {**scope, "client": peer}
+            await self._inner(scope, receive, send)
+
+    return TestClient(_SetPeer(app), **kwargs)
+
+
 @pytest.fixture
 def client():
     # 对端写成回环，是为了让测试夹具长得像现网：真实部署里后端只绑 127.0.0.1，
@@ -193,7 +219,7 @@ def client():
     # "对端是回环"时才认 CF-Connecting-IP——夹具若用 TestClient 默认的
     # client="testclient"，那条判据会把每个请求都当成直连源站，五本限流账的
     # 按来源计费在测试里就全落回同一个桶（这次改判据时三条预算测试就是这么红的）。
-    return TestClient(app, client=("127.0.0.1", 54321))
+    return peer_client(("127.0.0.1", 54321))
 
 @pytest.fixture
 def sample_messages():

@@ -120,3 +120,47 @@ def test_the_manifest_is_parsed_from_its_first_line():
                       if l.strip() and not l.lstrip().startswith("#"))
     first_name = re.split(r"[<>=!~;\[ ]", first_line, maxsplit=1)[0].strip().lower()
     assert first_name in names, f"清单第一行 {first_line!r} 没被解析出包名，那第一项就检不到"
+
+
+def test_installed_versions_satisfy_the_declared_ranges():
+    """跑这条测试的解释器，装的包必须落在清单钉的区间里。
+
+    这条锁的由来是 2026-09-21 的一次 CI 红：conftest 写了
+    `TestClient(app, client=("127.0.0.1", 54321))`，而 `client=` 这个关键字是
+    starlette 0.46 才有的；清单钉的是 `starlette>=0.37.2,<0.41.0`，CI 从零按清单装，
+    于是凡是用到 client 夹具的用例全部 TypeError。本地那次"全绿"跑的是另一个解释器
+    （装着 starlette 1.0.0），同一行代码两边结论相反——而 CI 那侧才是真的。
+    区间不匹配只说明一件事：这个解释器不是 CI 那一份，它给出的绿不作数。
+    """
+    from importlib import metadata
+
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.specifiers import InvalidSpecifier
+
+    drift = []
+    checked = 0
+    for line in REQUIREMENTS.read_text(encoding="utf-8-sig").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-") or "@" in line:
+            continue
+        try:
+            req = Requirement(line)
+        except InvalidRequirement:
+            continue                     # 交不上打包器的行由上面那几条锁管
+        if not req.specifier:
+            continue
+        try:
+            installed = metadata.version(req.name)
+        except metadata.PackageNotFoundError:
+            continue                     # 没装就不判：可选依赖与平台专属包都在这类
+        checked += 1
+        try:
+            if not req.specifier.contains(installed, prereleases=True):
+                drift.append(f"{req.name}=={installed}（清单要 {req.specifier}）")
+        except InvalidSpecifier:
+            continue
+    assert checked >= 20, f"区间检查只落到 {checked} 个包上，这条锁多半在空转"
+    assert not drift, (
+        "这些包装的版本不在清单区间里，本机结论与 CI 不是一回事：" + "; ".join(drift)
+        + "\n用 `venv\\Scripts\\python.exe -m pytest backend/tests/ -q` 跑（那份与 CI 对齐），"
+          "或者 `pip install -r backend/requirements.txt` 把当前解释器拉回来。")
