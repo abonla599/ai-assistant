@@ -412,7 +412,14 @@ def test_no_probe_check_can_hang_forever():
     assert limit and int(limit.group(1)) >= 5000, (
         "等待上限不在了（或被写成 0）：任何一项都可能永远不落地，"
         "而 0 会让每一项当场失败——两种都不是「跑一遍看看」")
-    assert "timedOut = true" in code and "ctrl.abort()" in code, "超时没人掐连接"
+    assert "withDeadline(" in code, "期限没挂在 await 上：只靠 abort，打不断这个内核的请求就等于没有期限"
+    body = code[code.index("async function callStream"):code.index("async function runAll")]
+    # 真正的坑在这里：上一版在 `if (!res.ok)` 分支里先 stopArm() 再 await res.text()，
+    # 于是六项里唯一读错误响应体的第 4 项，卡在了唯一一个没有看门狗的 await 上。
+    assert "await withDeadline(res.text())" in body, "错误响应体的读取没有过期限——第 4 项就是这么卡死的"
+    assert "await withDeadline(reader.read())" in body, "流式读取没有过期限"
+    assert "await withDeadline(fetch(" in body, "第一个 fetch 没有过期限"
+    assert "stopArm" not in body, "撤表机制又回来了：撤掉的那一刻正是最容易卡住的那一刻"
     assert "timeout: true" in code, "超时没有变成一句报告，只是被吞掉"
     # 判那一行本身，不判变量在不在：把 break 换成 continue 时 broke_on_done 依然
     # 声明着、依然被 if 用着，只查存在性的锁会照样绿（这条锁刚才就是这么漏的）。

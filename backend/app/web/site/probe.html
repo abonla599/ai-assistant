@@ -131,67 +131,84 @@ function body(model, messages, extra) {
   return Object.assign(o, extra || {});
 }
 
-// 每一项最多等这么久：没有上限的 await 就是"卡在四、半天没反应"的成因——
-// 上游或浏览器只要不回，这一项永远不落地，而界面上它和"没跑"长得一模一样。
+// 每一项的每一个 await 最多等这么久。
+//
+// 为什么不是"上一个定时器 + ctrl.abort()"就够了：上一版就是这么写的，结果他手机上
+// 第 4 项还是永远停在"正在跑"。原因是 `if (!res.ok)` 分支里先 stopArm() 再去
+// await res.text()——看门狗在唯一会卡住的那一步之前被自己撤了。第 4 项是六项里
+// 唯一要读【错误响应体】的，而 X5 那类 WebView 在 401 的 body 上会停住；abort 也
+// 救不了，因为定时器已经不在了。
+//
+// 所以判据换成"每个 await 各自受一个期限约束"：期限挂在 Promise 上，不依赖
+// abort 是否真的能打断这个内核的请求。
 const IDLE_LIMIT_MS = 20000;
+
+function withDeadline(promise) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(Object.assign(new Error((IDLE_LIMIT_MS / 1000) + " 秒无响应（已掐断）"),
+                           { timeout: true }));
+    }, IDLE_LIMIT_MS);
+    promise.then((v) => { clearTimeout(timer); resolve(v); },
+                 (e) => { clearTimeout(timer); reject(e); });
+  });
+}
 
 async function callStream(label, extra, opts) {
   const ctrl = new AbortController();
   const started = performance.now();
   let firstByte = null, deltas = 0, chars = 0, usage = null, finish = "";
-  let timedOut = false, idle = null;
-  const arm = () => {
-    if (idle) clearTimeout(idle);
-    idle = setTimeout(() => { timedOut = true; ctrl.abort(); }, IDLE_LIMIT_MS);
-  };
-  const stopArm = () => { if (idle) clearTimeout(idle); idle = null; };
-  arm();
-  const res = await fetch(endpoint(), {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: "Bearer " + $("key").value.trim() },
-    body: JSON.stringify(body($("model").value.trim(),
-      [{ role: "user", content: (opts && opts.prompt) || "说一句话证明你活着。" }],
-      Object.assign({ stream: true }, extra || {}))),
-    signal: ctrl.signal,
-  });
-  if (!res.ok) {
-    stopArm();
-    const t = await res.text().catch(() => "");
-    throw Object.assign(new Error("HTTP " + res.status), { status: res.status, text: t.slice(0, 220) });
-  }
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "", aborted = false;
+  let aborted = false;
   if (opts && opts.stopAfter) setTimeout(() => { aborted = true; ctrl.abort(); }, opts.stopAfter);
-  while (true) {
-    const { value, done } = await reader.read();
-    if (timedOut) throw Object.assign(new Error(IDLE_LIMIT_MS / 1000 + " 秒无响应（已掐断）"),
-                                      { timeout: true });
-    if (done || aborted) break;
-    arm();
-    if (firstByte === null) firstByte = performance.now() - started;
-    buf += dec.decode(value, { stream: true });
-    // SSE 帧之间用空行分隔；这里按行拆，兼容 ": OPENAI-COMPLETION" 之类注释行。
-    const lines = buf.split("\n");
-    buf = lines.pop();
-    let broke_on_done = false;
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") { broke_on_done = true; break; }
-      let j; try { j = JSON.parse(payload); } catch (e) { continue; }
-      if (j.usage) usage = j.usage;
-      const d = (j.choices && j.choices[0] && j.choices[0].delta) || null;
-      if (d && (d.content || d.reasoning_content)) {
-        deltas++; chars += ((d.content || "") + (d.reasoning_content || "")).length;
-      }
-      if (j.choices && j.choices[0] && j.choices[0].finish_reason) finish = j.choices[0].finish_reason;
+  try {
+    const res = await withDeadline(fetch(endpoint(), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + $("key").value.trim() },
+      body: JSON.stringify(body($("model").value.trim(),
+        [{ role: "user", content: (opts && opts.prompt) || "说一句话证明你活着。" }],
+        Object.assign({ stream: true }, extra || {}))),
+      signal: ctrl.signal,
+    }));
+    if (!res.ok) {
+      // 错误体也要过期限：这一行以前是 stopArm() 之后裸 await，就是上面说的那个坑。
+      const t = await withDeadline(res.text()).catch(() => "");
+      throw Object.assign(new Error("HTTP " + res.status), { status: res.status, text: t.slice(0, 220) });
     }
-    if (broke_on_done) break;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await withDeadline(reader.read());
+      if (done || aborted) break;
+      if (firstByte === null) firstByte = performance.now() - started;
+      buf += dec.decode(value, { stream: true });
+      // SSE 帧之间用空行分隔；这里按行拆，兼容 ": OPENAI-COMPLETION" 之类注释行。
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      let broke_on_done = false;
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        // [DONE] 就收工，别 continue：有的服务商发完 [DONE] 不马上关连接，
+        // 那样这个循环会永远等在 reader.read() 上——成功路径也会卡，不只错 key 这一项。
+        if (payload === "[DONE]") { broke_on_done = true; break; }
+        let j; try { j = JSON.parse(payload); } catch (e) { continue; }
+        if (j.usage) usage = j.usage;
+        const d = (j.choices && j.choices[0] && j.choices[0].delta) || null;
+        if (d && (d.content || d.reasoning_content)) {
+          deltas++; chars += ((d.content || "") + (d.reasoning_content || "")).length;
+        }
+        if (j.choices && j.choices[0] && j.choices[0].finish_reason) finish = j.choices[0].finish_reason;
+      }
+      if (broke_on_done) break;
+    }
+    return { firstByte, deltas, chars, usage, finish, aborted, ms: performance.now() - started };
+  } finally {
+    // 无论走到哪一步，都把请求真正放掉：期限只保证"这一项会落地"，
+    // 不保证连接被关——手机上一条挂着的长连接会一直吃流量。
+    try { ctrl.abort(); } catch (_) {}
   }
-  stopArm();
-  return { firstByte, deltas, chars, usage, finish, aborted, ms: performance.now() - started };
 }
 
 async function runAll() {
