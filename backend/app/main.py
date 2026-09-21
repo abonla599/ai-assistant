@@ -275,7 +275,7 @@ async def health_check():
 
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
-                                looks_placeholder, build_client)
+                                looks_placeholder, build_client, scrub_secrets)
 from app.core.uploads import store as upload_store, build_user_content, UploadError
 
 
@@ -286,6 +286,10 @@ def _fail_reason(e: BaseException) -> str:
     "CERTIFICATE_VERIFY_FAILED：本机卡巴斯基拆了 TLS"），根因只在 __cause__ /
     __context__ 上。真机上量到这条链四层里有三层是同一句话，所以按文案分组、组内
     并掉重名类型：一层原文配一串类型名，才是既说得清又不刷屏的形状。
+
+    最后一句要过一次 scrub_secrets：这个函数是**日志与响应体共用的那一个出口**
+    （main.py 的四处调用 + 管理员的探活都从这儿过），脱敏长在这里才只有一份口径；
+    写在每个调用点上迟早会漏一处，而漏的那一处正好是上游把 key 打印回来的那次。
     """
     groups = []          # 每项是 ([类型名...], 文案)
     seen = set()
@@ -300,8 +304,8 @@ def _fail_reason(e: BaseException) -> str:
         else:
             groups.append(([name], text))
         cur = cur.__cause__ or cur.__context__
-    return " ← ".join(" → ".join(names) + (f": {text}" if text else "")
-                      for names, text in groups)
+    return scrub_secrets(" ← ".join(" → ".join(names) + (f": {text}" if text else "")
+                                    for names, text in groups))
 
 
 def _prepare_chat(request: ChatRequest, principal: Principal):

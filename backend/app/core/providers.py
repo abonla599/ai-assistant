@@ -23,6 +23,60 @@ load_project_env()
 
 PLACEHOLDER_HINTS = ("your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme")
 
+# 出口脱敏要认的形状。宁可多隐一些字，也不要漏一条 key：这些字符串同时会进
+# data/backend.log 和管理员看得到的响应体，而日志文件不在任何加密范围内。
+_SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|pk|key|api|secret|token|auth)[-_][A-Za-z0-9_.\-]{5,}", re.I),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]+"),
+    re.compile(r"(?i)(api[_-]?key|authorization|access[_-]?token|secret)[\"']?\s*[:=]\s*[\"']?([^\s\"',;]{5,})"),
+)
+REDACTED = "«密钥已隐去»"
+
+
+def _write_json_atomic(path: str, payload) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _own_key_values():
+    """服务端自己配过哪些密钥值——形状认不出来时唯一还认得出来的东西。
+
+    读的是进程级那份 store；构造期它还没建好，所以取不到就当没有。
+    短于 8 位的不参与：那种值出现在正常报错文案里的概率比它是 key 的概率高，
+    隐去它只会让日志读不出所以然。
+    """
+    try:
+        items = store.all()
+    except NameError:
+        return []
+    return sorted({p.get("api_key", "").strip() for p in items
+                   if len(p.get("api_key", "").strip()) >= 8}, key=len, reverse=True)
+
+
+def scrub_secrets(text: str) -> str:
+    """把一句要往外说的话里的凭据形状与已配置的密钥值都隐掉。
+
+    先按值替换再按形状替换：值是唯一确定的，形状是猜的——猜的那一层不该把
+    已经确认过的东西留下空隙。
+    """
+    if not text:
+        return text
+    out = str(text)
+    for value in _own_key_values():
+        out = out.replace(value, REDACTED)
+    for pattern in _SECRET_PATTERNS:
+        # 第三条有两组：留下"api_key="这个标签，隐掉冒号后面那串。
+        # 写成 group(1) + group(2) 就等于把"隐去"实现成了"原样保留"。
+        out = pattern.sub(lambda m: (m.group(1) + REDACTED) if m.lastindex == 2
+                          else REDACTED, out)
+    return out
+
+
 
 class ProviderError(Exception):
     """配置缺失或模型不可用。上层据此返回明确错误，而不是把故障当成回复内容。"""
@@ -36,11 +90,17 @@ def _default_path() -> str:
 
 
 def mask_key(key: str) -> str:
+    """掩码是给前端的**唯一**凭据线索，所以它自己不能变成第二个泄露点。
+
+    旧写法把前 3 位与总长度一起给出去（`sk-…3839（35 位）`）：前缀能认出厂商，
+    长度能框定爆破面，而"管理员在同一个页面上看得懂哪一把"只需要末 4 位。
+    """
     if not key:
         return ""
     if len(key) <= 8:
         return "****"
-    return f"{key[:3]}…{key[-4:]}（{len(key)} 位）"
+    return f"末四位 {key[-4:]}"
+
 
 
 def looks_placeholder(key: str) -> bool:
@@ -87,17 +147,49 @@ def _seed_from_env() -> list:
 class ProviderStore:
     def __init__(self, path: str = None):
         self.path = os.path.abspath(path or _default_path())
+        # 密钥单独一个文件，路径从记录文件推导而不是再开一个环境变量：
+        # 两处事实来源迟早会漂移（"搬了记录没搬密钥"就是下一次的数据丢失），
+        # 而 PROVIDERS_DB_PATH 一个变量本来就该把这份配置整体指走。
+        self.keys_path = os.path.join(os.path.dirname(self.path), "provider_keys.json")
         self._lock = threading.Lock()
         self._items = []
+        self._keys = {}
         self._load()
 
+    def _load_keys(self):
+        if not os.path.isfile(self.keys_path):
+            return {}
+        try:
+            with open(self.keys_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (ValueError, OSError) as e:
+            # 读不动就当没有：宁可让 resolve() 说「缺少有效密钥」，
+            # 也不要在这里悄悄把内联在记录里的 key 复制回盘上——那等于没搬。
+            print(f"⚠️ 密钥文件读不了（{e}），本轮按未配置密钥处理")
+            return {}
+
+    def _write_keys(self):
+        _write_json_atomic(self.keys_path, self._keys)
+
     def _load(self):
+        migrated = False
         if os.path.isfile(self.path):
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     self._items = [p for p in data if isinstance(p, dict) and p.get("id")]
+                    self._keys = self._load_keys()
+                    for p in self._items:
+                        inline = p.pop("api_key", "") or ""
+                        if inline:
+                            # 升级前那份文件里 key 就写在记录上；读的时候顺手搬走
+                            self._keys.setdefault(p["id"], inline)
+                            migrated = True
+                        p["api_key"] = self._keys.get(p["id"], "")
+                    if migrated:
+                        self._flush()
                     return
             except (ValueError, OSError) as e:
                 backup = self.path + ".corrupt"
@@ -106,17 +198,21 @@ class ProviderStore:
                     print(f"⚠️ Provider 配置损坏（{e}），已备份为 {backup}")
                 except OSError:
                     print(f"⚠️ Provider 配置损坏且无法备份（{e}）")
+        self._keys = self._load_keys()
         self._items = _seed_from_env()
         if self._items:
             self._flush()
             print(f"ℹ️ 已从 .env 初始化 {len(self._items)} 个模型服务配置")
 
     def _flush(self):
+        # 调用方都持着 self._lock（_load 在构造期单线程）。写记录时把 api_key 整个剔掉，
+        # 留空字段比删字段更糟：下一个读这份文件的人会以为值在这儿。
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._items, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        _write_json_atomic(self.path, [{k: v for k, v in p.items() if k != "api_key"}
+                                       for p in self._items])
+        self._keys = {p["id"]: p.get("api_key", "") for p in self._items if p.get("api_key")}
+        _write_json_atomic(self.keys_path, self._keys)
+
 
     # ---- 查询 ----
     def all(self) -> list:
@@ -282,7 +378,9 @@ class ProviderStore:
             return {"ok": True, "detail": f"{provider['model']} 响应正常",
                     "sample": (completion.choices[0].message.content or "")[:40]}
         except Exception as e:
-            return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:180]}"}
+            # 这一句会进管理员的屏幕。上游/中转站把 Authorization 原样打印回来
+            # 不是假设，是这类网关的常见做法，所以出口在这儿过一次。
+            return {"ok": False, "detail": scrub_secrets(f"{type(e).__name__}: {str(e)[:180]}")}
 
 
 def build_client(provider: dict) -> OpenAI:
