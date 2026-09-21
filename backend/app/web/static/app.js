@@ -1482,6 +1482,115 @@ function renderAboutRows() {
   }
 }
 
+/** 「发现版本更新」底部卡片。
+ *
+ *  与上面那一行「检查更新」是两条独立的路，各自成立：那一行是**人去问**（点了才查），
+ *  这一张是**替他看一眼然后提一句**。删掉任意一张，另一张照常工作。
+ *
+ *  为什么问的是服务端而不是页面自己 fetch GitHub：前端有一条硬锁不许出现绝对 URL，
+ *  而大陆直连 GitHub 时好时坏——让一台机器扛比每台手机各自扛好，那一台机器上还有一致
+ *  的 10 分钟缓存（判据在 core/releases.py）。这里因此只关心三件事：有没有新版、
+ *  是哪一版、去哪儿下。
+ *
+ *  三条"不许吵到人"的规矩：
+ *  ① 只在壳里出现。浏览器里没有安装包可换，弹一张"请更新"只会让人以为网页能自更新；
+ *     而判断"是不是壳"用的是壳报上来的 versionName——老壳（v0.15 及更早）不报版本，
+ *     于是它拿不到版本号，也就一句都不提。这不是遗漏：拿着手上的版本号才能回答
+ *     "有没有更新"，猜一个号出来弹脸是更坏的选择。
+ *  ② 一天最多一次。「稍后」与「立即更新」都写当天日期戳——他已经知道有新版了，
+ *     同一天再弹第二次就成了骚扰。戳是"当天"而不是"这一次"：明天他还没更新，
+ *     那就该再提一次。
+ *  ③ 首屏不等它，失败静默。拉不到就是不提，绝不把"我读不到"演成"你已是最新"。 */
+const UPDATE_SHEET_KEY = "updateSheetDay";
+
+// 内存里那份探测结果。null = 这一页还没问过；问过了就复用，☰ 补弹时不再发请求。
+let updateSeen = null;
+let updateAsking = false;
+
+/** 本机日历上的"今天"。不用 toISOString：那是 UTC，北京时间早上八点之前会写成昨天，
+ *  于是"每天最多一次"在早上八点整被白嫖一次——同一天弹两次，恰好是这条节流要防的事。 */
+function localDay() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
+function updateSheetShownToday() {
+  try { return localStorage.getItem(UPDATE_SHEET_KEY) === localDay(); }
+  catch (e) { return false; }      // 无痕模式里读就是抛：那就当今天没弹过，宁可多提一次
+}
+
+function markUpdateSheetShown() {
+  try { localStorage.setItem(UPDATE_SHEET_KEY, localDay()); }
+  catch (e) { /* 写不进去只是"今天可能多弹一次"，不值得为它打断更新提示本身 */ }
+}
+
+// 壳报的安装包版本（唯一来源 android/app/build.gradle）。浏览器与不报版本的老壳 → 空串。
+function shellVersion() {
+  if (!SHELL.present) return "";
+  const caps = SHELL.capabilities() || {};
+  return typeof caps.version === "string" ? caps.version.trim() : "";
+}
+
+function maybeAskUpdate() {
+  const have = shellVersion();
+  if (!have) return;
+  if (updateSeen) { offerUpdate(updateSeen); return; }
+  if (updateAsking) return;
+  updateAsking = true;
+  fetch("/v1/release/latest?have=" + encodeURIComponent(have))
+    .then((res) => res.json())
+    .then((j) => { updateSeen = j; offerUpdate(j); })
+    // 连不上也把它当"问过了"存下来：不然每次开侧栏都替 GitHub 挡一次超时，
+    // 而那场超时是用户在等界面回应，不是我们等的。
+    .catch((e) => { updateSeen = { ok: false, reason: String(e && e.message || e) }; })
+    .finally(() => { updateAsking = false; });
+}
+
+/** 只在"确实有更新"时弹。has_update 是三值的（true/false/null），null=不知道，
+ *  不知道就不许弹——这是这张卡唯一的责任边界。 */
+function offerUpdate(info) {
+  if (!info || !info.ok || info.has_update !== true) return;
+  if (updateSheetShownToday()) return;
+  const sheet = $("updateSheet");
+  const btn = $("updateGoBtn"), link = $("updateGoLink"), later = $("updateLaterBtn");
+  if (!sheet || !btn || !link || !later) return;
+
+  // 与设置那一行完全同一条分流：报得出 update 能力才给 button（调桥，走原生那条
+  // 带进度与安装对话框的路），其余一律给 <a>。老壳只报版本号不报能力，这里就得给链接。
+  const caps = SHELL.capabilities() || {};
+  const native = SHELL.present && !!caps.update;
+  const shown = native ? btn : link;
+  [btn, link].forEach((el) => el.classList.toggle("hidden", el !== shown));
+  later.classList.remove("hidden");
+
+  const box = $("updateVer");
+  if (box) {
+    const parts = ["新版本 v" + info.latest];
+    if (info.have) parts.push("当前 v" + info.have);
+    if (info.size) parts.push(Math.round(info.size / 1024) + " KB");
+    box.textContent = parts.join(" · ");
+  }
+  // 先摘掉 .show 再挂回去：同一页里第二次弹（明天那次）也要重放升起动画，
+  // 而上一次留下的 .show 会让它变成"突然出现"。中间那次 reflow 是让浏览器真的
+  // 把动画当成一次新开始，而不是接着上一轮跑完的状态。
+  sheet.classList.remove("show");
+  sheet.classList.remove("hidden");
+  void sheet.offsetWidth;
+  sheet.classList.add("show");
+}
+
+function hideUpdateSheet() {
+  const sheet = $("updateSheet");
+  if (sheet) { sheet.classList.add("hidden"); sheet.classList.remove("show"); }
+  markUpdateSheetShown();
+}
+
+// ☰ 打开侧栏时补弹一次：只复用内存里那份，绝不重复发请求。
+function reofferUpdate() {
+  if (updateSeen) offerUpdate(updateSeen);
+}
+
 /** 提醒页（设置 → 设备 → 提醒）。
  *  没有桥时这一页只剩一句说明：提醒是壳在手机上排的，网页自己存一份就变成第二个
  *  事实来源，而且那一份永远不会响——按了没反应的表单比没有表单更坏。 */
@@ -1888,7 +1997,13 @@ async function usePhoto() {
 }
 
 /* ---------------- 侧栏开合 ---------------- */
-function openSidebar() { $("sidebar").classList.add("open"); $("backdrop").classList.add("show"); }
+function openSidebar() {
+  $("sidebar").classList.add("open"); $("backdrop").classList.add("show");
+  /* 他点名的补弹时机：首屏那一弹可能被登录层盖住（.auth 的 z 更高），也可能他正忙着
+     打字直接划走了。拉开侧栏是一个"在看界面"的时刻，此时只要内存里已知有新版就再给一次
+     机会——注意是 reoffer 而不是 maybeAsk：这里绝不发请求，☰ 一晚上按十次也不多出一次网络。 */
+  reofferUpdate();
+}
 function closeSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
 
 function autosize(el) {
@@ -1966,6 +2081,12 @@ function bind() {
   $("rowMemory").onclick = () => openSetPage("memory");
   $("rowReminders").onclick = () => openSetPage("reminders");
   renderAboutRows();
+  /* 底部卡片那三颗。「立即更新」与「稍后」都写当天的日期戳：这一版今天不再弹第二次，
+     不管他是点了更新还是点了拒绝——他已经知道有新版了，同一天再问是骚扰。
+     那颗 <a> 的 click 只负责收尾（链接自己会跳走），不许 return false 去拦它。 */
+  $("updateLaterBtn").onclick = hideUpdateSheet;
+  $("updateGoBtn").onclick = () => { SHELL.checkUpdate(); hideUpdateSheet(); };
+  $("updateGoLink").onclick = hideUpdateSheet;
   // 改密码复用首层那套三步找回：这里再放一份字段就是第二个要各自校验、
   // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
   // 所以先把层打开，再翻到找回那张。
@@ -2155,6 +2276,10 @@ async function boot() {
   /* 冷启动时壳里可能已经躺着一件"分享 → AI 助手"送进来的文件（人在没打开网页时就分享了）。
      排在这一段最后：上传要带令牌，认不出人时传上去只会 401。没有桥它第一句就 return。 */
   if (state.me) drainShares();
+  /* 「发现版本更新」排在最后一句：它既不阻塞首屏也不分登录态（端点免鉴权，版本号是壳
+     报的，不是令牌的属性）。没有桥时 maybeAskUpdate 第一句就 return，浏览器里连一次
+     fetch 都不会发出去。 */
+  maybeAskUpdate();
 }
 
 document.addEventListener("DOMContentLoaded", boot);

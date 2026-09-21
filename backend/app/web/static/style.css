@@ -588,7 +588,8 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 /* 晕动症要的是"别动"，不是"动快点"，所以这里关的是动画与过渡本身而不是时长。
    本轮加的 hover 浮起 / 按压缩放 / 弹层弹出全都在这份清单里。 */
 @media (prefers-reduced-motion: reduce) {
-  .auth.intro-brand .auth-brand, .auth.intro-sheet .auth-sheet, .attach-menu { animation: none; }
+  .auth.intro-brand .auth-brand, .auth.intro-sheet .auth-sheet, .attach-menu,
+  .update-sheet.show { animation: none; }
   .btn, .btn-primary, .btn-send, .btn-ghost, .suggestions button, .sb-item, .nav-item,
   .who-row, .set-row, .set-mini, .attach-tile, .icon-btn, .icon-btn.plus-btn, .code-copy,
   .msg-tools, .chip, .input-card, .auth-eye { transition: none; }
@@ -624,3 +625,49 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .auth-go { height: 48px; border-radius: 999px; font-size: 16px; margin-top: 4px; }
 .auth-hint { min-height: 18px; margin: 0; font-size: 12.5px; color: var(--text-3); }
 .auth-hint.err { color: var(--danger); }
+
+/* ---------- 「发现版本更新」底部卡片 ----------
+ * 形状照他给的那张截图：贴在屏幕底边、只圆上面两个角、左边一句标题加版本号、
+ * 右边一幅插画、下面两颗按钮。
+ *
+ * 三件不是装饰的事：
+ * ① z-index 55：侧栏 50、它的遮罩 45。它必须刚好压在侧栏之上——「☰ 打开侧栏时补弹一次」
+ *    是这一版的行为，压在下面等于点了三横线什么都没发生。而只高这 5 点是有意的：
+ *    通用弹层 60、拍照 70、登录层 200 都在它上面，因为那三层是"有件事必须先做完"，
+ *    一张可以稍后再看的更新卡片不该从它们中间探出来。
+ * ② max-width 520px + 居中：平板与桌面窗口下它是一条通栏横幅，难看且像系统弹窗。
+ * ③ bottom 留 var(--safe-bottom)：Android 手势条与刘海会盖住卡片下沿那颗按钮。
+ * 玻璃面沿用 .auth-sheet 那一路，老 WebView 没有 backdrop-filter 时由下面的
+ * @supports 回退成不透明纯色——半透明底配不上模糊就是糊成一团文字。 */
+.update-sheet { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%);
+                z-index: 55; width: calc(100% - 24px); max-width: 520px;
+                padding: 18px 18px calc(14px + var(--safe-bottom));
+                border: 1px solid var(--line); border-bottom: 0;
+                border-radius: 18px 18px 0 0; background: var(--glass-strong);
+                backdrop-filter: blur(20px) saturate(1.5);
+                -webkit-backdrop-filter: blur(20px) saturate(1.5);
+                box-shadow: 0 -14px 34px rgba(0, 0, 0, .28); }
+.update-sheet.show { animation: update-sheet-rise .38s cubic-bezier(.22, .61, .36, 1) backwards; }
+@keyframes update-sheet-rise { from { opacity: 0; transform: translate(-50%, 16px); }
+                               to   { opacity: 1; transform: translate(-50%, 0); } }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .update-sheet { background: var(--surface); }
+}
+.us-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.us-text { min-width: 0; }
+.us-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--text); }
+.us-ver { margin: 5px 0 0; font-size: 13px; line-height: 1.45; color: var(--text-2);
+          word-break: break-word; }
+.us-art { flex: 0 0 auto; width: 66px; height: 48px; color: var(--accent); }
+.us-art .us-spark { fill: var(--accent-2); opacity: .75; }
+.us-acts { display: flex; gap: 10px; margin-top: 16px; }
+/* 44px 是他对手机可点目标定过的下限，两颗按钮各占一半。 */
+.us-btn { flex: 1 1 0; min-height: 44px; display: inline-flex; align-items: center;
+          justify-content: center; padding: 0 14px; border-radius: 999px;
+          font-size: 15px; font-family: inherit; cursor: pointer;
+          transition: transform .12s, filter .12s; }
+.us-btn:active { transform: scale(.97); }
+.us-ghost { border: 1px solid var(--line); background: transparent; color: var(--text-2); }
+.us-primary { border: 0; color: #fff; text-decoration: none;
+              background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
+.us-primary:hover { filter: brightness(1.06); }

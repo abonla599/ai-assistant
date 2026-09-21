@@ -462,6 +462,37 @@
     </div>
   </div>
 
+  <!-- 「发现版本更新」：底部卡片，只在确实有新版时弹（判据在 app.js 的 offerUpdate）。
+       和设置里那行「检查更新」是两件事——那一行是人去问，这张卡是"替他看一眼然后提一句"，
+       所以两者各自独立存在，删掉一张另一张照常。
+       版本号从 /v1/release/latest 填进来，这里一个字都不写死：抄一份进 markup，下一次
+       发版它就腐烂，而且腐烂得理直气壮（和 versionVal 那条是同一个理由）。
+       「立即更新」有两个元素（button 与 a），同一时刻只露一个，规则与设置那一行完全相同：
+       报得出版本号、又带 update 能力的壳才调桥，其余一律给下载页——否则手机上会留下一颗
+       点了没反应的死按钮。下载页地址写在 markup 里而不是 app.js：
+       test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。 -->
+  <div class="update-sheet hidden" id="updateSheet" role="dialog" aria-label="发现版本更新">
+    <div class="us-top">
+      <div class="us-text">
+        <p class="us-title">发现版本更新</p>
+        <p class="us-ver" id="updateVer"></p>
+      </div>
+      <svg class="us-art" viewBox="0 0 88 64" fill="none" aria-hidden="true">
+        <rect x="27" y="6" width="30" height="52" rx="8" stroke="currentColor" stroke-width="2.4"/>
+        <path d="M42 19v16M36 30l6 6 6-6" stroke="currentColor" stroke-width="2.4"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path class="us-spark" d="M14 11l2.3 5.2 5.2 2.3-5.2 2.3-2.3 5.2-2.3-5.2-5.2-2.3 5.2-2.3z"/>
+        <path class="us-spark" d="M75 33l1.7 3.8 3.8 1.7-3.8 1.7-1.7 3.8-1.7-3.8-3.8-1.7 3.8-1.7z"/>
+      </svg>
+    </div>
+    <div class="us-acts">
+      <button class="us-btn us-ghost hidden" id="updateLaterBtn" type="button">稍后</button>
+      <button class="us-btn us-primary hidden" id="updateGoBtn" type="button">立即更新</button>
+      <a class="us-btn us-primary hidden" id="updateGoLink" target="_blank" rel="noopener"
+         href="https://github.com/abonla599/ai-assistant/releases/latest">立即更新</a>
+    </div>
+  </div>
+
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
   <!-- highlight.js 不在关键路径上：由 markdown.js 在首次遇到代码块时懒加载，

@@ -159,12 +159,19 @@ def _invocations(src: str, name: str) -> list:
 
 
 def test_nothing_checks_for_an_update_unless_the_user_asks():
-    """「不点检查更新就拿不到最新安装包」这条承诺的下半段：没有任何自动触发。
+    """「不点检查更新就不会替你下载/安装」这条承诺的下半段：那条链没有任何自动触发。
 
-    能点燃这条链路的入口恰好三个——长按图标的快捷方式、桌面组件那颗按钮、设置里那一行
-    （走桥）——每一个都是"用户自己点的"。今天多一处"顺手在 onResume 里查一下"，这句话
-    就变成谎，而且没人会报错：GitHub 那个接口按来源 IP 限 60 次/小时，自动化的第一个代价
+    能点燃【下载并安装】这条链的入口恰好三个——长按图标的快捷方式、桌面组件那颗按钮、
+    设置里那一行（走桥）——每一个都是"用户自己点的"。今天多一处"顺手在 onResume 里查一下"，
+    这句话就变成谎，而且没人会报错：GitHub 那个接口按来源 IP 限 60 次/小时，自动化的第一个代价
     是把配额自己烧光。
+
+    2026-09-22 起这句话的边界要划清楚：网页那边新加了一张「发现版本更新」的底部卡片，
+    它每天会**自动问一次服务端**（GET /v1/release/latest）。那不是本条锁的例外，因为
+    那一次问的只是一个只读端点，它既不下载也不安装，也不碰下面这些 Java 符号；
+    卡片上那颗「立即更新」仍然要人点，点下去走的仍然是这里唯一那个桥方法。
+    换句话说：自动的只剩"提一句"，动手的仍然必须是点。缓存与出站的代价由
+    test_release_probe.py 那一边钉（10 分钟一次，与来多少请求无关）。
 
     判据是"可数"而不是"看着像"：startUpdateCheck 只容许一个调用者，
     那个调用者（requestUpdateCheck）只容许两处引用，且每处都必须贴着它自己的用户动作判据。
@@ -205,6 +212,13 @@ def test_nothing_checks_for_an_update_unless_the_user_asks():
         body = _code(path)
         assert "startUpdateCheck" not in body and "requestUpdateCheck" not in body, (
             f"{path.name} 里出现了触发更新的符号：它会在没人点的时候跑")
+
+    # 探测是【页面】的事，不是壳的事。壳一旦自己去问 /v1/release/latest，网页那把
+    # 「一天一次」的 localStorage 闸就管不到它了—— onResume 每帧一次都有可能，
+    # 而它烧的是服务端替所有人挡在前的那一份 GitHub 配额。
+    for path in [MAIN_ACTIVITY, SHELL_BRIDGE] + others:
+        assert "release/latest" not in _code(path), (
+            f"{path.name} 引用了页面那张卡片的探测地址：出发的位置从页面挪到了壳里")
 
 
 def test_bridge_advertises_the_update_capability_the_page_depends_on():

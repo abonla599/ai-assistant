@@ -1926,3 +1926,331 @@ def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():
     assert "versionVal" in js, "HTML 里有位置、JS 里没人填——那会是永久空白"
     assert "caps.version" in js, "填进去的值不是壳报的那个版本"
     assert not re.search(r"[\"'`]v?\d+\.\d+", js), "JS 里出现了手写版本号字面量"
+
+
+# ---------- 「发现版本更新」底部卡片 ----------
+#
+# 这一节全是"读源码"的锁，与 test_android_shell.py 同一个理由：本机没有真机，也没有
+# 能跑 app.js 的 DOM。所以每条判据都挑**形状上可数**的东西（某一行的字面、出现次数、
+# 两个位置的先后），并且逐条做过变异验证——把要防的那件事真改一遍，它必须红。
+
+
+def _js_fn(js: str, name: str) -> str:
+    """取 `function name(...) { ... }`：从签名到与它配对的那个右括号。
+
+    为什么不用 `js[js.index("function name("):]`（本节之前那种"切到文件尾"的写法）：
+    那一段里排在后面的**所有**函数都算在它头上，于是"某词不在这个函数里"这一类断言
+    永远是绿的。而本节有一条锁锁的恰恰就是"补弹那条路上不许碰网络"——用错尺子，
+    那条锁会一边绿着一边什么都不管。
+    """
+    if f"function {name}(" not in js:
+        raise AssertionError(f"app.js 里找不到 {name}()：这一节的锁跟着改名一起失效了")
+    at = js.index(f"function {name}(")
+    open_at = js.index("{", at)
+    depth = 0
+    for i in range(open_at, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[at:i + 1]
+    raise AssertionError(f"{name}() 的花括号没配上")
+
+
+def _sheet_block() -> str:
+    """index.html 里那张卡片**本体**（不含设置弹层里那两行「检查更新」）。
+
+    切到第一个 <script 为止，不数配对的 </div>：这块里有嵌套 div 和 SVG，
+    按标签配对的写法下一次多加一层就要重写，而它要的只是"卡片自己那一段"。
+    """
+    html = _html()
+    start = html.index('<div class="update-sheet')
+    end = html.index('<script src="vendor/marked.min.js"')
+    assert end > start, "卡片排在脚本之后：首屏那一帧它根本不存在，JS 拿不到元素"
+    return html[start:end]
+
+
+def _tag_of(block: str, ident: str) -> str:
+    pattern = r'<(?:button|a)\b[^>]*id="' + re.escape(ident) + r'"[^>]*>'
+    m = re.search(pattern, block)
+    assert m, f"卡片里没有 <button>/<a> #{ident}"
+    return m.group(0)
+
+
+def _balanced_css(css: str, at: int) -> str:
+    """从 at 之后第一个 { 起、按花括号配对取整块（嵌套的也算进来）。"""
+    open_at = css.index("{", at)
+    depth = 0
+    for i in range(open_at, len(css)):
+        if css[i] == "{":
+            depth += 1
+        elif css[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[open_at:i + 1]
+    raise AssertionError("从这里到文件末尾花括号没配上")
+
+
+def _nested_rule_bodies(css: str, at_keyword: str, selector: str) -> list:
+    """@supports / @media 这类嵌套块里，选择器 selector 自己的规则体。
+
+    为什么不能直接用 _declared_rules：那把尺子只看扁平规则，遇到嵌套写法时外层的
+    `@supports not (…) {` 被当成"选择器"、里面整条规则整个落进它的 body 里，于是
+    `@supports` 里的那一条**永远查不到**。本仓给 .auth-sheet 写实心回退时就是这么
+    躲过它的——所以这里自带一把会配对的，别指望那把尺子看见嵌套里的东西。
+    """
+    out = []
+    for m in re.finditer(re.escape(at_keyword), css):
+        block = _balanced_css(css, m.start())
+        if selector not in block:
+            continue
+        for sub in re.finditer(r"([^{}]+)\{([^{}]*)\}", block):
+            sel = sub.group(1).strip()
+            if re.search(r"(^|[\s,])" + re.escape(selector) + r"($|[\s,{])", sel):
+                out.append(sub.group(2))
+    return out
+
+
+def test_the_update_sheet_is_there_quietly_and_says_nothing_of_its_own():
+    """卡片存在、默认全藏、上面一个版本号都不写死。
+
+    四种坏法都不会报错：① 元素被改名或删掉（`$("updateSheet")` 拿到 null，卡片永远不
+    出来，页面其余部分照常——正是本仓最眼熟的那类"效果没了"）；② 默认不藏，于是每次
+    冷启动先闪一张「发现版本更新」再收回去，而那一刻它还什么都不知道；③ 把 v0.17 抄进
+    markup，下一次发版它就腐烂，而且腐烂得理直气壮（与 versionVal 那条同一个理由）；
+    ④ 三颗按钮漏一颗，卡片弹出来却关不掉。
+    """
+    block = _sheet_block()
+    assert 'class="update-sheet hidden" id="updateSheet"' in block, (
+        "卡片要么不在，要么默认就是露出来的")
+    js = _js()
+    for ident in ("updateSheet", "updateVer", "updateLaterBtn", "updateGoBtn", "updateGoLink"):
+        assert f'id="{ident}"' in block, f"卡片里少了 #{ident}"
+        assert f'$("{ident}")' in js, f"#{ident} 只写了 markup，没有代码在管它"
+    for ident in ("updateLaterBtn", "updateGoBtn", "updateGoLink"):
+        assert " hidden" in _tag_of(block, ident), f"#{ident} 默认是露出来的"
+
+    assert 'id="updateVer"></p>' in block, "版本那一格在 markup 里带了字：它只能由后端填"
+    assert ">稍后</button>" in block, "「稍后」那颗的文字变了（他点名的两颗按钮之一）"
+    assert block.count(">立即更新<") == 2, (
+        "「立即更新」不是恰好两颗（button 与 a 各一颗，同一时刻只露一颗）："
+        f"实际 {block.count('>立即更新<')} 颗")
+    assert block.count('href="https://github.com/abonla599/ai-assistant/releases/latest"') == 1, (
+        "卡片里那颗链接指的不是 releases/latest，或不只一处：写死文件名的下一次发版就腐烂")
+
+
+def test_the_card_offers_the_same_one_way_out_as_the_settings_row():
+    """两颗「立即更新」永远只露一颗，判据是壳报的 update 能力——与设置那一行同一条规则。
+
+    老壳（v0.15 及更早）只报版本号、报不出 update 能力，桥里没有 checkUpdate 这个方法：
+    给它那颗 button 就是又造一个点了没反应的死按钮，而它看起来和新壳上一模一样。
+    同一件事在本文件里红过一次（test_the_update_row_exists_and_never_becomes_a_dead_button），
+    所以这里不复用那条的语料，各判各的元素。
+    """
+    body = _js_fn(_js(), "offerUpdate")
+    assert "!!caps.update" in body, "分流不看壳报的能力"
+    assert "native ? btn : link" in body, "选的不再是「有桥才给 button」"
+    assert 'classList.toggle("hidden", el !== shown)' in body, (
+        "两颗按钮不再是按 shown 收的：会同时露出来，或者一颗都不露")
+    assert 'later.classList.remove("hidden")' in body, "「稍后」没被放出来：卡片弹了却关不掉"
+
+
+def test_the_card_opens_only_for_a_confirmed_update(monkeypatch):
+    """开门的三句判据都必须排在**动任何 DOM 之前**：确认有更新、今天还没弹过。
+
+    判据取"这一句出现在第一次 classList.remove 之前"而不是"这个标识符在函数里出现过"：
+    后者把 return 挪到弹卡片之后照样绿。三种漏法各对应一种吵到人的样子——
+    丢掉 has_update，"服务器可达、你已是最新"也会弹一张卡；丢掉 ok，GitHub 抽风那天
+    每个人都会收到一张写着空版本号的卡；丢掉那把日期闸，"每天最多一次"当场失效，
+    而**它不会报错**，只是每次 ☰ 都弹。
+    """
+    body = _js_fn(_js(), "offerUpdate")
+    head = body[:body.index("classList.")]      # 第一句写 DOM 之前
+    assert "return" in head, "判据排在弹卡片之后，等于没有判据"
+    assert "info.ok" in head and "has_update" in head, f"开门判据不完整：{head.strip()[:120]}"
+    assert "updateSheetShownToday()" in head, (
+        "日期闸不在弹卡片之前：这条节流失效之后，☰ 每开一次就弹一次")
+
+
+def test_the_card_reads_only_fields_the_backend_sends(monkeypatch):
+    """卡片从 JSON 里取的每个字段名，都得是后端那份回答里真有的键。
+
+    这是"效果没了但不报错"的正面对策：后端哪天把 latest 改叫 version，JS 里那句
+    `info.latest` 就静默变成 undefined，界面上弹出"新版本 vundefined · 当前 v0.16"，
+    而前后端各自的测试全都绿。字段名因此不许手抄一份对照表，直接从 probe() 的返回上取。
+    """
+    from app.core import releases
+
+    def fake_fetch():
+        return ({"version": "9.9", "url": "u", "asset_name": "a",
+                 "asset_url": "d", "size": 1}), ""
+
+    monkeypatch.setattr(releases, "_fetch", fake_fetch)
+    releases.reset_for_tests()
+    try:
+        keys = set(releases.probe(have="0.1").keys())
+    finally:
+        releases.reset_for_tests()
+
+    body = _js_fn(_js(), "offerUpdate")
+    fields = set(re.findall(r"\binfo\.([A-Za-z_][A-Za-z0-9_]*)", body))
+    assert fields, "offerUpdate 里一个 info.xxx 都没读到，这条锁在空转"
+    assert fields <= keys, f"卡片在读后端没给的字段：{sorted(fields - keys)}；给的是 {sorted(keys)}"
+
+    # 问的那一句里，参数名也要对上路由函数的形参名。对不上的表现是"永远回答
+    # 不知道装的是哪版"——不报错，只是那张卡片从此再也不出现。
+    ask = _js_fn(_js(), "maybeAskUpdate")
+    assert "?have=" in ask, "没把装着的版本号告诉服务器"
+    from app.main import release_latest
+    assert "have" in inspect.signature(release_latest).parameters, "后端那个形参改名了"
+
+
+def test_the_card_never_builds_a_download_target_out_of_the_response():
+    """下载地址只在 markup 那一处，绝不由响应里的字段拼出来。
+
+    后端回来的 JSON 里躺着 url 与 asset_url。把它们写成 <a> 的 href，等于让
+    "谁能在服务端返回里动手脚"就能决定手机上点下去打开哪个地址——而这条端点是
+    免鉴权的。指向 releases/latest 那个常量就没这个问题：它永远落在 GitHub 的发布页上。
+    """
+    body = _js_fn(_js(), "offerUpdate") + _js_fn(_js(), "hideUpdateSheet")
+    for name in ("url", "asset_url", "asset_name"):
+        assert f"info.{name}" not in body, f"卡片开始使用后端给的 {name} 了"
+    assert "href=" not in body and "setAttribute" not in body, "卡片在运行时改 href"
+
+
+def test_the_daily_stamp_is_the_local_calendar_not_an_utc_one():
+    """"每天最多一次"那把日期戳必须按本机日历算，而且读写的是同一把钥匙。
+
+    toISOString 是 UTC：北京时间早上八点之前它写的是"昨天"。用它的后果不是崩溃，是
+    每天早上八点整"今天还没弹过"重新成立一次——同一天弹两次，恰好是这条节流要防的事。
+    另一半更安静：写进去的和读出来比对的不是同一个 localStorage 键，那"今天不再弹"
+    永远读不到自己刚写的戳，于是每次开侧栏都弹；反过来如果只写不滚日（存了个 true），
+    就变成"这台设备的有生之年只弹一次"，第二天该提醒的时候它不提醒了。
+    """
+    js = _js()
+    day = _js_fn(js, "localDay")
+    assert "toISOString" not in day, "用的是 UTC 日期"
+    assert "getMonth()" in day and "getDate()" in day, "没按本机日历取月/日"
+
+    gate, writer = _js_fn(js, "updateSheetShownToday"), _js_fn(js, "markUpdateSheetShown")
+    assert "UPDATE_SHEET_KEY" in gate and "UPDATE_SHEET_KEY" in writer, "读写不是同一把钥匙"
+    assert "localDay()" in gate and "localDay()" in writer, (
+        "日期戳不再按天算：写 true 就是有生之年只弹一次")
+    assert "localDay()" in _js_fn(js, "updateSheetShownToday")
+    # 无痕模式里读 localStorage 就是抛。那时按"今天没弹过"处理是有意选的：宁可多提一次，
+    # 也不因为存储不可用而永远不提——这一句判的是那个方向，反过来写这条锁就白搭。
+    assert "return false" in gate, "读不到时的默认方向变了：那会变成永不提醒"
+
+
+def test_no_card_and_no_request_without_a_shell_version():
+    """浏览器与不报版本号的老壳：既不弹卡片，也一次请求都不发。
+
+    浏览器里没有安装包可换，弹一张「发现版本更新」只会让人以为网页能自更新（设置那一行
+    为此专门写着"去下载页"）。老壳更直接：拿不到手上的版本号就没法回答"有没有更新"，
+    而猜一个号出来弹脸，是比沉默更坏的选择。
+    """
+    js = _js()
+    ask = _js_fn(js, "maybeAskUpdate")
+    fetch_at = ask.index("fetch(")
+    # 判的是"闸门认的那个东西就是版本号"，不是"函数里有个 return"：`if (false) return;`
+    # 也满足后者，而它等于没有闸门。变异验证就是这么漏过一次。
+    assert re.search(r"if\s*\(\s*!have\s*\)\s*return", ask[:fetch_at]), (
+        "问服务器之前没有按「手上有没有版本号」放行——浏览器与老壳会照样收到一次探测")
+
+    ver = _js_fn(js, "shellVersion")
+    assert "caps.version" in ver, "版本号不是壳报的那个"
+    assert 'return ""' in ver, "没有壳时不再返回空，而是编了一个号出来"
+
+
+def test_the_sidebar_rehearses_from_memory_not_from_a_new_request():
+    """☰ 补弹那一条只复用内存里那份结果，绝不重新问服务器。
+
+    这条端点是全后端唯一会替调用人出一次网的免鉴权面（一次 GitHub 往返，最多 5 秒）。
+    把它挂在 openSidebar 上，"晚上想起来翻三次"就是三次出站，而它换来的答案是同一份。
+    所以判据是双向的：补弹那条路上不许出现 fetch，openSidebar 调的必须是补弹而不是探询。
+    """
+    js = _js()
+    again = _js_fn(js, "reofferUpdate")
+    assert "fetch(" not in again, "补弹那条路又去问了一次服务器"
+    assert "offerUpdate(updateSeen)" in again, "补弹没走内存里那份"
+
+    sidebar = _js_fn(js, "openSidebar")
+    assert "reofferUpdate()" in sidebar, "☰ 不再补弹了（他点名的时机）"
+    assert "maybeAskUpdate()" not in sidebar, (
+        "openSidebar 调的是探询而不是补弹：每开一次侧栏就多一次出站")
+
+
+def test_the_release_probe_is_the_last_thing_boot_does_and_is_never_awaited():
+    """首屏不等它：问发布页排在 boot 最后一句，而且没人 await 它。
+
+    挪到前面（或写成 await）的表现是"手机打开 App 转圈"——那 5 秒超时是 GitHub 的，
+    不是后端的，本地服务再快也救不回来。这一条只判先后与有没有 await，
+    因为这两件事都能静悄悄改掉，而代价是每个人每次冷启动。
+    """
+    boot = _js_fn(_js(), "boot")
+    at = boot.index("maybeAskUpdate()")
+    assert "await maybeAskUpdate" not in boot, "await 它就是把首屏交给 GitHub"
+    assert at > boot.index("renderMessages()"), "问发布页排在渲染之前"
+    assert at > boot.index('navigator.serviceWorker.register'), "它不在 boot 最后一段"
+
+    # 一页一次：整份 app.js 里除了定义，只容许一处真的调用。☰ 那一路走的是 reofferUpdate，
+    # 判据就在下一条锁里；这一条钉的是"多出来的那个触发点"，它不会报错，只会多要一次网络。
+    js = _js()
+    calls = [m.start() for m in re.finditer(r"\bmaybeAskUpdate\(\)", js)
+             if "function " not in js[max(0, m.start() - 12):m.start()]]
+    assert len(calls) == 1, f"探询的触发点有 {len(calls)} 处（只许 boot 那一处）"
+
+
+def test_the_card_lands_above_the_sidebar_and_below_every_modal_layer():
+    """层叠顺序：压得住侧栏，让得住所有模态层，两条都是行为不是审美。
+
+    压在侧栏之上是"☰ 补弹"这条要求成立的前提——它要是被侧栏盖住，点三横线就等于
+    什么都没发生。让在通用弹层(60)/拍照(70)/登录层(200)之下是另一半：那三层都是
+    "有件事必须先做完"，一张可以稍后再看的卡片不该从它们中间探出来。
+    只高侧栏 5 点不是随手取的：数值本身写在这里判的是**相对次序**，谁改谁负责说清
+    它想插到哪一档。
+    """
+    css = _css()
+
+    def bodies_of(selector):
+        out = list(_declared_rules(css, selector))
+        for kw in ("@media", "@supports"):
+            out += _nested_rule_bodies(css, kw, selector)
+        return out
+
+    def z_of(selector):
+        vals = [int(m.group(1)) for r in bodies_of(selector)
+                for m in [re.search(r"z-index:\s*(\d+)", r)] if m]
+        assert vals, f"{selector} 没有 z-index，本节其余判据失去基准"
+        return vals
+
+    card = z_of(".update-sheet")[0]
+    assert card > max(z_of(".sidebar") + z_of(".backdrop")), "卡片会被侧栏或它的遮罩盖住"
+    below = z_of(".modal") + z_of("#cameraModal") + z_of(".auth")
+    assert card < min(below), f"卡片压到了模态层之上（它们现在是 {sorted(set(below))}）"
+
+    assert any("var(--safe-bottom)" in r for r in bodies_of(".update-sheet")), (
+        "底部没留安全区：Android 手势条会盖住那颗「立即更新」")
+    fallback = _nested_rule_bodies(css, "@supports", ".update-sheet")
+    assert fallback and any("var(--surface)" in r for r in fallback), (
+        "没有 backdrop-filter 时的实心回退没了：半透明底配不上模糊就是糊成一团字")
+    btn = " ".join(bodies_of(".us-btn"))
+    hit = re.search(r"min-height:\s*(\d+)px", btn)
+    assert hit and int(hit.group(1)) >= 44, "两颗按钮不足 44px 高（他对手机可点目标定过的下限）"
+    assert "position: fixed" in " ".join(bodies_of(".update-sheet")), (
+        "卡片不再是钉在屏幕底边的那一条")
+
+
+def test_the_card_animation_has_a_reduced_motion_escape():
+    """升起动画在减弱动效偏好下必须关掉，而不是"稍微短一点"。
+
+    与开场动画那条锁同一个理由：晕动症要的是别动。判据取"动画所在的类被列进
+    prefers-reduced-motion 那个块"，因为只查 @keyframes 还在不在是没用的——
+    动画关不掉时关键帧当然也还在。
+    """
+    css = _css()
+    media = re.search(r"@media[^{]*prefers-reduced-motion[^{]*\{(.*?)\n\}", css, re.S)
+    assert media, "prefers-reduced-motion 那条媒体查询没写成块"
+    assert "update-sheet" in media.group(1), "卡片的升起动画没有减弱动效退路"
+    assert "update-sheet-rise" in css, "关键帧名字不见了：说明动画整个被删了"
