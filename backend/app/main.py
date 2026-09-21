@@ -444,7 +444,8 @@ def stream_chat_endpoint(request: ChatRequest,
             # 不会用计算器）。清单装配见 ChatPipeline.__init__。
             for chunk in stream_chat(provider["model"], messages,
                                      provider_id=provider["id"],
-                                     tools=pipe.tools_schema if pipe else None):
+                                     tools=pipe.tools_schema if pipe else None,
+                                     user_id=principal.user_id):   # 账本要落在人头上
                 full_text += chunk
                 yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
             

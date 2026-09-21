@@ -38,6 +38,7 @@ os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 
 # 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
+os.environ["USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "usage.json")
 
 with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
     json.dump([{
@@ -103,7 +104,9 @@ def _stub_llm_calls(monkeypatch):
     # 与 app.core.streaming.stream_chat 同形状：同步生成器。写成 async 会让端点里的
     # `for chunk in ...` 当场 TypeError，而不是静默放过一次回归。
     def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
-                    tools=None):
+                    tools=None, max_tool_turns=5, user_id=None):
+        # 形参要跟真函数一致：这个桩以前少两个参数，真签名一加参数，
+        # 所有走流式端点的测试就一起 TypeError——而红出来的信息看着像产品坏了。
         for piece in ("（", "测试", "回复）"):
             yield piece
 

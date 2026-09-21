@@ -89,6 +89,7 @@ DATA_PATH_ENV_VARS = {
     "附件": "UPLOAD_DIR",
     "长期记忆向量库": "CHROMA_DB_PATH",
     "任务清单": "TASKS_DB_PATH",
+    "用量账本": "USAGE_DB_PATH",
     "反馈原文": "FEEDBACK_FILE",
     "偏好摘要": "PREFERENCE_FILE",
 }
@@ -112,6 +113,7 @@ def resolve_all_data_paths() -> list:
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
     from app.preference_analyzer import PREFERENCE_FILE
     from app.agents.task_store import _default_path as tasks_path
+    from app.core.usage import _default_path as usage_path
     from app.session.session_store import _default_path as sessions_path
 
     resolved = {
@@ -121,6 +123,7 @@ def resolve_all_data_paths() -> list:
         "附件": uploads_dir(),
         "长期记忆向量库": chroma_dir(),
         "任务清单": tasks_path(),
+        "用量账本": usage_path(),
         "反馈原文": FEEDBACK_FILE,
         "偏好摘要": PREFERENCE_FILE,
     }

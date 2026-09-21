@@ -59,7 +59,7 @@ def test_stream_with_session(monkeypatch):
     # 不应依赖真实密钥是否有效（此前错误文本被当成回复保存，才让断言假性通过）。
     from app.core import streaming
 
-    def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096, tools=None):
+    def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096, tools=None, max_tool_turns=5, user_id=None):
         for piece in ("你", "好", "呀"):
             yield piece
 
@@ -113,7 +113,7 @@ def test_a_failed_model_call_says_which_exception_and_why(client, monkeypatch, c
     class SSLCertVerificationError(Exception):
         pass
 
-    def boom(model, messages, provider_id=None, temperature=0.7, max_tokens=4096, tools=None):
+    def boom(model, messages, provider_id=None, temperature=0.7, max_tokens=4096, tools=None, max_tool_turns=5, user_id=None):
         # 真机上量到的一条链，四层里三层是同一句话（截图见 2026-09-18）：
         # openai 包 httpx，httpx 又包了一层自己，最里才是 ssl 的校验失败
         err = APIConnectionError("Connection error.")

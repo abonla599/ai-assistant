@@ -324,6 +324,12 @@ class ProviderStore:
             raise ProviderError("base_url 必须以 http:// 或 https:// 开头")
         if not model:
             raise ProviderError("model 不能为空")
+        # 「这口钱谁出」是账本上的一列，不是可选备注：内置=operator、用户自带=user。
+        # 缺省给 operator，因为现存那几条记录确实都是管理员垫的——把缺省定成 user
+        # 会让升级后的第一天账目集体变成"用户自己的钱"，那是假账。
+        paid_by = str(record.get("paid_by") or "operator").strip()
+        if paid_by not in ("operator", "user"):
+            raise ProviderError("paid_by 只许 operator 或 user")
         return {
             "id": str(record.get("id") or f"p_{uuid.uuid4().hex[:8]}"),
             "label": label,
@@ -332,6 +338,7 @@ class ProviderStore:
             "model": model,
             "supports_vision": bool(record.get("supports_vision")),
             "is_default": bool(record.get("is_default")),
+            "paid_by": paid_by,
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
@@ -361,6 +368,7 @@ class ProviderStore:
             "is_default": bool(p.get("is_default")),
             "api_key_masked": mask_key(p.get("api_key", "")),
             "has_key": not looks_placeholder(p.get("api_key", "")),
+            "paid_by": p.get("paid_by") or "operator",
         }
 
     # ---- 探活 ----

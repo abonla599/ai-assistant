@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 # 启动 backend/app/main.py 时恰好可用，打包后会 ImportError，并被上层的
 # try/except 静默吞掉，导致记忆与工具能力在 EXE 里悄悄失效。
 from app.core.providers import store, build_client
+from app.core import usage   # 账本：与流式那一条同一个口径，别各记一套
 # 复用 memory_router 已选定的后端单例：本模块此前自行 new 了第二个 MemoryManager，
 # 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
 from app.memory.memory_router import memory_manager
@@ -124,40 +125,66 @@ class ChatPipeline:
         """
         provider = store.resolve(provider_id, legacy_model=model)
         client = build_client(provider)
+        billed = {k: 0 for k in ("prompt_tokens", "completion_tokens",
+                                 "total_tokens", "reasoning_tokens", "cached_tokens")}
+        rounds = 0
+        ok = True
+        try:
 
-        # 复制消息列表，避免修改原始数据
-        msgs = list(messages)
+            # 复制消息列表，避免修改原始数据
+            msgs = list(messages)
 
-        for turn in range(max_turns):
-            response = client.chat.completions.create(
-                model=provider["model"],
-                messages=msgs,
-                tools=self.tools_schema,  # 传递工具定义
-                tool_choice="auto"
-            )
-            msg = response.choices[0].message
+            for turn in range(max_turns):
+                response = client.chat.completions.create(
+                    model=provider["model"],
+                    messages=msgs,
+                    tools=self.tools_schema,  # 传递工具定义
+                    tool_choice="auto"
+                )
+                rounds += 1
+                u = getattr(response, "usage", None)
+                if u is not None:
+                    billed["prompt_tokens"] += getattr(u, "prompt_tokens", 0) or 0
+                    billed["completion_tokens"] += getattr(u, "completion_tokens", 0) or 0
+                    billed["total_tokens"] += getattr(u, "total_tokens", 0) or 0
+                    details = getattr(u, "completion_tokens_details", None)
+                    billed["reasoning_tokens"] += (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
+                    pdetails = getattr(u, "prompt_tokens_details", None)
+                    billed["cached_tokens"] += (getattr(pdetails, "cached_tokens", 0) or 0) if pdetails else 0
+                msg = response.choices[0].message
 
-            if msg.tool_calls:
-                # 执行工具，并将结果追加回消息
-                msgs.append(msg.model_dump())
-                for tool_call in msg.tool_calls:
-                    name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
-                    print(f"[Pipeline] 调用工具: {name}({args})")
-                    try:
-                        result = execute_tool(name, args)
-                    except Exception as e:
-                        result = f"工具执行错误: {e}"
-                    # 将工具结果作为 tool 消息添加
-                    msgs.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": str(result)
-                    })
-            else:
-                # 无工具调用，返回文本
-                return msg.content or "（模型未返回内容）"
-        return "已达到最大循环次数，任务可能未完成。"
+                if msg.tool_calls:
+                    # 执行工具，并将结果追加回消息
+                    msgs.append(msg.model_dump())
+                    for tool_call in msg.tool_calls:
+                        name = tool_call.function.name
+                        args = json.loads(tool_call.function.arguments)
+                        print(f"[Pipeline] 调用工具: {name}({args})")
+                        try:
+                            result = execute_tool(name, args)
+                        except Exception as e:
+                            result = f"工具执行错误: {e}"
+                        # 将工具结果作为 tool 消息添加
+                        msgs.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": str(result)
+                        })
+                else:
+                    # 无工具调用，返回文本
+                    return msg.content or "（模型未返回内容）"
+            return "已达到最大循环次数，任务可能未完成。"
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            # 与流式那一条同一个口径：记账用上游回传的数，上游没回就记 0 并留
+            # unknown_usage；这一路抛出去异常也要落一行 failed，否则"只对一半人"的
+            # 账比没账更坏——它会让人以为失败是免费的。
+            usage.record_call(user_id=self.user_id or "unattributed",
+                              provider_id=provider["id"],
+                              paid_by=provider.get("paid_by") or "operator",
+                              tool_rounds=max(0, rounds - 1), ok=ok, **billed)
 
     def save_interaction(self, user_input: str, ai_reply: str):
         """将本轮对话摘要存入记忆"""
