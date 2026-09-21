@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -40,6 +41,25 @@ def _js() -> str:
 
 def _html() -> str:
     return _strip_html_comments((ADMIN / "index.html").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def isolated_ledger(tmp_path, monkeypatch):
+    """把用量账本挪进临时文件，并且连进程内那一份一起还原。
+
+    账本是模块级全局（conftest 把 USAGE_DB_PATH 指到整场测试共用的目录），
+    我在这里记两笔就会让后面别人的断言莫名其妙多出行来，所以还原要靠 finally。
+    """
+    from app.core import usage
+
+    prev_days, prev_path = usage._days, usage._PATH
+    path = tmp_path / "usage.json"
+    monkeypatch.setenv("USAGE_DB_PATH", str(path))
+    usage.restore(path=str(path))
+    try:
+        yield path
+    finally:
+        usage._days, usage._PATH = prev_days, prev_path
 
 
 def test_admin_page_is_reachable_without_credentials(client):
@@ -233,7 +253,8 @@ def test_endpoints_that_had_no_button_are_now_wired():
     """
     js = _js()
     for needle in ("/v1/memory/stats", "/v1/memory/decay", "/v1/tasks",
-                   "/v1/agent/run", "/v1/agent/orchestrate", "/cancel"):
+                   "/v1/agent/run", "/v1/agent/orchestrate", "/cancel",
+                   "/v1/admin/usage"):
         assert needle in js, f"{needle} 还是没有入口"
     # 反向那半：跨用户读记忆正文这条线不接，也不许靠猜数糊过去。
     assert "/v1/memory/list" not in js, "管理页在列别人的记忆正文"
@@ -258,7 +279,138 @@ def test_every_id_admin_js_touches_exists_in_html():
     """
     js, html = _js(), _html()
     ids = set(re.findall(r'\$\("([^"]+)"\)', js))
-    assert {"userRows", "memTotal", "taskList", "agentOut", "revealText", "askOk"} <= ids, \
-        "这条锁在空转：四节里任何一节的 id 都不在名单上了"
+    assert {"userRows", "memTotal", "taskList", "agentOut", "revealText", "askOk",
+            "usageRows"} <= ids, \
+        "这条锁在空转：五节里任何一节的 id 都不在名单上了"
     missing = sorted(i for i in ids if 'id="%s"' % i not in html)
     assert not missing, f"admin.js 引用了 HTML 里不存在的 id: {missing}"
+
+
+# ---------- 用量那一节：账本得有入口，「下限」得说破 ----------
+
+def test_tabs_and_sections_match_each_other_exactly():
+    """每一节都要有一个 tab，每个 tab 都要指向一节——两边一多一少就有一栏永远看不见。
+
+    `showSection` 只由 tab 的点击驱动，除默认那节外所有 section 起手就是 hidden。
+    所以"新写一节忘了挂 tab"不会报错、不会让任何行为测试变红，只是那一栏凭空消失。
+    """
+    html = _html()
+    goto = re.findall(r'data-goto="([^"]+)"', html)
+    secs = re.findall(r'<section class="sec[^"]*" id="([^"]+)"', html)
+    assert goto and secs, "这条锁在空转：一个 tab 或一个分区都没扫到"
+    assert sorted(goto) == sorted(secs), f"tab 与分区对不上：{sorted(set(goto) ^ set(secs))}"
+    assert "secUsage" in secs, "用量那一节不见了"
+
+
+def test_every_data_icon_names_an_icon_that_exists():
+    """图标名写错时 `icon()` 返回一个空 svg：按钮照样能点，只是没有图形。
+
+    这类"效果没了但不报错"在本页有过一次锁（id 对不上），图标这轮才补上。
+    """
+    js, html = _js(), _html()
+    block = re.search(r"const ICONS = \{([\s\S]*?)\n  \};", js)
+    assert block, "ICONS 这张表不像原来的形状了，这条锁要跟着改而不是删"
+    known = set(re.findall(r"^\s{4}(\w+):\s*\[", block.group(1), re.M))
+    assert known, "ICONS 里一个图标都没有：这条锁在空转"
+    used = set(re.findall(r'data-icon="([^"]+)"', html))
+    used |= set(re.findall(r'\bbtn\("(\w+)"', js))
+    unknown = sorted(used - known)
+    assert not unknown, f"这些图标名页面在用、ICONS 里却没有：{unknown}"
+
+
+def test_usage_section_is_wired_to_the_ledger():
+    """`/v1/admin/usage` 早就在后台挂着 require_admin，这轮才有人看。
+
+    三条分开钉：数据源、响应里那三个键各归各的用途（rows 进表、totals 进卡片、
+    days 进选择器）。少任何一条，界面对应那一块都会变成"永远空白"而不是报错。
+    """
+    js = _js()
+    assert '"/v1/admin/usage"' in js, "用量那一节没有数据源了"
+    for field in ("rows", "totals", "days"):
+        assert re.search(r"\bdata\.%s\b" % field, js), \
+            f"响应里的 {field} 不再被读：那一块界面会永远空白"
+    assert js.count('cell("option"') == 1, "日期选择器不再由账本里的天数生成"
+    assert '"usageRows"' in js and '"usageTotals"' in js and '"usageDay"' in js
+
+
+def test_usage_day_is_the_only_thing_the_page_asks_by():
+    """接口只认 day，而且只认 YYYY-MM-DD（`auth_router._DAY_RE`）。
+
+    钉两半：传出去的值要过 encodeURIComponent（不编就是手滑拼出第二个参数），
+    以及不许出现"按 user_id 细查"的伪接口——后端没有那条线，接上就是 404。
+    """
+    js = _js()
+    assert '"/v1/admin/usage?day=" + encodeURIComponent(usageDay)' in js, \
+        "day 不再是唯一发出去的查询参数，或者它没经过编码"
+    for needle in ("user_id=", "?user", "&user"):
+        assert needle not in js, f"页面在按 {needle} 细查一个只认 day 的接口"
+
+
+def test_unknown_usage_is_reported_as_a_floor():
+    """上游没回 token 数时账上记 0 并留 unknown_usage：不说破，0 就被读成"没花钱"。
+
+    只数 `unknown_usage > 0` 这个比较句式的出现次数——写成 `if (row.unknown_usage)`
+    之类仍然算数，但把两处任意一处删成"只显示数字不判断"就会红。
+    """
+    js = _js()
+    assert js.count("unknown_usage > 0") == 2, \
+        "按行和按出资方两处标记少了一处：账不全的那一行/那一栏会被当成准确数读走"
+    assert "下限" in js, "没说出「这栏是下限」——只标红不解释，管理员不知道红的是什么"
+    assert '"tag warn"' in js, "行内标记没有配样式的那个类（.tag.warn 在 admin.css）"
+
+
+def test_the_backend_still_reports_which_rows_are_incomplete(isolated_ledger):
+    """反向那半：界面读的那个字段，后端确实还在回。
+
+    `unknown_usage` 哪天从响应里掉出去，上面那条锁照样绿（它读的是前端源码），
+    而页面上的标记会安静地永远不出现。所以这里打真接口，不读源码。
+    """
+    from app.core import usage
+
+    usage.record_call(user_id="u-floor", provider_id="p-x", paid_by="operator",
+                      prompt_tokens=10, completion_tokens=5, total_tokens=15)
+    usage.record_call(user_id="u-floor", provider_id="p-x", paid_by="operator")
+    admin = {"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]}
+    body = TestClient(app).get("/v1/admin/usage", headers=admin).json()
+
+    rows = [r for r in body["rows"] if r["user_id"] == "u-floor"]
+    assert len(rows) == 1, "同一天同一个人同一条 provider 应当并成一行"
+    assert rows[0]["unknown_usage"] == 1, "行的计数没了：界面那句「下限」读不到东西"
+    assert body["totals"]["operator"]["unknown_usage"] == 1, "合计的计数没了：同上"
+
+
+def test_paid_by_labels_are_pinned_to_the_backend_whitelist():
+    """「谁的钱」这一栏的措辞必须跟着 providers.py 那对白名单走。
+
+    后端加第三个取值，这里的键就会先红——红得对：那时"谁出钱"这句话多了一种人话没写。
+    翻成人话而不是把 operator / user 原样扔出去，也是这条锁的一半。
+    """
+    js = _js()
+    block = re.search(r"const PAID = \{([^}]*)\}", js)
+    assert block, "PAID 这张表不像原来的形状了，这条锁要跟着改而不是删"
+    pairs = dict(re.findall(r'(\w+):\s*"([^"]*)"', block.group(1)))
+    assert set(pairs) == {"operator", "user"}, f"与后端的白名单不一致：{sorted(pairs)}"
+    for value in pairs.values():
+        assert re.search(r"[\u4e00-\u9fff]", value), "把枚举原样扔给人看了"
+    src = (backend_path / "app" / "core" / "providers.py").read_text(encoding="utf-8")
+    assert '("operator", "user")' in src, \
+        "后端不再只认这两个出资方：这一栏的措辞得重写，本锁的键也要跟着改"
+
+
+def test_usage_reads_the_name_table_after_users_load():
+    """「谁」这一栏读的是 loadUsers 填的 user_id→用户名表，所以它必须晚于那一步。
+
+    并到同一批 Promise.all 里不会报错，只会让第一次渲染时满屏都是裸 id——
+    而这恰好是"数据在但读不出人"的那种坏法。第二句钉的是别处不再 fetch 一次同一张表。
+    """
+    js = _js()
+    body = re.search(r"async function refresh\(\)\s*\{([\s\S]*?)\n  \}", js)
+    assert body, "refresh 不像原来的形状了，这条锁要跟着改而不是删"
+    inner = body.group(1)
+    assert "loadUsers" in inner and "loadUsage" in inner
+    assert not re.search(r"Promise\.all\(\[[^\]]*loadUsers[^\]]*loadUsage", inner), \
+        "用量又被并回同一批并发了：两个函数同时起跑，名字表多半还是空的"
+    assert inner.index("loadUsers") < inner.index("loadUsage"), \
+        "名字表还没填就去渲染「谁」那一栏，第一次进去会满屏裸 id"
+    assert js.count('"/v1/admin/users"') == 1, \
+        "user_id→用户名 有了第二个取法：两处各自刷新就是第二个真相"

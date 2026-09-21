@@ -45,6 +45,8 @@
     eye:     ["M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12Z",
               "M12 14.4a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z"],
     decay:   ["M12 5v9", "M8 10.5l4 4 4-4", "M5 19h14"],
+    // 用量：三根柱子。与 PWA 那套同一口径（24 视图、1.7 描边、currentColor 上色）
+    usage:   ["M6 20V11", "M12 20V4.5", "M18 20v-6"],
     close:   ["M6 6l12 12M18 6L6 18"],
   };
 
@@ -195,8 +197,14 @@
 
   /* ---------- 用户 ---------- */
 
+  // user_id → 用户名。用量那一节要把账本上的 id 翻成看得懂的人名，读的就是这张表。
+  // 只有 loadUsers 写它：别处再 fetch 一次 /v1/admin/users 就是第二个真相。
+  let nameById = {};
+
   async function loadUsers() {
     const { users } = await req("/v1/admin/users");
+    nameById = {};
+    (users || []).forEach((u) => { nameById[u.user_id] = u.username; });
     const tbody = $("userRows");
     tbody.textContent = "";
     if (!users || !users.length) {
@@ -280,6 +288,99 @@
     td.colSpan = span;
     td.style.color = "var(--text-3)";
     tr.appendChild(td);
+    return tr;
+  }
+
+  /* ---------- 用量 ---------- */
+
+  // 账本上 paid_by 只有这两个取值（providers.py 里是白名单硬校验）。这一栏要回答的是
+  // "谁的钱"，所以不把 operator / user 原样扔给看页面的人。
+  const PAID = { operator: "服务端垫的", user: "他自带的 key" };
+
+  let usageDay = "";                         // 选择器当前看的那一天，空 = 让后端给今天
+
+  function fmtN(n) {
+    // 不交给 toLocaleString：各家 WebView 的默认分组规则不一样，同一个数会显示成两种样子
+    const s = String(Math.abs(Math.round(n || 0)));
+    return (n < 0 ? "-" : "") + s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  async function loadUsage() {
+    const sel = $("usageDay");
+    const data = await req(usageDay
+      ? "/v1/admin/usage?day=" + encodeURIComponent(usageDay)
+      : "/v1/admin/usage");
+    // 哪天是"正在看的这天"由后端回回来，本地不猜：账本按本地时区切天，浏览器时区
+    // 跟服务端不一致时（手机在别的网络里）自己拼今天会问到另一天去。
+    usageDay = data.day || "";
+
+    const days = (data.days || []).slice();
+    if (usageDay && days.indexOf(usageDay) < 0) days.push(usageDay);
+    days.sort().reverse();                   // YYYY-MM-DD 字典序就是时间序
+    sel.textContent = "";
+    days.forEach((d) => {
+      const o = cell("option", d);
+      o.value = d;
+      sel.appendChild(o);
+    });
+    sel.value = usageDay;
+
+    renderTotals(data.totals || {});
+
+    const tbody = $("usageRows");
+    tbody.textContent = "";
+    const rows = data.rows || [];
+    if (!rows.length) {
+      tbody.appendChild(emptyRow("这一天没有账。上面两张卡是零，不是读不到。", 8));
+      return;
+    }
+    rows.forEach((r) => tbody.appendChild(usageRow(r)));
+  }
+
+  function renderTotals(totals) {
+    const box = $("usageTotals");
+    box.textContent = "";
+    Object.keys(totals).forEach((paid) => {
+      const t = totals[paid] || {};
+      const card = cell("div", undefined, "card grow");
+      const stat = cell("div", undefined, "stat");
+      stat.appendChild(cell("b", fmtN(t.total_tokens)));
+      stat.appendChild(cell("span", "token · " + (PAID[paid] || paid)));
+      card.appendChild(stat);
+      card.appendChild(cell("p", fmtN(t.calls) + " 次 · 成功 " + fmtN(t.ok)
+        + " / 失败 " + fmtN(t.failed) + " · 入 " + fmtN(t.prompt_tokens)
+        + " 出 " + fmtN(t.completion_tokens), "pane-note"));
+      const extra = [];
+      if (t.reasoning_tokens) extra.push("推理 " + fmtN(t.reasoning_tokens));
+      if (t.cached_tokens) extra.push("缓存命中 " + fmtN(t.cached_tokens));
+      if (extra.length) card.appendChild(cell("p", extra.join(" · "), "pane-note"));
+      if (t.unknown_usage > 0) {
+        card.appendChild(cell("p", "其中 " + fmtN(t.unknown_usage)
+          + " 次上游没回 token 数：这栏是下限，不是准确数", "pane-note warn"));
+      }
+      box.appendChild(card);
+    });
+  }
+
+  function usageRow(r) {
+    const tr = document.createElement("tr");
+    const who = cell("td", undefined, "name");
+    who.appendChild(cell("span", nameById[r.user_id] || r.user_id));
+    // 删过号的人、以及 bootstrap 口令那个 default_user 都不在用户表里：
+    // 账还在，但翻不出名字，就照原样把 id 摆出来。
+    if (!nameById[r.user_id]) who.appendChild(cell("span", "（不在用户表里）", "dim"));
+    tr.appendChild(who);
+    tr.appendChild(cell("td", r.provider_id, "code"));
+    tr.appendChild(cell("td", PAID[r.paid_by] || r.paid_by));
+    tr.appendChild(cell("td", fmtN(r.calls)));
+    tr.appendChild(cell("td", fmtN(r.ok) + " / " + fmtN(r.failed)));
+    tr.appendChild(cell("td", fmtN(r.total_tokens)));
+    tr.appendChild(cell("td", fmtN(r.tool_rounds)));
+    const note = cell("td");
+    note.appendChild(r.unknown_usage > 0
+      ? cell("span", fmtN(r.unknown_usage) + " 次没回 token 数", "tag warn")
+      : cell("span", "齐", "dim"));
+    tr.appendChild(note);
     return tr;
   }
 
@@ -416,7 +517,8 @@
   }
 
   async function refresh() {
-    await Promise.all([loadUsers(), loadMemory(), loadTasks()]);
+    await loadUsers();          // 用量那一节的「谁」要读它填的名字表，所以不能并到下一行里
+    await Promise.all([loadMemory(), loadTasks(), loadUsage()]);
   }
 
   $("btnLogin").addEventListener("click", async () => {
@@ -450,6 +552,12 @@
   $("btnCloseDetail").addEventListener("click", () => $("detail").classList.add("hidden"));
 
   $("btnDecay").addEventListener("click", (e) => busy(e.currentTarget, decay));
+  // 换日期就重新读一次：这本账一天一答，前端不按人细算，也不做"切天不重新请求"的乐观更新。
+  $("usageDay").addEventListener("change", (e) => {
+    usageDay = e.target.value;
+    busy(null, loadUsage);
+  });
+  $("btnUsage").addEventListener("click", (e) => busy(e.currentTarget, loadUsage));
   $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
   $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
 

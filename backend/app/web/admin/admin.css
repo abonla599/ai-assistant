@@ -61,6 +61,10 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .row .grow { flex: 1 1 220px; min-width: 0; }
 input.num { width: 86px; flex: none; }
+/* 用量那节的日期选择器。.row input 在 PWA 那份表里有，select 没有——不补就是一个
+   白底原生控件贴在深色页上，跟同一行那个「重新读」按钮不成一套。 */
+.row select { border: 1px solid var(--line); background: var(--bg-soft);
+  border-radius: 10px; padding: 9px 12px; outline: none; flex: none; }
 
 /* ---------- 卡片与状态 ---------- */
 .card { background: var(--surface); border: 1px solid var(--line);
@@ -85,7 +89,9 @@ td.acts { white-space: nowrap; }
 td.acts button { margin: 0 2px 2px 0; }
 .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 999px;
   background: var(--accent-soft); color: var(--accent); }
-.tag.off { background: rgba(248, 113, 113, .14); color: var(--danger); }
+.tag.off, .tag.warn { background: rgba(248, 113, 113, .14); color: var(--danger); }
+/* 上游没回 token 数不是错误，但它让那一栏变成下限，所以不能和旁边的灰字一样不起眼 */
+.pane-note.warn { color: var(--danger); }
 
 /* ---------- 任务与智能体 ---------- */
 .task-list { display: flex; flex-direction: column; gap: 8px; }

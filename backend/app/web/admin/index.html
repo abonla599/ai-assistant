@@ -38,6 +38,7 @@
 
     <nav class="tabs" id="tabs">
       <button class="tab active" type="button" data-goto="secUsers" data-icon="users" data-label="用户"></button>
+      <button class="tab" type="button" data-goto="secUsage" data-icon="usage" data-label="用量"></button>
       <button class="tab" type="button" data-goto="secMemory" data-icon="memory" data-label="记忆"></button>
       <button class="tab" type="button" data-goto="secTasks" data-icon="tasks" data-label="任务"></button>
       <button class="tab" type="button" data-goto="secAgent" data-icon="agent" data-label="智能体"></button>
@@ -53,6 +54,25 @@
         </tr></thead>
         <tbody id="userRows"></tbody>
       </table></div>
+    </section>
+
+    <!-- ---------------- 用量 ---------------- -->
+    <section class="sec hidden" id="secUsage">
+      <h2>用量</h2>
+      <p class="pane-note">一行是「这一天 · 这个人 · 这条模型服务」。它由 <code>/v1/chat</code> 的两条路径（非流式与流式）在跑完之后各记一笔，<b>失败的和客户端中途断开的那几次也在账上</b>——只记跑完的那次会系统性低估用量。「智能体」那一节跑的 ReAct 与编排不记：那条链路不经过记账。</p>
+      <div class="row">
+        <span class="dim" style="font-size:12.5px">看哪天</span>
+        <select id="usageDay"></select>
+        <button id="btnUsage" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新读这一天的账"></button>
+      </div>
+      <div class="row" id="usageTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>谁</th><th>模型服务</th><th>谁的钱</th><th>次数</th><th>成 / 败</th><th>token</th><th>工具轮</th><th>账全不全</th>
+        </tr></thead>
+        <tbody id="usageRows"></tbody>
+      </table></div>
+      <p class="pane-note" style="margin-top:10px">token 数一律取上游回传的 <code>usage</code>，服务端不估算：各家分词器不同，本地算出来的数拿去对账是错的。上游没回数字的那几次各项记 0，并在「账全不全」里点出来——那种行的 token 是个<b>下限</b>，不是准确数。日期只认 <code>YYYY-MM-DD</code>，接口也只认 <code>day</code> 这一个参数，所以按人细看就是读完上面这张表，它本来就一人一行。</p>
     </section>
 
     <!-- ---------------- 记忆 ---------------- -->
