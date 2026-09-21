@@ -108,6 +108,12 @@ function render() {
     : "（还没跑）");
 }
 
+function running(k) {
+  // 正在跑的那一项要看得见。一个卡住的步骤和没跑的步骤长得一模一样，等于把
+  // "卡在哪"这条唯一有用的信息丢掉了——2026-09-20 那次 1033 的教训是同一个形状。
+  put(k, false, "正在跑…（最多等 20 秒，超时会写进报告）");
+}
+
 function put(k, ok, line, detail) {
   const c = CHECKS.find((x) => x[0] === k);
   state.rows = state.rows.filter((x) => x.k !== k);
@@ -125,10 +131,21 @@ function body(model, messages, extra) {
   return Object.assign(o, extra || {});
 }
 
+// 每一项最多等这么久：没有上限的 await 就是"卡在四、半天没反应"的成因——
+// 上游或浏览器只要不回，这一项永远不落地，而界面上它和"没跑"长得一模一样。
+const IDLE_LIMIT_MS = 20000;
+
 async function callStream(label, extra, opts) {
   const ctrl = new AbortController();
   const started = performance.now();
   let firstByte = null, deltas = 0, chars = 0, usage = null, finish = "";
+  let timedOut = false, idle = null;
+  const arm = () => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => { timedOut = true; ctrl.abort(); }, IDLE_LIMIT_MS);
+  };
+  const stopArm = () => { if (idle) clearTimeout(idle); idle = null; };
+  arm();
   const res = await fetch(endpoint(), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer " + $("key").value.trim() },
@@ -138,6 +155,7 @@ async function callStream(label, extra, opts) {
     signal: ctrl.signal,
   });
   if (!res.ok) {
+    stopArm();
     const t = await res.text().catch(() => "");
     throw Object.assign(new Error("HTTP " + res.status), { status: res.status, text: t.slice(0, 220) });
   }
@@ -147,17 +165,21 @@ async function callStream(label, extra, opts) {
   if (opts && opts.stopAfter) setTimeout(() => { aborted = true; ctrl.abort(); }, opts.stopAfter);
   while (true) {
     const { value, done } = await reader.read();
+    if (timedOut) throw Object.assign(new Error(IDLE_LIMIT_MS / 1000 + " 秒无响应（已掐断）"),
+                                      { timeout: true });
     if (done || aborted) break;
+    arm();
     if (firstByte === null) firstByte = performance.now() - started;
     buf += dec.decode(value, { stream: true });
     // SSE 帧之间用空行分隔；这里按行拆，兼容 ": OPENAI-COMPLETION" 之类注释行。
     const lines = buf.split("\n");
     buf = lines.pop();
+    let broke_on_done = false;
     for (const raw of lines) {
       const line = raw.trim();
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
-      if (payload === "[DONE]") continue;
+      if (payload === "[DONE]") { broke_on_done = true; break; }
       let j; try { j = JSON.parse(payload); } catch (e) { continue; }
       if (j.usage) usage = j.usage;
       const d = (j.choices && j.choices[0] && j.choices[0].delta) || null;
@@ -166,7 +188,9 @@ async function callStream(label, extra, opts) {
       }
       if (j.choices && j.choices[0] && j.choices[0].finish_reason) finish = j.choices[0].finish_reason;
     }
+    if (broke_on_done) break;
   }
+  stopArm();
   return { firstByte, deltas, chars, usage, finish, aborted, ms: performance.now() - started };
 }
 
@@ -176,11 +200,12 @@ async function runAll() {
   state.webview = /; wv\)/.test(state.ua) || /wv,/.test(state.ua);
   state.rows = [];
   render();
+  try {
   if (!$("key").value.trim()) {
     put("1", false, "key 没填，后面五项全部跳过");
-    $("run").disabled = $("one").disabled = false;
-    return;
+    return;                       // 按钮交还给 finally 去解，别在这里再写一遍
   }
+  running("1");
   // 1 流式连通
   try {
     const r = await callStream();
@@ -189,6 +214,7 @@ async function runAll() {
         r.deltas ? "" : "连上了但一个增量都没拿到——流式解析或供应商行为要查");
   } catch (e) { put("1", false, e.message, e.text || ""); }
 
+  running("2");
   // 2 usage 回传
   try {
     const r = await callStream(null, { include_usage: true });
@@ -197,6 +223,7 @@ async function runAll() {
         u ? "字段名以这份 JSON 为准，账本照它写" : "那账本只能走非流式的 usage，或本地估算——两者要分清");
   } catch (e) { put("2", false, e.message, e.text || ""); }
 
+  running("3");
   // 3 非流式
   try {
     const t0 = performance.now();
@@ -210,6 +237,7 @@ async function runAll() {
     put("3", true, `${Math.round(performance.now() - t0)}ms，usage=${JSON.stringify(j.usage || "无")}`);
   } catch (e) { put("3", false, e.message, e.text || ""); }
 
+  running("4");
   // 4 错 key
   try {
     const good = $("key").value;
@@ -222,15 +250,20 @@ async function runAll() {
     put("4", /401|403/.test(String(e.status)), `状态码 ${e.status}，文案：${(e.text || "").slice(0, 120)}`);
   }
 
+  running("5");
   // 5 中途取消（前端主动 abort，模拟"切后台/关页面"）
   try {
     const r = await callStream(null, null, { stopAfter: 2500, prompt: "从 1 数到 500，每个数字一行。" });
     put("5", r.deltas > 0, `2.5s 时主动中断：已收 ${r.deltas} 块 / ${r.chars} 字，aborted=${r.aborted}`);
   } catch (e) { put("5", false, e.message, e.text || ""); }
 
+  } finally {
+    // 收尾写在 finally 里：以前它是函数最后一行，任何一项在 try 外面抛了，
+    // 两个按钮就永远灰着——而这页唯一的作用就是让人再跑一遍。
+    $("run").disabled = $("one").disabled = false;
+  }
   // 6 留给手动
   put("6", false, "未跑：点「只跑第 6 项」，然后在你手上开飞行模式");
-  $("run").disabled = $("one").disabled = false;
 }
 
 async function runOffline() {

@@ -4,6 +4,9 @@
 Cloudflare 已设「尊重现有标题」,源站一不表态,改版在朋友那边就是"改了没生效"
 （2026-09-17 那次线上界面改版就是这么消失 80 分钟的）。
 """
+import re
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -390,3 +393,98 @@ def test_the_report_never_carries_the_key():
     region = code[start:end]
     assert '$("key").value ?' in region, "判空那个三元不在了：报告头的形状被改过，这条锁要看住的东西也变了"
     assert region.count('$("key").value') == 1, "报告拼装区里第二次读了 key 的值——它会被带进可复制的文本"
+
+
+def test_no_probe_check_can_hang_forever():
+    """2026-09-21 他在手机上跑到第 4 项"半天没反应"，界面上它和"没跑"长得一模一样。
+
+    上游其实 0.2 秒就回了 401（实测），所以卡住的是这一页自己：`callStream` 没有任何
+    时间上限，而 `[DONE]` 那行写的是 continue——服务商发完 [DONE] 不马上关连接的话，
+    循环就永远等在 reader.read() 上。三条一起钉：
+
+    ① 每次等待都有上限（超时要变成一个结论，不是一次沉默）；
+    ② 正在跑的那一项要显示出来，否则"卡在哪"这条唯一有用的信息就丢了；
+    ③ 收尾放 finally——以前它写在函数最后一行，任何一项在 try 外面抛了，
+      两个按钮就永远灰着，而这页全部的作用就是让人再跑一遍。
+    """
+    code = _probe_code()
+    limit = re.search(r"IDLE_LIMIT_MS\s*=\s*(\d+)", code)
+    assert limit and int(limit.group(1)) >= 5000, (
+        "等待上限不在了（或被写成 0）：任何一项都可能永远不落地，"
+        "而 0 会让每一项当场失败——两种都不是「跑一遍看看」")
+    assert "timedOut = true" in code and "ctrl.abort()" in code, "超时没人掐连接"
+    assert "timeout: true" in code, "超时没有变成一句报告，只是被吞掉"
+    # 判那一行本身，不判变量在不在：把 break 换成 continue 时 broke_on_done 依然
+    # 声明着、依然被 if 用着，只查存在性的锁会照样绿（这条锁刚才就是这么漏的）。
+    done_line = [ln for ln in code.splitlines() if '"[DONE]"' in ln]
+    assert done_line and all("break" in ln for ln in done_line), (
+        "[DONE] 又变回 continue：发完不关连接的服务商会把这一项挂死：" + str(done_line))
+    assert code.count("running(") >= 5, "有步骤没有进行中标记，卡住时看不出来卡在哪一步"
+    assert "} finally {" in code, "按钮的复原不再放在 finally 里"
+
+
+def test_the_site_screenshots_stay_opaque():
+    """官网那四张实拍不许再被压成半透明。
+
+    他第一次在手机上看这块的反馈是"完全看不到"：轨道窄，相邻两张会露边，而
+    `.slide:not(.is-active)` 被压到 .28，四张里三张是 ghost，整块读起来像没加载。
+    图片是内容不是装饰层——轮播本来就靠 translateX 把别的张推出视口，淡出是多余的。
+    """
+    import os
+    from app.web.web_router import SITE_DIR
+    with open(os.path.join(SITE_DIR, "site.css"), encoding="utf-8") as f:
+        css = _strip_css_comments(f.read())
+    for rule in re.finditer(r"html\.js \.slide[^{]*\{([^}]*)\}", css):
+        body = rule.group(1)
+        m = re.search(r"opacity:\s*([0-9.]+)", body)
+        assert not m or float(m.group(1)) >= 1, f"实拍图又被压透明度了：{rule.group(0).strip()}"
+
+
+def _strip_css_comments(css: str) -> str:
+    return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+
+def test_health_reports_the_build_stamp(client):
+    """「设置 → 关于」那一行要知道服务端这份是第几版——判据来自 /health。
+
+    取不到戳时宁可给空字符串（前端会退回"网页版"那句），不许猜一个号：
+    写死的版本号是这仓最眼熟的那种错。
+    """
+    body = client.get("/health").json()
+    assert "build" in body, "/health 不再报构建戳：关于那一行就没有来源了"
+    assert isinstance(body["build"], str)
+    assert body["status"] in ("ok", "degraded", "broken")
+
+
+def test_the_build_stamp_comes_from_a_file_we_generate_at_build_time(tmp_path, monkeypatch):
+    """version.txt 是构建时生成的，不进版本库；这条钉住"唯一来源是 git tag"这个安排。
+
+    正向对照：文件不存在时必须是空串——宁缺毋错。写进源码/前端的那一份才是问题，
+    所以另一头由 test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand 看着。
+    """
+    import os
+    from app.core import buildinfo
+
+    monkeypatch.setattr(buildinfo, "data_root", lambda: str(tmp_path))
+    monkeypatch.setattr(buildinfo, "candidates_for_test", None, raising=False)
+    buildinfo.build_version.cache_clear()
+    assert buildinfo.build_version() == "", "没有 version.txt 时它凭空造出了一个版本号"
+
+    (tmp_path / "version.txt").write_text("v0.16\n", encoding="utf-8")
+    buildinfo.build_version.cache_clear()
+    assert buildinfo.build_version() == "v0.16"
+    buildinfo.build_version.cache_clear()
+
+    assert not os.path.exists(os.path.join(os.path.dirname(buildinfo.__file__), "version.txt"))
+
+
+def test_the_packaging_spec_lists_the_version_file(tmp_path):
+    """spec 漏列 version.txt，冻结版就读不到构建戳，而这不会让任何测试变红。
+
+    所以这里直接读 spec 的写法判：条件列项（文件不在就不列）要保住——
+    构建失败的时候人是会慌的，而少一个显示用的版本号不该换来一次失败构建。
+    """
+    root = Path(__file__).resolve().parents[2]
+    spec = (root / "run_backend.spec").read_text(encoding="utf-8")
+    assert "'version.txt'" in spec, "spec 不再把构建戳打进包里：冻结版将永远显示不出服务端版本"
+    assert "os.path.isfile('version.txt')" in spec, "变成了无条件列项：没有该文件时 PyInstaller 会直接报错"
