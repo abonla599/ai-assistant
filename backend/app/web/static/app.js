@@ -1406,7 +1406,7 @@ function renderAccounts() {
  *  test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。
  *  点下去不改这一行的文字：原生那侧已经立刻弹了一条"正在检查更新…"的 Toast，
  *  这里再写一个"正在检查…"就会在对话框关掉之后一直挂着假状态。 */
-function renderUpdateRow() {
+function renderAboutRows() {
   const btn = $("rowUpdate"), link = $("rowUpdateLink");
   if (!btn || !link) return;
   const caps = SHELL.present ? (SHELL.capabilities() || {}) : {};
@@ -1420,6 +1420,20 @@ function renderUpdateRow() {
     // 不补这一条的话卡片底下会多出一条分隔线。
     el.classList.toggle("set-only", el === shown);
   });
+  // 浏览器里两行全藏，这时候最后一行是「服务地址」——同一个理由再判一次，
+  // 不然那一行底下会挂着一条通向看不见的行的分隔线。
+  const conn = $("connRow");
+  if (conn) conn.classList.toggle("set-only", !shown);
+
+  // 版本这一行：唯一来源是壳报上来的 versionName（它来自 android/app/build.gradle）。
+  // 旧壳连 version 都不报时宁可说"未知"，也不许拿一个写死的数字顶上——那是第二个
+  // 事实来源，而且它会一直显示得理直气壮。
+  const box = $("versionVal");
+  if (box) {
+    box.textContent = SHELL.present ? (ver || "未知（这一版壳不上报版本号）")
+                                    : "网页版 · 界面随服务端更新，无需安装";
+  }
+
   if (!shown) { $("updateVal").textContent = ""; $("updateLinkVal").textContent = ""; return; }
 
   if (native) {
@@ -1919,7 +1933,7 @@ function bind() {
   $("rowPersona").onclick = () => openSetPage("persona");
   $("rowMemory").onclick = () => openSetPage("memory");
   $("rowReminders").onclick = () => openSetPage("reminders");
-  renderUpdateRow();
+  renderAboutRows();
   // 改密码复用首层那套三步找回：这里再放一份字段就是第二个要各自校验、
   // 各自挡双击、各自跟后端字段名对齐的地方。showAuthView 只在那层可见时换表单，
   // 所以先把层打开，再翻到找回那张。

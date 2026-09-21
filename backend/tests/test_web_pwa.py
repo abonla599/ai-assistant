@@ -846,7 +846,14 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
     assert re.search(r'\$\("whoRow"\)\.onclick\s*=\s*\(\)\s*=>\s*\{\s*openSettings\(\);\s*closeSidebar\(\);', js), \
         "点击没有同时打开设置并收起侧栏"
     assert '$("userAvatar").textContent = name ? name[0]' in js, "头像没取首字母"
-    about = re.search(r'<p class="set-group">关于</p>[\s\S]*?</div>', html).group(0)
+    # 「关于」那一整组，不是"到第一个 </div> 为止"：老写法用非贪婪匹配，
+    # 组里第一行换成一个 <div>（版本）之后它就只截到那一行，把 themeBtn 落在外面，
+    # 报了一条与主题毫无关系的假红。按"到下一组或最后一张卡片为止"切才对。
+    MARK = '<p class="set-group">关于</p>'
+    tail = html[html.index(MARK):]
+    stops = [i for i in (tail.find('<p class="set-group">', len(MARK)),
+                         tail.find("set-card set-last")) if i > 0]
+    about = tail[:min(stops)] if stops else tail
     assert 'id="themeBtn"' in about and "外观" in about, \
         "主题入口从侧栏搬走之后没落到设置一级列表里，或它已经不改名成「外观」了"
     # 手机上"设置不好点"与"齿轮旁边那个点是什么鬼"两件事的判据：整行要有 44px 的
@@ -1847,7 +1854,7 @@ def test_the_neutral_state_hides_the_sheet_so_it_cannot_show_an_empty_slab():
 
 
 def test_the_update_row_exists_and_never_becomes_a_dead_button():
-    """设置 → 设备 那行「检查更新」必须在，且它的去向由【壳报没报 update】决定。
+    """设置 → 关于 那行「检查更新」必须在，且它的去向由【壳报没报 update】决定。
 
     三种坏法都不会报错：
     ① 行被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
@@ -1857,7 +1864,7 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
        要拦的形状（那里拦的是绝对 URL，本条只负责"退路还得在"）。
     """
     html = _html()
-    assert 'id="rowUpdate"' in html, "设置 → 设备 里那行「检查更新」没了"
+    assert 'id="rowUpdate"' in html, "设置 → 关于 里那行「检查更新」没了"
     assert 'id="rowUpdateLink"' in html, "旧壳那条退路（去下载页）没了"
     assert 'href="https://github.com/abonla599/ai-assistant/releases/latest"' in html,         "退路指向的不是 releases/latest，写死文件名的链接下一次发版就腐烂"
     for ident in ("rowUpdate", "rowUpdateLink"):
@@ -1867,7 +1874,7 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     assert "rowUpdateLink" in js and "updateLinkVal" in js, "那一行只写了 markup，没有代码在管它"
     assert "checkUpdate" in js, "新壳那条路断了"
 
-    body = js[js.index("function renderUpdateRow()"):]
+    body = js[js.index("function renderAboutRows()"):]
     # 判"有没有参与判断"，不判"这个标识符在不在"：只查 caps.update 出现过一次的锁，
     # 把 `!!caps.update` 换成 `true` 也照样绿——那等于没锁。
     assert "!!caps.update" in body, "分流不看壳报的能力，旧壳上就会摆一个死按钮"
@@ -1876,3 +1883,36 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     assert "SHELL.present" in shown[0] and "null" in shown[0], (
         "没有壳（手机浏览器）时这一行必须整个藏掉；摆一行「检查更新」会让人以为"
         "网页能自更新，而界面本来每次都是从服务器现加载的那一版：" + shown[0].strip())
+
+
+def test_the_update_row_lives_under_关于_not_设备():
+    """用户点名要把「检查更新」挪到 关于 那一组、且在服务地址下面。
+
+    位置是这次的要求本身，所以钉位置不是吹毛求疵：它在设备组里能跑、在关于组里也能跑，
+    而只有用户找不找得到这一件事区分两种做法。
+    """
+    html = _html()
+    dev = html.index('class="set-group">设备')
+    about = html.index('class="set-group">关于')
+    conn = html.index('id="connInfo"')
+    assert about > dev, "分组顺序被改了：正向对照不成立，下面那几条都是空的"
+
+    for rid in ('id="rowUpdate"', 'id="rowUpdateLink"'):
+        at = html.index(rid)
+        assert at > about, f"{rid} 还在「设备」那一组里"
+        assert at > conn, f"{rid} 要排在服务地址下面，不是上面"
+
+
+def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():
+    """关于里那行版本只能来自壳报上来的那个值。
+
+    在 HTML 里写死 `v0.16` 是这仓最眼熟的那种错：android/app/build.gradle 才是版本号的
+    唯一来源，抄一份到前端就等于下一次升版必然有一处是旧的，而且它显示得理直气壮。
+    """
+    html, js = _html(), _js()
+    about = html.index('class="set-group">关于')
+    assert 'id="versionVal"' in html, "关于里没有版本这一行"
+    assert html.index('id="versionVal"') > about, "版本行不在关于那一组里"
+    assert "versionVal" in js, "HTML 里有位置、JS 里没人填——那会是永久空白"
+    assert "caps.version" in js, "填进去的值不是壳报的那个版本"
+    assert not re.search(r"[\"'`]v?\d+\.\d+", js), "JS 里出现了手写版本号字面量"

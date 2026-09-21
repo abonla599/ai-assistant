@@ -435,41 +435,36 @@ def test_ping_does_not_echo_the_key(tmp_path, monkeypatch):
     assert STORED_KEY not in result["detail"], result["detail"]
 
 
-def test_a_vendor_that_echoes_the_header_back_leaves_no_key_in_the_ping_detail(tmp_path):
-    """真故障注入，不是正则单测。
+def test_a_vendor_that_echoes_the_header_back_leaves_no_key_in_the_ping_detail(tmp_path, monkeypatch):
+    """真故障注入：上游把收到的 Authorization 原样回在 401 正文里。
 
-    前面几条验的是"正则认得出 sk-"，这一条验的是那条真正会伤人的路径：网关把
-    收到的 Authorization 原样回在 401 正文里（这类中转站的常规做法），异常文本
-    会带着它一路走到管理员屏幕与 data/backend.log。打的是本机回环，不花钱、不出网。
+    这是中转网关的常规做法，而那句话会一路走到管理员屏幕与 data/backend.log。
+    用 httpx 的 MockTransport 而不是本机起一台真服务器：实测本机杀软会偶发把回环
+    连接掐掉（WinError 10053），全套跑起来红、单跑却绿，那种红与本条要守的东西无关。
+    桩打在 build_client 上而不是 httpx.Client 那个类名上——把类名换成 lambda 会让
+    SDK 内部的 isinstance(x, httpx.Client) 拿到一个函数当第二参数。
     """
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import httpx
+    import app.core.providers as providers
 
-    class Echo401(BaseHTTPRequestHandler):
-        def do_POST(self):
-            auth = self.headers.get("authorization", "")
-            payload = f'{{"error":{{"message":"invalid key, you sent {auth}"}}}}'.encode()
-            self.send_response(401)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+    store = _fresh_store(tmp_path)
+    saved = store.upsert({"label": "回显网关", "model": "m",
+                          "base_url": "https://gateway.invalid/v1", "api_key": STORED_KEY})
 
-        def log_message(self, *a):
-            pass
+    def echo(request):
+        return httpx.Response(401, json={"error": {"message":
+            f"invalid key, you sent {request.headers.get('authorization')}"}})
 
-    srv = HTTPServer(("127.0.0.1", 0), Echo401)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        store = _fresh_store(tmp_path)
-        saved = store.upsert({"label": "回显网关", "model": "m",
-                              "base_url": f"http://127.0.0.1:{srv.server_port}/v1",
-                              "api_key": STORED_KEY})
-        result = store.ping(saved["id"])
-    finally:
-        srv.shutdown()
-        srv.server_close()
+    def make_client(provider, **kw):
+        # authorization 由真 SDK 自己拼，回显的就是它真发出去的那一份
+        return providers.OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
+                                timeout=kw.get("timeout", 20.0), max_retries=kw.get("max_retries", 0),
+                                http_client=httpx.Client(transport=httpx.MockTransport(echo)))
+
+    monkeypatch.setattr(providers, "build_client", make_client)
+    result = store.ping(saved["id"])
 
     assert result["ok"] is False, result
     assert STORED_KEY not in result["detail"], f"密钥从探活结果里漏出去了：{result['detail']}"
     assert "401" in result["detail"], "脱敏不该把「上游回了 401」这条线索一起抹掉"
+    assert STORED_KEY in store.resolve(saved["id"])["api_key"], "脱敏只许改出口，不许改配置本身"

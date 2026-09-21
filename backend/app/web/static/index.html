@@ -198,12 +198,31 @@
             <button class="set-row" id="rowReminders">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 17h10l-1.5-2.4V11a3.5 3.5 0 0 0-7 0v3.6L7 17Z"/><path d="M10.4 20h3.2"/></svg></span>
               <span class="set-lbl">提醒</span><span class="set-val" id="remindersVal"></span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">关于</p>
+          <div class="set-card">
+            <!-- 版本只有一个来源：壳通过 capabilities() 报上来的 versionName，而它来自
+                 android/app/build.gradle。这里出现不了写死的 "v0.16"——抄一份到前端，
+                 下次升版必然有一处是旧的，而且它显示得理直气壮。浏览器里没有安装包可说，
+                 那句由 app.js 给，不在这儿硬写。 -->
+            <div class="set-row set-plain">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.6"/></svg></span>
+              <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span></div>
+            <button class="set-row" id="themeBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
+              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <div class="set-row set-plain" id="connRow">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
+              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
             <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
                  只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
                  两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a
                  （直接去下载页）。下载页的地址写在 markup 里而不是 app.js 里，是因为
                  test_frontend_uses_relative_api_paths_only 禁前端出现绝对 URL——那条锁
-                 拦的是"把我们自己的服务地址写死"，这里顺着它把外部链接留在 HTML 里。 -->
+                 拦的是"把我们自己的服务地址写死"，这里顺着它把外部链接留在 HTML 里。
+                 2026-09-21 从「设备」那一组挪到这里：换安装包这件事和"这是什么版本"
+                 是同一个问题的两面，放在提醒旁边没人找得到。 -->
             <button class="set-row hidden" id="rowUpdate">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
               <span class="set-lbl">检查更新</span><span class="set-val" id="updateVal"></span><span class="set-go">›</span></button>
@@ -211,16 +230,6 @@
                href="https://github.com/abonla599/ai-assistant/releases/latest">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
               <span class="set-lbl">检查更新</span><span class="set-val" id="updateLinkVal"></span><span class="set-go">↗</span></a>
-          </div>
-
-          <p class="set-group">关于</p>
-          <div class="set-card">
-            <button class="set-row" id="themeBtn">
-              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
-              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
-            <div class="set-row set-plain">
-              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
-              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
           </div>
 
           <!-- 退出 = 先让服务端作废这一枚令牌，再把这个人从本机清单里去掉。

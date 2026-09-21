@@ -367,9 +367,7 @@ class ProviderStore:
     def ping(self, provider_id: str) -> dict:
         provider = self.resolve(provider_id)
         try:
-            client = OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
-                            timeout=20.0, max_retries=0,
-                            http_client=httpx.Client(verify=system_ssl_context()))
+            client = build_client(provider, timeout=20.0, max_retries=0)
             completion = client.chat.completions.create(
                 model=provider["model"],
                 messages=[{"role": "user", "content": "ping"}],
@@ -383,8 +381,15 @@ class ProviderStore:
             return {"ok": False, "detail": scrub_secrets(f"{type(e).__name__}: {str(e)[:180]}")}
 
 
-def build_client(provider: dict) -> OpenAI:
+def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -> OpenAI:
+    """唯一一个构造上游客户端的地方。
+
+    timeout/max_retries 以前是各调用点自己传的（聊天走默认、探活走 20s/0 次），
+    于是"探活"自己又现构了一份客户端——那份和这份漂移出一个参数，
+    就会出现"探活说通、聊天说超时"这种查不出形状的话。
+    """
     return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
+                  timeout=timeout, max_retries=max_retries,
                   http_client=httpx.Client(verify=system_ssl_context()))
 
 
