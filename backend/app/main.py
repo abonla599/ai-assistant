@@ -284,6 +284,22 @@ def health_check():
     from app.core.selfcheck import run
     return {"build": build_version(), **run()}
 
+
+# 同步 def：这条会替调用方去 GitHub 拉一次（最多 5 秒）。写成 async 就是把阻塞网络
+# 放回事件循环——524 那节课的第二遍，代价是所有人的流式回答一起卡住。
+@app.get("/v1/release/latest")
+def release_latest(have: str = None):
+    """手机上那张「发现版本更新」要问的全部：最新是哪版、比手上这版新吗、去哪儿下。
+
+    免鉴权（在 `authz.PUBLIC_PATHS` 里点了名）：它发生在人还没登录的时候。免鉴权不等于
+    没有代价——它会替调用方出一次网，所以那条请求带 10 分钟缓存，一小时内最多 6 次，
+    与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
+
+    拉不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
+    """
+    from app.core import releases
+    return releases.probe(have)
+
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)

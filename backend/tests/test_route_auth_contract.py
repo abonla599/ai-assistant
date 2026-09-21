@@ -203,17 +203,23 @@ def test_every_v1_route_declares_an_identity_dependency():
 def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     """免凭据面必须逐个点名，两张名单各钉各的，多一条就红。
 
-    PUBLIC_PATHS 今天是三条：注册、登录、自助改密。它们不是"漏了鉴权"——没有身份的
+    PUBLIC_PATHS 今天前三条是身份入口：注册、登录、自助改密。它们不是"漏了鉴权"——没有身份的
     人本来就得能进来拿身份、也得能在忘了密码时自救。但每一条都是攻击面，所以这条钉的是
-    "不许悄悄多第四条"；这三条自己的防线不在这里，在 auth_router（真实 IP 限流、
+    "不许悄悄多一条"；这三条自己的防线不在这里，在 auth_router（真实 IP 限流、
     几种失败同一句话）与 auth 存储层（同形措辞与同形耗时）里。
+
+    第四条 `/v1/release/latest` 不是身份入口，是"公开信息 + 会替调用方出一次网"：
+    它的攻击面不是爆破而是**放大**（免凭据的人能借这台服务器去敲 GitHub）。所以它的
+    防线是那条 10 分钟缓存，判据在 tests/test_release_probe.py
+    （test_twenty_opens_still_mean_one_trip_to_github）——加这一条之前请先看那两条锁在不在。
 
     PUBLIC_ROUTE_TEMPLATES 是带变量段的那一类，今天只有一条：导出票据兑换。它的凭据
     是链接里那段一次性票据本身，所以免登录是设计而非漏洞；"这条门只有一整段票据那么宽"
     由下面的 test_the_ticket_redemption_door_is_one_segment_thick 用真请求守着，这里先
     钉住"名单不许悄悄多第二条"。
     """
-    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"}
+    assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
+                            "/v1/release/latest"}
     assert set(PUBLIC_ROUTE_TEMPLATES) == {f"{EXPORT_PATH_PREFIX}{{ticket_id}}"}
 
 

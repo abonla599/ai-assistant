@@ -21,7 +21,13 @@ BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 # 的真实 IP 限流与"几种失败同一句话、同一份耗时"上（注册/登录/改密都是）。
 # 找回只有改密这一条公开端点：三题是全站常量，页面自己渲染，不必问服务器要。
 # 新增公开端点必须同时改这里，否则路由契约测试会红。
-PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset"})
+PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
+                          # 公开信息，不含任何用户数据：手机上那张「发现版本更新」的卡片
+                          # 要问"最新是哪一版"，而它发生在人还没登录的时候。
+                          # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
+                          # 出站请求带 10 分钟缓存（app/core/releases.py）：一小时内最多
+                          # 6 次，与来多少请求无关。
+                          "/v1/release/latest"})
 
 # 免凭据的第二种形状：带变量段的公开路由。精确匹配的门今天只有票据兑换这一条
 # 需要跨过去——链接本身就是凭据（128 位随机、5 分钟过期、一次作废，见
