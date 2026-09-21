@@ -5,6 +5,11 @@
 一条，其余全是在给扫描器做正向对照：每种真形状各埋一颗、必须被抓到，每种占位符与
 测试短语各埋一颗、必须不被抓到。这个仓已经吃过一次"只断言没有异常"的假绿，同一类
 形状的错误在安全闸上代价更高。
+
+一个只在本文里成立的约定：**下面所有假密钥都是拼出来的**。本文件是仓库里唯一一处
+"必须写出密钥形状"的地方，而扫描器看的是每一个被跟踪的行——把整颗 key 原样写在源码里，
+就是让这道闸天天在自己的测试文件上红（第一条用例真的红过一次）。拼起来之后喂进临时
+文件的仍是完整形状，判据一点没弱；被扫的那一行本身不再匹配。
 """
 
 import importlib.util
@@ -18,6 +23,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("secret_scan", REPO_ROOT / "tools" / "secret_scan.py")
 secret_scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(secret_scan)
+
+
+def _S(*parts: str) -> str:
+    """把一颗假密钥拼起来——见模块开头那条约定。"""
+    return "".join(parts)
 
 
 def _plant(tmp_path: Path, name: str, body: str) -> Path:
@@ -60,16 +70,18 @@ def test_env_example_is_not_flagged():
 # ------------------------------------------------------------------ 正向对照 --
 
 # 每种形状一颗"真的长什么样"。故意不与真仓里那些值重复：这些只喂给临时目录。
+# 每一颗都是拼出来的：写全了，本文件自己就过不了第一条用例。
 REAL_SHAPES = [
-    ("openai-style-key", 'api_key = "sk-9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"\n'),
-    ("anthropic-key", 'ANTHROPIC_KEY = "sk-ant-abc123def456abc123def456abc123def"\n'),
-    ("aws-access-key-id", 'aws = "AKIAIOSFODNN7EXAMPLE"\n'),
-    ("github-token", 'gh = "ghp_16C4eFz8Yq0sWm3Ql7Rt2Vu9Xk4bNc5Pd6Qf"\n'),
-    ("google-api-key", 'key: AIzaSyD1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p\n'),
-    ("slack-token", 'hook = "xoxb-1234567890-abcdef"\n'),
-    ("jwt", 'bearer: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQFk2sJx9LmNpRt3vWz\n'),
-    ("private-key-block", "-----BEGIN RSA PRIVATE KEY-----\nMIIBOAIBAAJ\n"),
-    ("opaque-assignment", 'ACCESS_TOKEN="0f1e2d3c4b5a69788796a5b4c3d2e1f0"\n'),
+    ("openai-style-key", 'api_key = "' + _S("sk-", "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d") + '"\n'),
+    ("anthropic-key", 'ANTHROPIC_KEY = "' + _S("sk-ant-", "abc123def456abc123def456abc123def") + '"\n'),
+    ("aws-access-key-id", 'aws = "' + _S("AKIA", "IOSFODNN7EXAMPLE") + '"\n'),
+    ("github-token", 'gh = "' + _S("ghp_", "16C4eFz8Yq0sWm3Ql7Rt2Vu9Xk4bNc5Pd6Qf") + '"\n'),
+    ("google-api-key", 'key: ' + _S("AIza", "SyD1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p") + "\n"),
+    ("slack-token", 'hook = "' + _S("xoxb-", "1234567890-abcdef") + '"\n'),
+    ("jwt", 'bearer: ' + _S("eyJ", "hbGciOiJIUzI1NiJ9", ".", "eyJ",
+                            "zdWIiOiIxMjM0NTY3ODkwIn0", ".", "dQFk2sJx9LmNpRt3vWz") + "\n"),
+    ("private-key-block", _S("-----BEGIN ", "RSA PRIVATE KEY-----") + "\nMIIBOAIBAAJ\n"),
+    ("opaque-assignment", 'ACCESS_TOKEN="' + _S("0f1e2d3c", "4b5a69788796a5b4c3d2e1f0") + '"\n'),
 ]
 
 
@@ -89,7 +101,7 @@ def test_each_secret_shape_is_caught(tmp_path, rule, body):
 
 # 一眼是占位符或人写的短语。这些被抓到的话，闸就开始误报，而误报的结局是被人绕过。
 NOT_SECRETS = [
-    'api_key="your_apiyi_api_key_here"\n',
+    'api_key="your_provider_api_key_here"\n',
     'API_KEY=<把密钥贴在这里>\n',
     'API_KEY=${DEEPSEEK_API_KEY}\n',
     'api_key = REDACTED  # «密钥已隐去»\n',
@@ -141,8 +153,9 @@ def test_a_data_path_is_flagged_by_its_name_alone(tmp_path, rel):
 
 # ------------------------------------------------------------------ 放过机制 --
 
-FAKE = 'STORED_KEY = "sk-adminkey-99887766554433"  # secret-scan:allow 测试里造的假密钥\n'
-FAKE_NO_MARK = 'STORED_KEY = "sk-adminkey-99887766554433"\n'
+_KEY = _S("sk-adminkey-", "99887766554433")
+FAKE = f'STORED_KEY = "{_KEY}"  # secret-scan:allow 测试里造的假密钥\n'
+FAKE_NO_MARK = f'STORED_KEY = "{_KEY}"\n'
 
 
 def test_the_allow_marker_works_only_inside_the_test_tree(tmp_path):
@@ -178,7 +191,7 @@ def test_the_report_never_echoes_the_secret(tmp_path):
 
     只许出现长度与末四位——和 app/core/providers.py::mask_key 同一个口径。
     """
-    secret = "sk-9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+    secret = _S("sk-9a8b7c6d", "5e4f3a2b1c0d9e8f7a6b5c4d")
     _plant(tmp_path, "config.py", f'api_key = "{secret}"\n')
     findings = secret_scan.scan(tmp_path, use_git=False)
     assert findings, "先确认它真的抓到了"
