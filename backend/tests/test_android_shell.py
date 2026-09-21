@@ -266,3 +266,64 @@ def test_every_launcher_entry_exists_in_all_three_places():
     assert drawn == wired and drawn, (
         f"组件布局里的按钮 {sorted(drawn)} 与代码挂上事件的 {sorted(wired)} 不是同一批——"
         "画出来但没挂 PendingIntent 的那颗就是死按钮")
+
+
+def test_released_apks_are_signed_with_one_pinned_key():
+    """发出去的每个包必须签在**同一把**密钥上——这条为一次真实的"更新失败"而写。
+
+    Android 判能不能覆盖安装看的是签名，不看版本号。发布流之前跑的是 assembleDebug，
+    而每台 GitHub runner 都会现造一把 debug keystore：实测 v0.15 与 v0.16 两个 Release
+    的证书 SHA-256 指纹不同（60f1ded9… / 8de2fbe3…），所以用户点"检查更新"永远装不上，
+    只能卸载重装。debug 签名还带 android:debuggable=true——任何能连 adb 的人都能读出
+    壳里 localStorage 存的会话令牌。
+
+    所以这里钉三件：① 发布流不许再出 debug 包；② 密钥从 Secrets 来、从环境变量读，
+    仓库里不许躺任何密钥文件；③ 缺 secret 时必须**失败**，不许悄悄退回现造一把新钥匙
+    ——那等于再给用户制造一次"必须卸载重装"，而这件事一旦发生就收不回来。
+    """
+    raw_workflow = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    # 判 YAML 的正文，不判注释：这条锁要禁的字符串（assembleDebug）正是注释里
+    # 解释"为什么禁它"时用到的那个词——拿原文去 grep，锁会因为它自己说的话而红。
+    workflow = "\n".join(ln for ln in raw_workflow.splitlines() if not ln.lstrip().startswith("#"))
+    gradle = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+
+    for forbidden in ("assembleDebug", "apk/debug/"):
+        assert forbidden not in workflow, f"发布流又回到 {forbidden}：每次一把新 debug 钥匙，老用户永远装不上"
+    assert "assembleRelease" in workflow, "发布流不再出 release 包了"
+    assert "secrets.APK_KEYSTORE_BASE64" in workflow, "签名密钥不再来自 Secrets"
+    assert 'if [ -z "${KEY_B64:-}" ]' in workflow and "exit 1" in workflow, (
+        "缺 secret 时没有停下来：宁可发布失败，也不该发一把新钥匙签的包")
+    assert "keytool" in workflow, "不再把签进包里的指纹打进日志——下次查签名问题又要靠回忆"
+
+    assert 'System.getenv("APK_KEYSTORE")' in gradle, "gradle 不再从环境变量读密钥路径"
+    assert "APK_KEYSTORE_PASSWORD" in gradle and "APK_KEY_ALIAS" in gradle, "签名四项缺项：配了路径没配口令"
+    for leak in ("storeFile file(\"release.jks\")", "keyPassword \""):
+        assert leak not in gradle, f"gradle 里出现了写死的密钥材料：{leak}"
+
+
+def test_no_signing_key_lives_in_the_repository():
+    """密钥文件一旦进了这个公开仓库，就等于把"能给他的用户发更新"的能力公开送人。
+
+    tools/secret_scan.py 已经按扩展名挡了 .jks/.keystore，那条是"提交了会红"；
+    这条是"根本没打算提交"的正向确认——两件事都写下来，下一个人才不会觉得多余。
+    """
+    import subprocess
+
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=str(REPO_ROOT),
+                            capture_output=True, timeout=60)
+    assert listed.returncode == 0, "问不到 git，这条锁就是空的"
+    tracked = [p.decode() for p in listed.stdout.split(b"\0") if p]
+    bad = [p for p in tracked if p.endswith((".jks", ".keystore")) or p.endswith("keystore.properties")]
+    assert not bad, f"版本库里躺着签名密钥：{bad}"
+
+
+def test_the_keystore_generator_refuses_to_overwrite():
+    """生成脚本必须拒绝覆盖已有的密钥。
+
+    丢了这把钥匙没有补救办法：从此每个新包都是新签名，所有装过的人都要先卸载。
+    一个"顺手再跑一次"就把这件事做掉的脚本，比没有脚本更危险。
+    """
+    script = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    assert "REFUSING TO OVERWRITE" in script, "覆盖前不再拦一道"
+    assert "exit 2" in script, "拦下来却不以非零退出：脚本照样被下一步当成成功"
+    assert "-validity 10000" in script, "证书有效期缩短会让未来的包签不上（Android 要求签名证书有效到 2033 之后）"

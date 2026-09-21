@@ -26,6 +26,25 @@ android {
         }
         release {
             minifyEnabled false
+            // 签名必须钉死在**同一把**密钥上。Android 覆盖安装判的是签名，不是版本号：
+            // CI 之前跑的是 assembleDebug，而 GitHub 的 runner 每次都会现造一把
+            // debug keystore——实测 v0.15 与 v0.16 两个 Release 的证书 SHA-256 指纹
+            // 就不相同（60f1ded9… 与 8de2fbe3…），于是"检查更新"永远装不上，
+            // 只能卸载重装。debug 签名还顺带带着 android:debuggable=true，
+            // 那意味着任何能连 adb 的人都能读出壳里存的会话令牌。
+            //
+            // 密钥从环境变量读，值由 release-apk.yml 从 GitHub Secrets 落盘：
+            // 仓库里不留任何密钥文件（公开仓库，留了等于送人）。
+            // 没有这些环境变量时这里仍然配得出包（fork 与本地试装用），但那是
+            // 未签名/debug 的包——release-apk.yml 缺 secret 会直接失败，
+            // 不会把一把新钥匙签的包发给用户。
+            def ksPath = System.getenv("APK_KEYSTORE")
+            if (ksPath) {
+                storeFile file(ksPath)
+                storePassword System.getenv("APK_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("APK_KEY_ALIAS")
+                keyPassword System.getenv("APK_KEY_PASSWORD")
+            }
         }
     }
 
