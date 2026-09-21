@@ -36,6 +36,9 @@ os.environ["UPLOAD_DIR"] = os.path.join(_TEST_DATA_DIR, "uploads")
 # 判据由 tests/test_test_isolation.py 守着，新增可重定向的存储时那里会红。
 os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 
+# 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
+os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
+
 with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
     json.dump([{
         "id": "fake-model", "label": "测试模型", "base_url": "https://example.invalid/v1",

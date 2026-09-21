@@ -45,7 +45,7 @@ def test_env_isolation_covers_every_redirectable_store():
     少一个就是这次的 bug——新存储加进产品代码时，没人记得去 conftest 补一行。
     """
     covered = ["SESSION_DB_PATH", "USERS_DB_PATH", "PROVIDERS_DB_PATH",
-               "UPLOAD_DIR", "CHROMA_DB_PATH"]
+               "UPLOAD_DIR", "CHROMA_DB_PATH", "TASKS_DB_PATH"]
     missing = [v for v in covered if not os.getenv(v)]
     assert not missing, f"这些存储在跑测试时没有被指走：{missing}"
 

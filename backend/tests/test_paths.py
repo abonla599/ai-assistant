@@ -154,7 +154,7 @@ def test_ensure_parent_creates_the_missing_directory(tmp_path):
 # 必须**全**（漏一份就等于那份永远不出现在日志里），以及它必须说真话。
 
 ALL_STORES = {"会话", "身份库", "模型服务配置", "附件",
-              "长期记忆向量库", "反馈原文", "偏好摘要"}
+              "长期记忆向量库", "任务清单", "反馈原文", "偏好摘要"}
 
 
 def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
@@ -169,6 +169,7 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
         "PROVIDERS_DB_PATH": tmp_path / "x" / "providers.json",
         "UPLOAD_DIR": tmp_path / "x" / "uploads",
         "CHROMA_DB_PATH": tmp_path / "x" / "chroma_db",
+        "TASKS_DB_PATH": tmp_path / "x" / "tasks.json",
     }
     for var, value in redirected.items():
         monkeypatch.setenv(var, str(value))
@@ -177,7 +178,7 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
     assert set(got) == ALL_STORES, f"这张表漏了存储：{ALL_STORES ^ set(got)}"
     label_of = {"SESSION_DB_PATH": "会话", "USERS_DB_PATH": "身份库",
                 "PROVIDERS_DB_PATH": "模型服务配置",
-                "UPLOAD_DIR": "附件", "CHROMA_DB_PATH": "长期记忆向量库"}
+                "UPLOAD_DIR": "附件", "CHROMA_DB_PATH": "长期记忆向量库", "TASKS_DB_PATH": "任务清单"}
     for var, value in redirected.items():
         assert got[label_of[var]] == os.path.abspath(str(value)), f"{label_of[var]} 没跟着 {var} 走"
     # 反馈与偏好是导入期算好的模块常量（conftest 会把它们指到临时目录），

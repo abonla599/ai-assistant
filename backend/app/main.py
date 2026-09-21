@@ -794,14 +794,16 @@ def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
         return {"result": "智能体模块尚未就绪，请稍后再试"}
 
 @app.post("/v1/agent/orchestrate")
-def orchestrate_task(request: OrchestrateRequest, _: Principal = RequireAdmin):
+def orchestrate_task(request: OrchestrateRequest, principal: Principal = RequireAdmin):
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
-    result = orchestrator.run(
+    # 身份必须往下传：以前这一格写的是 `_: Principal`（收下就丢），于是任务
+    # 建出来不知道属于谁，而"先记着、读的时候再说"正是这个项目付过账的形状。
+    return orchestrator.run(
         goal=request.goal,
-        task_id=request.task_id
+        task_id=request.task_id,
+        user_id=principal.user_id,
     )
-    return result
 
 # ---------- 任务状态 ----------
 # 与上面两组同一个守卫：读侧必须和写侧一样严，否则"谁的任务"这件事就只
@@ -846,6 +848,7 @@ async def list_all_tasks(_: Principal = RequireAdmin):
                 "task_id": t.task_id,
                 "goal": t.goal[:50] + "..." if len(t.goal) > 50 else t.goal,
                 "status": t.status,
+                "user_id": t.user_id,
                 "progress": f"{t.current_subtask}/{len(t.subtasks)}",
                 "created_at": t.created_at
             }

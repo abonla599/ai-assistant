@@ -16,12 +16,15 @@ class Orchestrator:
         self.planner = Planner(model)
         self.executor = Executor(model)
 
-    def run(self, goal: str, task_id: Optional[str] = None) -> Dict[str, Any]:
+    def run(self, goal: str, task_id: Optional[str] = None,
+            user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         执行任务的主方法
         Args:
             goal: 用户目标描述
             task_id: 可选，如果提供则尝试恢复已有任务
+            user_id: 这个任务属于谁。必填（Task 会拒收空归属）——恢复已有任务时
+                不新建设象，所以只有新建那一路用得上，但签名上不给默认值才是真话
         Returns:
             包含任务状态和结果的字典
         """
@@ -62,7 +65,7 @@ class Orchestrator:
             # 创建新任务
             print(f"[Orchestrator] 创建新任务，目标: {goal}")
             plan = self.planner.plan(goal)
-            task = Task(goal=goal, subtasks=plan)
+            task = Task(goal=goal, subtasks=plan, user_id=user_id)
             task_store[task.task_id] = task
             print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
 
