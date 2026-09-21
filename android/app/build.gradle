@@ -20,12 +20,8 @@ android {
         buildConfigField "String", "APP_URL", "\"https://ai.fenever.xyz/app/\""
     }
 
-    buildTypes {
-        debug {
-            // CI 出调试包：Android 自动用 debug keystore 签名，装上即用
-        }
+    signingConfigs {
         release {
-            minifyEnabled false
             // 签名必须钉死在**同一把**密钥上。Android 覆盖安装判的是签名，不是版本号：
             // CI 之前跑的是 assembleDebug，而 GitHub 的 runner 每次都会现造一把
             // debug keystore——实测 v0.15 与 v0.16 两个 Release 的证书 SHA-256 指纹
@@ -44,6 +40,24 @@ android {
                 storePassword System.getenv("APK_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("APK_KEY_ALIAS")
                 keyPassword System.getenv("APK_KEY_PASSWORD")
+                // 显式写死而不是靠 JDK 默认：tools/make-apk-keystore.ps1 交出来的是
+                // PKCS12（文件头 30 82，不是 JKS 的 FE ED）。PKCS12 里"密钥口令"
+                // 必须等于库口令，所以那两个 secret 是同一个值——不是笔误。
+                storeType "PKCS12"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // CI 出调试包：Android 自动用 debug keystore 签名，装上即用
+        }
+        release {
+            minifyEnabled false
+            // 只有配齐了密钥才挂上去。缺 env 时不挂任何 signingConfig，
+            // 产出的是未签名包（fork 与本地试装用），而不是让配置阶段炸掉。
+            if (System.getenv("APK_KEYSTORE")) {
+                signingConfig signingConfigs.release
             }
         }
     }

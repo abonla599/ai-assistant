@@ -73,7 +73,7 @@ $keyPass = $storePass
 # 10000 days: Android refuses to install an APK whose signing certificate expires
 # before 2033, so a short validity would silently brick future releases.
 & $keytool -genkeypair -v `
-    -keystore $keystore -storepass $storePass `
+    -keystore $keystore -storetype PKCS12 -storepass $storePass `
     -keypass $keyPass -alias $Alias -keyalg RSA -keysize 3072 -validity 10000 `
     -dname "CN=ai-assistant, OU=app, O=fenever, L=NA, ST=NA, C=CN"
 if ($LASTEXITCODE -ne 0) { throw "keytool failed with exit code $LASTEXITCODE" }

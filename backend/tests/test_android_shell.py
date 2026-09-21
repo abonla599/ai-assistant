@@ -301,6 +301,58 @@ def test_released_apks_are_signed_with_one_pinned_key():
         assert leak not in gradle, f"gradle 里出现了写死的密钥材料：{leak}"
 
 
+def _gradle_block(text: str, header: str) -> str:
+    """取 `header {` 到与之配对的那个 `}` 之间的正文（按花括号深度配对，跨行算）。
+
+    判"某一行在不在文件里"永远看不出**它写在哪儿**，而 Groovy DSL 恰恰是按位置解释的：
+    同一句 storeFile 放进 signingConfigs 是对的，放进 buildTypes 是配置期就炸。
+    """
+    start = text.index(header)
+    open_at = text.index("{", start)
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i]
+    raise AssertionError(f"{header} 这块没有闭合，gradle 文件本身就不对")
+
+
+def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
+    """签名四项 + storeType 必须待在 signingConfigs 里，buildTypes 只许引用它。
+
+    为一次真实的发版失败而写：v0.17 第一次跑 release-apk.yml，"Restore the pinned
+    signing key" 过了、"Assemble release APK" 炸了。原因是那几行被写在
+    `buildTypes.release { … }` 里面——`BuildType` 没有 storeFile 这个属性，Groovy 在
+    配置期就报 unknown property。上一条锁（test_released_apks_are_signed_with_one_pinned_key）
+    当时是全绿的，因为它只问"这些名字在文件里出现过吗"，而它们确实出现过、只是位置错了。
+    本机没有 AGP 也跑不了 gradle，所以位置只能这样钉。
+    """
+    raw = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+    gradle = _strip_java_comments(raw)          # 注释里也出现过 storeFile 这个词
+    signing = _gradle_block(gradle, "signingConfigs")
+    build_types = _gradle_block(gradle, "buildTypes")
+
+    for prop in ("storeFile", "storePassword", "keyAlias", "keyPassword", "storeType"):
+        assert prop in signing, f"{prop} 不在 signingConfigs 里：密钥配不出签名"
+        assert prop not in build_types, (
+            f"{prop} 又回到 buildTypes 里了：BuildType 没这个属性，配置期直接报错，"
+            "而 CI 之前跑 assembleDebug 时这段根本不执行，所以看不见")
+
+    release = _gradle_block(build_types, "release")
+    assert re.search(r"signingConfig\s+signingConfigs\.release", release), \
+        "release 这个 buildType 没挂上 signingConfig：签出来的包与那把钉死的密钥无关"
+    assert 'storeType "PKCS12"' in signing, \
+        "storeType 不再写死：JDK 默认值一改，gradle 就会拿 JKS 去读一把 PKCS12"
+
+    # 两边说的是同一件事：生成脚本也得显式写 PKCS12，不能靠 keytool 的默认值
+    generator = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    assert "-storetype PKCS12" in generator, \
+        "生成脚本靠 JDK 默认格式，而 gradle 写死了 PKCS12——两边有一边会先漂"
+
+
 def test_no_signing_key_lives_in_the_repository():
     """密钥文件一旦进了这个公开仓库，就等于把"能给他的用户发更新"的能力公开送人。
 
