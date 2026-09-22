@@ -185,6 +185,13 @@ mount_admin(app)
 # 身份规则见 app/core/authz.py（import 在创建应用那一节）。这里只负责装上。
 install_auth(app)
 
+# 耗时日志装在鉴权**之后**，于是它包在鉴权外面：被 401 挡掉的那几次同样留一行。
+# 人打不开页面的那些分钟，最需要知道的是"请求到底有没有到"——把观察器装在门里面，
+# 被门挡掉的那些就正好是日志里的一片空白。
+from app.core.request_log import RequestTiming
+
+app.add_middleware(RequestTiming)
+
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):
     model: str = "deepseek-chat"          # 兼容字段：作为 provider 的别名解析
