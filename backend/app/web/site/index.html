@@ -29,7 +29,7 @@
   <span class="brand">AI 智能助手</span>
   <ul class="navlinks">
     <li><a href="#can-do">能做什么</a></li>
-    <li><a href="#shell-only">装壳多三件</a></li>
+    <li><a href="#shell-only">移动端功能</a></li>
     <li><a href="#start">怎么开始</a></li>
     <li><a href="#faq">常见问题</a></li>
   </ul>
@@ -46,29 +46,29 @@
   <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版</a>
-    <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">装安卓壳（约 96 KB）</a>
+    <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">安卓版</a>
   </p>
   <p class="note">不需要邀请码,不需要填 API 密钥。用户名密码自己定,注册完就能聊。</p>
 </header>
 
 <section id="can-do">
-  <h2>它现在真能做的</h2>
+  <h2>已有功能</h2>
   <ul class="cards">
-    <li class="reveal"><h3>多模型切换</h3><p>在现在可用的那几个模型之间换着用。清单和各自能用几条都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
-    <li class="reveal"><h3>会算数</h3><p>让它算数,它走计算器,不是自己心算:表达式在本机按 AST 白名单解析,不会原样执行模型给来的字符串。65 位的 50! 就是这么算出来的。</p></li>
-    <li class="reveal"><h3>读你发过去的文件</h3><p>发 PDF、Word（.docx）、txt 或代码文件,它先把里面的文字读出来再回答,不用你抄一遍。图片要当前模型带视觉才行:默认那条带,截图发进去读得出图里的字;换成不带视觉的模型就会明确拒绝,不会硬答。</p></li>
-    <li class="reveal"><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来。存了哪些,你在设置里能看到、能删。</p></li>
-    <li class="reveal"><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
+    <li class="reveal"><h3>多模型切换</h3><p>在可用模型间快速切换。模型列表、额度在设置页查看，默认模型由服务端配置，无需手动设置。</p></li>
+    <li class="reveal"><h3>会算数</h3><p>复杂运算调用计算器工具，本机安全解析算式，避免模型心算出错。</p></li>
+    <li class="reveal"><h3>读你发过去的文件</h3><p>支持 PDF、docx、txt、代码文件提取文本；视觉模型可识别截图文字，无视觉能力的模型会拒绝识图。</p></li>
+    <li class="reveal"><h3>长期记忆</h3><p>自动保存你的偏好，相关对话可自动唤起记忆；记忆内容可在设置页查看、删除。</p></li>
+    <li class="reveal"><h3>多人各用各的</h3><p>会话、文件、记忆独立绑定账号，用户数据互相隔离、不可见。</p></li>
   </ul>
 </section>
 
 <section id="shell-only">
-  <h2>装壳多出来的三件事</h2>
-  <p>这三件要装那个 96 KB 的壳才有,浏览器拿不到系统通知、分享入口和桌面组件。壳只是一个指向本站的地址,不含口令也不含密钥,所以服务端改版不用重装;改壳的这三项才要重装。</p>
+  <h2>移动端额外功能</h2>
+  <p>可解锁系统通知、分享入口、桌面小组件。</p>
   <ul class="cards">
-    <li class="reveal"><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟,它不申请精确闹钟权限。</p></li>
-    <li class="reveal"><h3>分享进来</h3><p>在相册或 PDF 上点「分享」,选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
-    <li class="reveal"><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话。拍照提问也要模型带视觉才读得出图。</p></li>
+    <li class="reveal"><h3>提醒</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储不上传云端，时间可能略有延迟，不获取精准闹钟权限。</p></li>
+    <li class="reveal"><h3>分享</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型识图能力。</p></li>
+    <li class="reveal"><h3>桌面组件</h3><p>桌面小组件展示当日提醒，可一键拍照提问、新建对话；识图功能需要视觉模型支持。</p></li>
   </ul>
 </section>
 
@@ -76,11 +76,11 @@
   <h2>三步上手</h2>
   <!-- 编号是 CSS counter 画的（list-style 被去掉了，Safari 会因此丢列表语义，role 补回来） -->
   <ol class="steps" role="list">
-    <li class="reveal"><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它自动跳到同一个地址）。</li>
-    <li class="reveal"><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题,忘记密码时拿它自己取回。</li>
-    <li class="reveal"><strong>开始聊</strong>:换手机换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
+    <li class="reveal"><strong>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（安装壳包可直接跳转）。</li>
+    <li class="reveal"><strong>注册账号</strong>：填写用户名、密码，设置密保问题用于找回密码。</li>
+    <li class="reveal"><strong>开始对话</strong>：更换设备登录同一账号，聊天记录与记忆可同步。</li>
   </ol>
-  <p class="note">看到「当前没有可用模型,请联系管理员配置模型服务」,那是这台助手的主人还没接上模型,找他,跟你的账号无关。</p>
+  <p class="note">提示：若提示无可用模型，是管理员尚未配置模型，与你的账号无关。</p>
 </section>
 
 <section id="shots" class="shots-section">
