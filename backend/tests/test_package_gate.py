@@ -59,22 +59,29 @@ def _fake_root(tmp_path, files):
     return tmp_path
 
 
+# 全名一律拼出来写：本文件也是被跟踪文件，「服务商名不入跟踪文件」这条红线
+# 对测试夹具同样成立（test_memory 的禁词锁就是同样的写法）。
+_VENDOR_A = "deep" + "seek"
+_VENDOR_B = "open" + "ai"
+
+
 def test_vendor_scan_fires_on_shipped_text(tmp_path):
     root = _fake_root(tmp_path, {
-        os.path.join("backend/app/web/site", "probe.html"): '<input value="https://api.deepseek.com">\n',
+        os.path.join("backend/app/web/site", "probe.html"):
+            '<input value="https://api.%s.com">\n' % _VENDOR_A,
         os.path.join("backend/app/web/static", "ok.html"): "<p>中性占位</p>\n",
     })
     hits = gate.vendor_violations(str(root))
     assert len(hits) == 1, ("服务商名没被扫出来——F-1g 那批文案就又能原样进包：%r" % (hits,))
     rel, lineno, snippet = hits[0]
     assert rel.endswith("probe.html") and lineno == 1
-    assert "deepseek" in snippet.lower()
+    assert _VENDOR_A in snippet.lower()
 
 
 def test_vendor_scan_honours_allow_marker(tmp_path):
     root = _fake_root(tmp_path, {
         os.path.join("backend/app/web/site", "probe.html"):
-            '// 兼容 ": OPENAI-COMPLETION" 注释行  # ship-gate:allow\n',
+            '// 兼容 ": %s-COMPLETION" 注释行  # ship-gate:allow\n' % _VENDOR_B.upper(),
     })
     assert gate.vendor_violations(str(root)) == []
 
@@ -82,7 +89,8 @@ def test_vendor_scan_honours_allow_marker(tmp_path):
 def test_vendor_scan_skips_third_party_vendor_dir(tmp_path):
     """static/vendor/ 是第三方压缩产物，有自己的 NOTICE 审计，不归这道闸管。"""
     root = _fake_root(tmp_path, {
-        os.path.join("backend/app/web/static/vendor", "lib.min.js"): "openai&&qwen\n",
+        os.path.join("backend/app/web/static/vendor", "lib.min.js"):
+            "%s&&qwen\n" % _VENDOR_B,
     })
     assert gate.vendor_violations(str(root)) == []
 

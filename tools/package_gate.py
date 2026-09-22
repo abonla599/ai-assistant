@@ -10,8 +10,8 @@
    `git ls-files`，而 dist/ 被 gitignore，EXE 里带什么没人回看；
    site/probe.html 与 static/index.html 都是原样进包的对外面（首轮通查 F-1g）。
 
-形状同 `secret-scan:allow`：确属协议兼容而非对外宣称的行（如 SSE 的
-`: OPENAI-COMPLETION` 注释），在该行行尾加 `ship-gate:allow` 豁免。
+形状同 `secret-scan:allow`：确属协议兼容而非对外宣称的行（如 SSE 完成帧
+那族协议注释行），在该行行尾加 `ship-gate:allow` 豁免。
 """
 import os
 import re
