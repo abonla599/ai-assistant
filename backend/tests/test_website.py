@@ -214,9 +214,10 @@ def test_four_real_screenshots_are_present_and_small():
 def test_only_the_first_screenshot_loads_eagerly():
     """四张实拍合计约 500 KB。一起下载的话，首屏那次绘制是在给三张看不见的图让路。
 
-    轮播的图横向摆在 `overflow:hidden` 的轨道里，浏览器始终不认为它们"快滚进视口"，
-    所以 `loading="lazy"` 单独用会翻车：翻到第二张时是个空壳（实测过）。正确的形状是
-    HTML 里先 lazy 让路、`load` 之后由 site.js 提升成 eager——两头都要钉住。
+    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余三张 `loading="lazy"`。
+    轮播时代还要在 JS 里把它们提升成 eager——轨道是 `overflow:hidden`，浏览器始终
+    不认为它们"快滚进视口"，光加 lazy 翻过去就是空壳。现在四张摆在正常网格里，
+    滚动到才下载这件事交回给浏览器原生行为，那段提升代码跟着轮播一起删了。
     """
     import re
     imgs = re.findall(r"<img\b[^>]*>", _page())
@@ -225,9 +226,6 @@ def test_only_the_first_screenshot_loads_eagerly():
         f"首屏那张没有提到高优先：{imgs[0][:70]}"
     for tag in imgs[1:]:
         assert 'loading="lazy"' in tag, f"后面那张在抢首屏带宽：{tag[:70]}"
-    js = _js()
-    assert 'img.loading = "eager"' in js, \
-        "缺了首屏后的 eager 提升：这三张会永远停在未下载，翻过去就是空壳"
 
 
 def test_no_placeholder_left_in_shots():
@@ -292,18 +290,26 @@ def test_calculator_card_states_it_uses_a_tool():
 
 # ---------- 7. 轮播与主题切换：交互也得有红线 ----------
 
-def test_carousel_shows_all_four_shots_and_can_be_stopped():
-    """四张实拍收进一个轮播，但自动播的东西必须能停（WCAG 2.2.2）——
-    一个停不下来的自动轮播，对手动操作页面的人是障碍，不是设计。"""
+def test_all_four_shots_are_visible_at_once():
+    """四张实拍一次全铺，且页面上没有任何东西在自己动。
+
+    2026-09-22 改判：原来是轮播（一次一张 + 前后键 + 指示点 + 自动播 + 横滑）。
+    他的问题是"怎么就只剩下一张图片了"——那不是 bug，是轮播的定义，但一个四张静态
+    截图的展示位需要访客去翻页、还需要"自动播必须能停"这条无障碍要求，本身就说明
+    这套机器是多余的。现在桌面四列、手机两列。
+    判据跟着换：四张都在这一节里、不许再有轮播挂载点，且 site.js 里不许出现
+    setInterval——没有自动播，才轮到不要求暂停键。
+    """
     page = _page()
     cut = page.find('<section id="shots"')
     assert cut != -1, "没有截图那一节"
     block = page[cut:page.find("</section>", cut)]
     for name in ("register", "chat", "memory", "settings"):
-        assert f"/site/img/{name}.jpg" in block, f"{name}.jpg 没进轮播"
-    assert "data-carousel" in block, "轮播要有自己的挂载点，脚本靠它找元素"
-    assert 'aria-label="上一张"' in block and 'aria-label="下一张"' in block
-    assert 'aria-label="暂停轮播"' in block, "自动轮播缺暂停键"
+        assert f"/site/img/{name}.jpg" in block, f"{name}.jpg 没进这一节"
+    assert "data-carousel" not in block, "轮播又回来了：四张实拍不需要翻页"
+    assert 'aria-label="暂停轮播"' not in block, "没有自动播就不该有暂停键"
+    assert "setInterval" not in _js(), "site.js 里出现了定时器——页面在自己动"
+    assert "repeat(4" in _css(), "宽屏下没有排成四列，等于还是只看得见一两张"
 
 
 def test_theme_toggle_exists_and_dark_is_the_default():
@@ -431,20 +437,24 @@ def test_no_probe_check_can_hang_forever():
 
 
 def test_the_site_screenshots_stay_opaque():
-    """官网那四张实拍不许再被压成半透明。
+    """官网那四张实拍不许被压成半透明。
 
-    他第一次在手机上看这块的反馈是"完全看不到"：轨道窄，相邻两张会露边，而
-    `.slide:not(.is-active)` 被压到 .28，四张里三张是 ghost，整块读起来像没加载。
-    图片是内容不是装饰层——轮播本来就靠 translateX 把别的张推出视口，淡出是多余的。
+    轮播时代给非当前张压到 .28 + scale(.93)，手机上轨道窄、相邻两张会露边，四张里
+    三张是 ghost，整块读起来像没加载。他第一次看这块的反馈就是"完全看不到"。
+    图片是内容不是装饰层。轮播删掉后 `.slide` 那组选择器跟着没了，所以这里改成扫
+    任何提到 `.shot` 或 `.phone` 的规则——下一条 `html.js .slide` 那种写法以后换个
+    名字也照样能被抓住。
     """
-    import os
-    from app.web.web_router import SITE_DIR
-    with open(os.path.join(SITE_DIR, "site.css"), encoding="utf-8") as f:
-        css = _strip_css_comments(f.read())
-    for rule in re.finditer(r"html\.js \.slide[^{]*\{([^}]*)\}", css):
-        body = rule.group(1)
-        m = re.search(r"opacity:\s*([0-9.]+)", body)
+    css = _strip_css_comments(_css())
+    checked = 0
+    for rule in re.finditer(r"(?m)^([^{}\n][^{}]*)\{([^}]*)\}", css):
+        sel = rule.group(1)
+        if ".shot" not in sel and ".phone" not in sel:
+            continue
+        checked += 1
+        m = re.search(r"opacity:\s*([0-9.]+)", rule.group(2))
         assert not m or float(m.group(1)) >= 1, f"实拍图又被压透明度了：{rule.group(0).strip()}"
+    assert checked >= 2, f"选择器改名了，这条抓不到任何规则（只扫到 {checked} 条）——跟着改，别让它空转"
 
 
 def _strip_css_comments(css: str) -> str:

@@ -367,61 +367,29 @@ section:nth-of-type(even)::after { bottom: 0; }
 }
 footer ul { padding-left: 20px; }
 
-/* ---------- 轮播 ---------- */
-/* 无 JS 时四张竖排全露出来；脚本一跑就加 html.js 换成单张切换。 */
-.carousel { margin-top: 8px; position: relative; }
-/* 光斑收在机身周围，不铺满整节：浅色下铺满就是一块蓝渍 */
-.carousel::before {
-  content: ""; position: absolute; z-index: -1; pointer-events: none;
-  inset: 10% 20% 24%;
-  background: radial-gradient(46% 46% at 50% 46%, var(--bloom), var(--glow-0) 72%);
+/* ---------- 实拍：四张一次全铺 ---------- */
+/* 原来是轮播：一次一张，配前后键、指示点、自动播、横滑、键盘。四张静态实拍没有
+   非藏起来不可的理由，那套机器反而要多养一段 JS 和一条「自动播必须能停」的无障碍
+   要求。现在桌面四列、手机两列，一眼看全，也没有任何东西在自己动。 */
+.shots {
+  margin-top: 8px; display: grid; gap: 26px 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.stage { display: grid; gap: 18px; justify-items: center; }
-.slide { margin: 0; text-align: center; }
+@media (min-width: 760px) {
+  .shots { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 30px 18px; }
+}
+.shot { margin: 0; text-align: center; }
 figcaption { font-size: var(--step--1); color: var(--ink-soft); margin-top: 14px; letter-spacing: .01em; }
-/* clamp 而不是 min：min(240px, 62vw) 在窄视口里会一路缩到看不见，手机外框得有下限。
-   margin auto 是补的：外框是块级 div，text-align:center 管不着它，
-   不写这句机身贴左、说明文字居中，两条中线对不上。 */
+/* 外框跟着格子收缩、最宽 262px；margin auto 是必须的：外框是块级 div，
+   text-align:center 管不着它，不写这句机身和说明文字两条中线对不上。 */
 .phone {
-  width: clamp(176px, 62vw, 262px); aspect-ratio: 9 / 19.5; border-radius: 34px; overflow: hidden;
+  width: min(100%, 262px); aspect-ratio: 9 / 19.5; border-radius: 34px; overflow: hidden;
   padding: 5px; margin: 0 auto;
   border: 1px solid color-mix(in srgb, var(--brand) 16%, var(--line));
   background: linear-gradient(158deg, color-mix(in srgb, var(--ink) 26%, transparent), color-mix(in srgb, var(--surface) 70%, transparent) 38%, color-mix(in srgb, var(--ink) 14%, transparent));
   box-shadow: var(--shadow), inset 0 1px 0 var(--hairline);
-  transition: box-shadow .55s var(--ease-out), transform .55s var(--ease-out);
 }
 .phone img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 29px; }
-.controls { display: none; align-items: center; justify-content: center; gap: 10px; margin-top: 22px; }
-.dots { display: flex; gap: 8px; align-items: center; }
-
-/* 边缘那道 mask 试过又删了：Blink 下它会把整个 stage 连内容一起遮没
-   （实拍区直接空白），而离屏那张本来就已经被 opacity 压到 .28，不需要再羽化。 */
-/* 位移切页而不是原生滚动：overflow:hidden 之下 scroll-snap 是死属性，留着只会
-   让下一个人以为这块能手滑。触摸横滑由 site.js 监听 touch 实现。 */
-html.js .stage { grid-auto-flow: column; grid-auto-columns: 100%; display: flex; overflow: hidden;
-  transition: transform .55s var(--ease-out); }
-/* 实拍图一律不透明。原来给非当前张压到 .28 + scale(.93) 是想做"两侧淡出"，
-   但手机上轨道窄、相邻两张会露边，四张里三张是半透明的，整块看着就像没加载出来
-   ——他第一次在手机上看就是这个反馈。轮播本来就靠 translateX 把别的张推到视口外，
-   淡不淡出都不影响"当前这张"，所以直接取消：图片是内容，不是装饰层。 */
-html.js .slide { flex: 0 0 100%; }
-html.js .slide.is-active { opacity: 1; transform: none; }
-html.js .slide.is-active .phone { box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--brand) 20%, transparent), inset 0 1px 0 var(--hairline); }
-html.js .slide:not(.is-active) img { pointer-events: none; }
-html.js .controls { display: flex; }
-/* 指示点：热区 26x44，看得见的 9px 小药丸交给 ::before。
-   直接给 button 写 9x9 是手机上按不中的——热区比视觉大不丢人，按不到才丢人。 */
-.dot { position: relative; width: 26px; height: 44px; padding: 0; border: 0; background: none;
-  display: grid; place-items: center; cursor: pointer; }
-.dot::before { content: ""; width: 9px; height: 9px; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--ink) 22%, transparent);
-  box-shadow: inset 0 1px 0 var(--hairline);
-  transition: width var(--dur-2) var(--ease-out), background-color var(--dur-2), box-shadow var(--dur-2); }
-.dot:hover::before { background: color-mix(in srgb, var(--ink) 45%, transparent); }
-.dot[aria-selected="true"]::before {
-  width: 26px; background: linear-gradient(90deg, var(--brand), var(--brand-2));
-  box-shadow: 0 0 12px var(--glow);
-}
 
 /* ---------- 滚动渐显 ---------- */
 html.js .reveal { opacity: 0; transform: translateY(16px); }
@@ -497,5 +465,4 @@ footer::before {
   }
   html::before, body::before { animation: none !important; }
   html.js .reveal { opacity: 1; transform: none; transition: none !important; }
-  html.js .stage, html.js .slide { transition: none !important; }
 }

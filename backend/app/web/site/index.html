@@ -87,38 +87,23 @@
   <h2>界面长这样</h2>
   <p class="note">四张都是线上实拍。</p>
 
-  <div class="carousel" data-carousel>
-    <div class="stage" id="stage" aria-live="polite">
-      <figure class="slide is-active" data-index="0">
-        <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688" fetchpriority="high"></div>
-        <figcaption>注册:自己填用户名密码,答三条找回问题</figcaption>
-      </figure>
-      <figure class="slide" data-index="1">
-        <div class="phone"><img src="/site/img/chat.jpg" alt="对话页:上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来" width="780" height="1688" loading="lazy"></div>
-        <figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption>
-      </figure>
-      <figure class="slide" data-index="2">
-        <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页:搜「我不吃香菜」搜出来的那一条,右边有删除按钮" width="780" height="1688" loading="lazy"></div>
-        <figcaption>长期记忆:存了什么,能看到也能删</figcaption>
-      </figure>
-      <figure class="slide" data-index="3">
-        <div class="phone"><img src="/site/img/settings.jpg" alt="设置页:当前模型那一格是服务端给的模型清单,这里选中的是 DeepSeek Chat" width="780" height="1688" loading="lazy"></div>
-        <figcaption>设置:模型、提醒、账号都在这里</figcaption>
-      </figure>
-    </div>
-
-    <div class="controls">
-      <button class="iconbtn" type="button" id="prevBtn" aria-label="上一张">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
-      </button>
-      <div class="dots" id="dots" role="tablist" aria-label="选择看哪一张"></div>
-      <button class="iconbtn" type="button" id="nextBtn" aria-label="下一张">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
-      </button>
-      <button class="iconbtn" type="button" id="pauseBtn" aria-label="暂停轮播" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>
-      </button>
-    </div>
+  <div class="shots">
+    <figure class="shot">
+      <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题,答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688" fetchpriority="high"></div>
+      <figcaption>注册:自己填用户名密码,答三条找回问题</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="phone"><img src="/site/img/chat.jpg" alt="对话页:上传 demo-note.pdf 之后,助手把文件里的三行原文复述了出来" width="780" height="1688" loading="lazy"></div>
+      <figcaption>对话:发过去的 PDF,它读得出里面的字</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页:搜「我不吃香菜」搜出来的那一条,右边有删除按钮" width="780" height="1688" loading="lazy"></div>
+      <figcaption>长期记忆:存了什么,能看到也能删</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="phone"><img src="/site/img/settings.jpg" alt="设置页:当前模型那一格是服务端给的模型清单,这里选中的是当前默认对话模型" width="780" height="1688" loading="lazy"></div>
+      <figcaption>设置:模型、提醒、账号都在这里</figcaption>
+    </figure>
   </div>
 </section>
 
