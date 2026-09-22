@@ -57,6 +57,16 @@ def today() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
+def weekday_of(day: str) -> str:
+    """把 `YYYY-MM-DD` 换算成「周二」。日期形状不对由 `strptime` 抛 ValueError。
+
+    星期名只有这一张表、换算只有这一处：提示词里「2026-09-22 周二」的说法出现在
+    两个地方（日程清单的开头、以及每轮注入的那句今天），两处各写一遍周一到周日，
+    改一处就会让模型在同一轮里看到两个不一致的星期。
+    """
+    return _WEEKDAYS[datetime.strptime(day, "%Y-%m-%d").weekday()]
+
+
 def normalize_day(day=None) -> str:
     """空 = 今天；非空必须恰好是 `YYYY-MM-DD`。
 
@@ -226,11 +236,12 @@ def render_for_model(user_id: str, day: str = None) -> str:
     """给模型看的那段文本——**唯一一份**"这张清单怎么念给人听"。
 
     工具与任何后来的调用方都从这里取，不要在提示词里再抄一种格式。
-    开头带星期几：模型要把"明天""下周三"换算成 `YYYY-MM-DD` 才有依据，而它从提示词里
-    拿不到今天几号（persona 那一节还没定稿，见 docs/项目规划书 的 A-1 待拍）。
+    开头带星期几：模型要把"明天""下周三"换算成 `YYYY-MM-DD` 才有依据。它现在拿得到
+    今天几号了——每轮对话由 `app.pipeline._today_line` 注入一句「今天是 …」，那是
+    2026-09-22 之后才有的事（此前这份清单是模型唯一的日期线索）。
     """
     target = normalize_day(day)
-    weekday = _WEEKDAYS[datetime.strptime(target, "%Y-%m-%d").weekday()]
+    weekday = weekday_of(target)
     rows = plan(user_id, target)
     if not rows:
         return f"{target} {weekday}：没有安排。"

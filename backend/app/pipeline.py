@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 # try/except 静默吞掉，导致记忆与工具能力在 EXE 里悄悄失效。
 from app.core.providers import store, build_client
 from app.core import usage   # 账本：与流式那一条同一个口径，别各记一套
+from app.core import schedule   # "今天"的口径：见 _today_line
 # 复用 memory_router 已选定的后端单例：本模块此前自行 new 了第二个 MemoryManager，
 # 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
 from app.memory.memory_router import memory_manager
@@ -16,6 +17,23 @@ from app.tools.registry import get_available_tools_schema
 from app.tools.executor import execute_tool
 # from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 from app.tools.builtin_tools import *
+
+
+def _today_line() -> str:
+    """给模型的那句「今天是 2026-09-22 周二。」
+
+    为什么要有：模型此前从来收不到服务端日期，于是它既不知道"今天"是哪天，也无从
+    把"明年""下周三"换算成具体日子、更不知道该不该为此去搜——2026-09-22 那次
+    「2027 年研究生简章搜不到、今天几号却答得出来」就是这个洞。`schedule.py`
+    的 `render_for_model` 里那句"它从提示词里拿不到今天几号"说的正是本函数之前的事。
+
+    口径：走 `schedule.today()`，不在这里另起一份 `datetime.now()`——那是这个仓库
+    里"今天"的既有权威（提醒功能与它同一份，都以服务端本地日期为准），两份定义迟早
+    会在跨零点时给出两个不同的"今天"。星期名同样复用 schedule 那一张表：两处各写一份
+    周一到周日，改一处就会给模型两个不同的说法。
+    """
+    day = schedule.today()
+    return f"今天是 {day} {schedule.weekday_of(day)}。"
 
 
 class ChatPipeline:
@@ -75,12 +93,19 @@ class ChatPipeline:
                 "used_memory_ids": used_memory_ids}
 
     def inject_context(self, messages: List[Dict], query: str):
-        """注入记忆与该用户自己的偏好摘要（非流式与流式共用）。
+        """注入今天日期、记忆与该用户自己的偏好摘要（非流式与流式共用）。
 
         返回 (消息列表, 本次用到的记忆 id 列表)——后者用于反馈闭环，
         否则无法知道该给哪些记忆加权。
         """
         used_ids = []
+
+        # 时间锚点排在最前，且走 _append_system：前端带着 persona 来时那条就是
+        # messages[0]，这里既不许插出第二条 system，也不许把人家那段盖掉或挪到它前面。
+        # 少这一句的代价线上付过一次：没有"今天"当锚点，"2027 年简章"这种问题模型
+        # 既换算不出年份，也无从判断该不该去搜。
+        self._append_system(messages, _today_line())
+
         try:
             if self.memory is not None:
                 memories = self.memory.search_memory(self.user_id, query, top_k=3)

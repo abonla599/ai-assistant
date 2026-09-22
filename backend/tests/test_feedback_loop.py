@@ -144,9 +144,14 @@ def test_pipeline_injects_the_callers_own_preference(data_files):
 
     assert "反馈消极" in a_text, "A 自己踩出来的结论该注入给 A"
     assert "反馈积极" in b_text and "反馈消极" not in b_text, "B 拿到的只能是他自己那份"
-    # 没有反馈的人：一句偏好都不注入（不是把别人的结论套给他）
+    # 没有反馈的人：一句偏好都不注入（不是把别人的结论套给他）。
+    # 判据从 `c_msgs == []` 收窄成"偏好那一段不许出现"：inject_context 现在无条件
+    # 注入一句「今天是 …」（锁在 tests/test_today_context.py），空列表这个前提已经
+    # 不成立了，继续断言它只会把时间锚点误伤成"凭空造一段"。
     c_msgs, _ = ChatPipeline("u_nobody").inject_context([], "讲讲向量数据库")
-    assert c_msgs == [], f"没有自己的偏好摘要时不该凭空造一段: {c_msgs}"
+    c_text = "\n\n".join(ChatPipeline.text_of(m["content"]) for m in c_msgs)
+    assert "根据用户历史反馈得到的偏好" not in c_text, \
+        f"没有自己的偏好摘要时不该凭空造一段: {c_text!r}"
 
 
 def test_memory_ids_survive_replace(tmp_path):

@@ -116,15 +116,22 @@ def _value_of(node):
     raise _Refusal("表达式包含不支持的写法")
 
 # ---------- 联网搜索工具 ----------
+# 取证（2026-09 实测）：把用户那句问题原样丢给源站，回来的只是跟开头几个词相关的
+# 噪声；查询缩到 2–4 个词才有好结果。模型看不见源站的行为，只能看见下面这两段
+# 描述——所以"怎么问"这件事必须写进 schema，写在注释里它一个字也收不到。
 @register_tool(
     name="web_search",
-    description="搜索互联网获取实时信息。输入搜索关键词。",
+    description="搜索互联网获取实时信息，返回几条结果的标题、摘要与来源网址。"
+                "query 请写成 2-4 个词的关键词（如「西北大学 2027 招生简章」），"
+                "不要把用户的整句问题原样传进来：词一多，回来的就只是跟开头几个词相关的噪声。"
+                "问题里有「今年/明年/去年」这类相对时间时，先换算成具体年份再搜。",
     parameters={
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "搜索关键词"
+                "description": "搜索关键词：2-4 个词、用空格隔开，不要把整句话原样传进来；"
+                               "「今年/明年/去年」这类相对时间先换成具体年份（如 2027）"
             }
         },
         "required": ["query"]
@@ -139,6 +146,7 @@ def web_search_tool(query: str) -> str:
 
     空结果那句是特意写成"不要据此断定不存在"的：模型拿到一句"没找到"就顺手回答
     "这事不存在"，是这类工具最贵的错法——搜不到与不存在是两回事。
+    有结果但全是噪声是另一半错法：它会照着不相干的标题编，而那次它是有底气的。
     """
     rows = search_source.search(query)
     if not rows:
@@ -146,7 +154,77 @@ def web_search_tool(query: str) -> str:
                 "不要据此断定这件事不存在，可以换个说法再搜一次，或者如实说查不到。")
     # 真人搜成功一次 = 源此刻好用，这是比定时探测更强的证据，也让探测别再敲源站
     availability.note_search_ok()
-    return "\n".join(f"- {r['title']}: {r['snippet']} （来源 {r['url']}）" for r in rows)
+    body = "\n".join(f"- {r['title']}: {r['snippet']} （来源 {r['url']}）" for r in rows)
+    if not _rows_share_a_word(query, rows):
+        # 追加而不替换：行一条都不许少，用户要核对时靠的还是那些 URL。
+        body += ("\n〔提示〕以上结果里没有一条包含你这句查询的关键词，"
+                 "它们可能与你的问题无关：不要据此编造答案，"
+                 "换个关键词（更少、更具体的词）再搜一次。")
+    return body
+
+
+# 虚词与标点。它们不进"实词"：页面上到处都是「的/是/了」，认它们等于任何两条中文
+# 都有交集，守卫就永远不触发；反过来要是整句照抄去做子串匹配，一句问话永远匹配不
+# 上任何标题，守卫就永远触发——两头都是废掉这条判据，所以必须按词切。
+# 疑问词（什么/怎么/时候…）走 _STOP_TERMS 而不是按单字砍：`时` 在「考试时间」里、
+# `候` 在「候选人」里都是实义成分，一起砍就砍错地方了。
+_STOP_CHARS = set("的了着是在和与及或也就而被把从到于之这那个们吗呢吧啊呀哦嗯请问你我他她它您谁")
+# 只有"成词"才算虚词的：从切出来的 token 里丢掉，不作为交集的证据。
+_STOP_TERMS = {"什么", "时候", "怎么", "怎样", "如何", "多少", "多久", "为什么", "哪些",
+               "哪个", "那个", "这个", "可以", "是不", "有没有"}
+
+# 词内相邻两字成 token：整句问话于是裂成一片可比较的小片段，交集判断才有牙。
+# 汉字段取统一汉字 U+4E00–9FFF 加扩展 A U+3400–4DBF（生僻姓名/地名落在扩展 A 那一档）。
+# 中文标点一律在这两段之外（、。《》「」在 U+3000–303F，，！？（）在 U+FF00 段），所以
+# 天然进不了 token——这是判据成立的前提：标点一旦混进来，「。」会和任何带句号的标题
+# "对上"，守卫就永远不触发。哪天有人把下界一路扩到 U+3000，
+# test_punctuation_never_becomes_a_term 会红在那里。
+_WORD_RUNS = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff\u3400-\u4dbf]+")
+# 虚词按"切开"而不是"整串砍掉"：砍在一串汉字的中间会把「研究」切成「究」。
+_SPLIT_STOP = re.compile("[" + "".join(sorted(_STOP_CHARS)) + "]")
+
+
+def _query_terms(query: str):
+    """把查询切成两块：主题词（中文两字片段与字母词）与限定词（纯数字串）。
+
+    **单字不算主题词**：2026-09-22 拿真实源站量过——问「2027年西北地区研究生招生简章
+    什么时候发布」回来的是「2027日历表」「2027年放假安排」这种噪声页，它和查询只共享
+    「2027」与一两个散字。单字一旦算进交集，这种页就被判"相关"，守卫在最该它说话的
+    那次正好不吭声。
+    **年份只做限定词，不做主题词**：上面那页正是靠「2027」混进交集的。但整句查询只剩
+    年份时（「2027」单问），年份就是全部主题，所以分两块交出去由调用方定夺。
+    **绝不按空格分词**：中文问句里没有空格，`query.split()` 会得到一个 giant token，
+    它与任何标题都匹配不上，于是这条守卫对每一句中文都判"无关"——那是比没有守卫
+    更糟的形状（每问一句都挂一句疑神疑鬼的话）。
+    """
+    subject, qualifier = set(), set()
+    for run in _WORD_RUNS.findall(str(query or "").lower()):
+        if run[0].isdigit():
+            qualifier.add(run)
+            continue
+        if run[0].isascii() and run.isascii():
+            subject.add(run)                        # 字母词整词就是主题词，不切两字
+            continue
+        for segment in _SPLIT_STOP.split(run):
+            subject.update(segment[i:i + 2] for i in range(len(segment) - 1))
+    return subject - _STOP_TERMS, qualifier
+
+
+def _rows_share_a_word(query: str, rows: list) -> bool:
+    """返回的标题+摘要里是否找得到一个查询主题词。判据是**子串**，不是整词相等。
+
+    取"零交集才报警"这个最保守的形状：有一点点重叠就不吭声。误报的代价是模型天天
+    被一句无关提示干扰、最后连真提示一起忽略；漏报只是回到今天的行为。
+    唯一不算判断的判断是切不出主题词（整句查询都是虚词与标点）——那时回"相关"。
+    某条结果缺摘要只是少一份可比文本，不另开分支：解析层本来就要求有标题才成一条。
+    """
+    subject, qualifier = _query_terms(query)
+    if not subject:
+        subject = qualifier                         # 只问了个年份时，年份就是主题
+    if not subject:
+        return True
+    text = " ".join(f"{r.get('title', '')} {r.get('snippet', '')}" for r in rows).lower()
+    return any(term in text for term in subject)
 
 @register_tool(
     name="help",
