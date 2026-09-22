@@ -284,7 +284,9 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 
 /* ---------- 首屏 ---------- */
 .hero, section, footer { max-width: var(--maxw); margin: 0 auto; padding: 56px 20px; }
-.hero { padding-top: 84px; padding-bottom: 64px; position: relative; }
+/* hero 的下边距单独收小：它和下一节的 padding-top 会叠在一起，
+   两条各 44~64px 时首屏正文下面就是一条读起来像"内容没加载"的空带 */
+.hero { padding-top: 84px; padding-bottom: 28px; position: relative; }
 /* 标题后面那团光：负 z 让它待在文字之下、氛围光之上。
    宽度用 left/right 撑在 hero 自己的盒子里，不用 116vw——窄屏下 vw 会把光斑
    顶出视口，多出来的那几十像素就是手机上的横向抖动。 */
@@ -451,6 +453,7 @@ footer::before {
 /* ---------- 窄屏与降低动效 ---------- */
 @media (max-width: 420px) {
   .hero, section, footer { padding: 44px 16px; }
+  .hero { padding-bottom: 24px; }
   .cards li { padding: 18px; }
 }
 
