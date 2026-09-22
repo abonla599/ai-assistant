@@ -54,6 +54,28 @@
 - `backend/app/web/site/index.html:70`（"不获取精准闹钟权限"）→ 改完必须**重建 EXE** 才上线
 - 新建 `docs/releases/v0.18.md`（`test_release_notes.py:26-32`：`versionName` 一涨就要求它存在）
 
+### §4 打勾结果（2026-09-22 执行时）
+
+| 位置 | 结果 |
+|---|---|
+| `AndroidManifest.xml` 那句"不申请 SCHEDULE_EXACT_ALARM" | 已删，换成写明代价与回退的声明块（Step 2） |
+| `ReminderScheduler` 类注释"既不申请特权也不降级" | 已重写为"档位由 AlarmPolicy 决定，任何情况都至少排上一档"（Step 2） |
+| `ReminderReceiver`"这里连表都不动" | 已删，两支都留痕；类注释同步（Step 2） |
+| `ShellBridge`"不需要额外的『问过了』标记" | 句子本身仍成立，补上了"问不出来的人由提醒页那一行接住"的指向（Step 3） |
+| `MainActivity` 通知权限回调落空 | 不补代码，只把"为什么故意什么都不做"写进注释（Step 4） |
+| spec §1 / §2 / §3 | 三处各加"2026-09-22 修订（v0.18）"块，原文按原样留着（Step 4） |
+| 历史计划 `2026-09-19-shell-native-capabilities.md` | 加一行"上面三条已被 v0.18 推翻 + 现行口径在哪"，不重写历史（Step 4） |
+| `docs/用户手册.md`、`release-apk.yml` 正文尾巴 | 两处"不申请精确闹钟权限"改为"会申请，不给也能用"并点出那一行（Step 4） |
+| `site/index.html` "不获取精准闹钟权限" | 已改；并新增一条从清单反向推页面的锁 `test_the_alarm_permission_claim_matches_the_manifest`——**改完要重建 EXE 才上线**（Step 5） |
+| `docs/releases/v0.18.md` | Step 5 随版本号一起写 |
+
+两处清单外顺带扫到并修掉的：`MainActivity:107` 那句"一个对象、八个方法"（与 §3 同一类谎，
+只是漏在清单外）；`ShellBridge.askNotificationPermissionOnce` 里自己那份
+`checkSelfPermission`（新增的"判定只此一处"锁第一次跑就抓出来的第二份真相）。
+`docs/superpowers/plans/2026-09-19-website.md:482` 里也还有那句旧文案，但它是一份已执行完的
+任务简报（照抄当时决定要写什么），按"不重写历史"留着。
+
+
 ## 5. 顺序
 
 1. `core/AlarmPolicy` + `Reminder`/`ReminderStore` 两个字段 —— 先写 JVM 红的测试。

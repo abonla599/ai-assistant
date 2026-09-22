@@ -649,6 +649,9 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode != CAMERA_PERMISSION_CODE || pendingCameraRequest == null) {
+            // 通知那颗（NOTIFICATION_PERMISSION_CODE）故意落在这里什么都不做：它没有
+            // WebView 的 PermissionRequest 要批准或拒绝，结果只影响"到点发不发得出去"，
+            // 而那一行每次显示时都现问 PermissionStatus——在这里再推一份状态就是第二份真相。
             return;
         }
         PermissionRequest request = pendingCameraRequest;

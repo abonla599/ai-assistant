@@ -145,6 +145,25 @@ def test_what_stays_unavailable_and_what_became_real():
     assert "来源" in head[can:can_end] and "查不到" in head[can:can_end],         "那条卡片必须自带限定：结果附来源、查不到就说查不到"
 
 
+def test_the_alarm_permission_claim_matches_the_manifest():
+    """官网那句关于「精准闹钟」的话必须与清单里真正声明的那条权限是同一件事。
+
+    2026-09-22 之前两处都写着"不申请"。这类分裂不需要想象力：改清单的人不会想起去改官网，
+    而官网谎了对外一声不响——没人会在决定装不装的时候去翻 AndroidManifest。所以这条从清单
+    反向推页面（页面那句话只是它的投影），同时要求页面必须提这件事一次：否则"把那句谎删掉"
+    也能让这条锁悄悄绿掉。
+    """
+    manifest = (Path(__file__).resolve().parents[2]
+                / "android" / "app" / "src" / "main" / "AndroidManifest.xml")
+    declared = "SCHEDULE_EXACT_ALARM" in manifest.read_text(encoding="utf-8")
+    page = _page()
+    denial = re.search(r"不(获取|申请)(精确|精准)闹钟", page)
+    assert "精准闹钟" in page, "官网对这件事一个字不提了：那句承诺悄悄消失也是谎"
+    assert bool(denial) is (not declared), (
+        f"清单声明了精准闹钟权限={declared}，官网却在说"
+        f"「{denial.group(0) if denial else '（没有否认）'}」：两处得说同一件事")
+
+
 def test_the_android_button_downloads_through_our_own_endpoint():
     """点「安卓版」要直接落盘，而不是把人丢到 GitHub 页面上自己找那颗按钮。
 
