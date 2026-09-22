@@ -22,8 +22,10 @@ __pycache__/
 *.pyc
 
 # PyInstaller 打包产物（.spec 是构建配置，需要入库，不要忽略）
-# build_new 是 run_backend.spec 里写的工作目录名，和 build/ 同一种东西。
+# 构建目录只有一个事实来源：产物 dist/run_backend/、暂存 dist_new/、工作目录 build_new/
+# （后者由指南里的 --workpath 显式指定；build/ 是历史命令行没带参数时留下的旧默认）。
 dist/
+dist_new/
 build/
 build_new/
 # 构建戳：打包前由 `git describe --tags --abbrev=0` 生成，随包一起打进去。
@@ -71,6 +73,10 @@ generate_docx.py
 # 密钥形态扫描器。它自己必须是**被扫的对象**（写坏了形状规则会当场红），所以它得进
 # 版本库、进 CI 那次 checkout。纯标准库、只读文件，不碰网络也不写盘。
 !/tools/secret_scan.py
+# 打包闸：run_backend.spec 在打包第一行 import 它，test_package_gate.py 逐条钉它的
+# 行为——不进版本库就等于新克隆打不了包、CI 上那条锁直接炸。只读 git 与工作区文本，
+# 不写盘不碰网。
+!/tools/package_gate.py
 server.log
 tunnel.log
 PATH_backup_*.txt

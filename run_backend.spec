@@ -3,6 +3,15 @@ import os
 
 from PyInstaller.utils.hooks import collect_all
 
+# 打包闸：先于 Analysis（也就先于几分钟的 collect_all）检查
+# 「工作树 == HEAD」与「随包前端文本不含服务商名」。这个 spec 是本包唯一的
+# 出品入口，闸挂在这里等于挂在任何一次打包之前；为什么是这两条、豁免怎么写，
+# 见 tools/package_gate.py 与 backend/tests/test_package_gate.py。
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+from package_gate import enforce as _package_gate_enforce  # noqa: E402
+_package_gate_enforce()
+
 # chromadb 用配置项按字符串路径动态导入 chromadb.api.rust，原生实现又在独立包
 # chromadb_rust_bindings 里，静态分析两者都发现不了，必须显式整体收集。
 chroma_datas, chroma_binaries, chroma_hiddenimports = collect_all("chromadb")
