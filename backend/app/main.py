@@ -106,6 +106,11 @@ async def lifespan(app: FastAPI):
     # 紧接着打一行"齐不齐"：出事时人在看日志，而不是去猜当时 /health 回过什么。
     from app.core.selfcheck import log_startup_summary
     log_startup_summary()
+    # uvicorn 的 access/error logger 也要过一遍脱敏：访问日志会把查询串原样写出来
+    # （?model=deepseek-chat 就是这么漏进 named.log 的），光给文件流加壳拦不住它。
+    # 放在启动摘要之后，是因为这条之前已经有人往日志里写过东西。
+    from app.core import logsanitizer
+    logsanitizer.install_std_filters()
     # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
     # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
     from app.tools.availability import start_probe
@@ -209,6 +214,9 @@ class AgentRequest(BaseModel):
     task: str
     max_turns: Optional[int] = 10
     max_duration: Optional[int] = 120
+    # provider id（或旧式模型名）；留空走默认配置。端点原先向上写死
+    # "deepseek-chat"，等于在代码里刻了一个服务商名。
+    model: Optional[str] = None
 
 class OrchestrateRequest(BaseModel):
     goal: str
@@ -875,16 +883,20 @@ def submit_feedback(feedback: FeedbackRequest,
 # 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
 # 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
 @app.post("/v1/agent/run")
-def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
+def run_agent(request: AgentRequest, principal: Principal = RequireAdmin):
     try:
         from app.agents.react_agent import ReActAgent
         agent = ReActAgent(
-            model="deepseek-chat",
+            model=request.model,
             max_turns=request.max_turns
         )
+        # user_id 必须往下传：needs_user 类工具（查日程/查记忆）靠执行器用服务端
+        # 身份覆盖模型参数，原先这一格是空的——管理员跑 agent 时那些工具会静悄悄
+        # 落在 default_user 的账上，读到的可能不是自己的数据。
         result = agent.run(
             task=request.task,
-            max_duration=request.max_duration
+            max_duration=request.max_duration,
+            user_id=principal.user_id,
         )
         return {"result": result}
     except ImportError:

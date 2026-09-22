@@ -67,6 +67,40 @@ def test_deleting_a_task_removes_it_from_disk(isolated):
     assert task.task_id not in raw["tasks"], "内存删了、盘上还在，重启就诈尸"
 
 
+def test_cross_user_counterexample_on_the_real_file(isolated):
+    """真库反例（派单 F-1a）：盘上那一份读回来之后，u-2 仍然看不见 u-1 的任务。
+
+    内存里过滤对了不算数——归属是随 to_dict 落盘的，任何一格在序列化时丢掉
+    user_id，下一次 restore 回来的人就都成了孤儿或都成了同人。所以这里既断言
+    过滤结果，也直接查文件里那条记录确实带着归属。
+    """
+    mine = ts.Task(goal="u-1 的", user_id="u-1")
+    theirs = ts.Task(goal="u-2 的", user_id="u-2")
+    ts.task_store[mine.task_id] = mine
+    ts.task_store[theirs.task_id] = theirs
+
+    ts.restore(path=str(isolated))          # 真·重启：一切从文件读回
+    assert [t.task_id for t in ts.tasks_of("u-2")] == [theirs.task_id]
+    record = json.loads(isolated.read_text(encoding="utf-8"))["tasks"][mine.task_id]
+    assert record["user_id"] == "u-1", "归属没跟着落盘，过滤只是这一进程的幻觉"
+
+
+def test_cross_user_counterexample_in_memory_only():
+    """fake 反例（派单 F-1a）：不碰盘，纯进程内路径也不许串到人之间。
+
+    与上一条对偶：如果只测带 restore 的那条，getter 里藏一次写盘、或过滤
+    其实是从文件缓存顺带做对的情形都测不出来。这里连 isolated 夹具的
+    restore 之后都不再调——只有放进存储那一次写过盘。
+    """
+    a = ts.Task(goal="a 的", user_id="alice")
+    b = ts.Task(goal="b 的", user_id="bob")
+    ts.task_store[a.task_id] = a
+    ts.task_store[b.task_id] = b
+    assert ts.tasks_of("alice") == [a]
+    assert ts.tasks_of("bob") == [b]
+    assert ts.tasks_of("carol") == []
+
+
 def test_the_file_lives_where_the_env_says_and_starts_empty(isolated):
     """空账不该被凭空造出来：没有任务的时候没有文件。"""
     task = ts.Task(goal="g", user_id="u-1")
