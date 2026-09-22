@@ -1472,6 +1472,23 @@ function renderAboutRows() {
   }
   if (serverBuild === null) fetchServerBuild();
 
+  /* 桥诊断：只在页面认不到壳的时候露一行。三个值全是从桥那侧来的（外部可控），
+     所以只走 textContent，绝不拼进 innerHTML。
+     后半句那个 typeof 判的是"两份文件不同批"：service worker 是按单个 URL 网络优先缓存的，
+     一次刷新里 app.js 换新的而 shell.js 还是旧的，旧那份没有 diagnostic()——
+     那就没有诊断可显示，而不是把整个「关于」页崩掉。 */
+  const diag = $("bridgeDiag");
+  if (diag) {
+    if (SHELL.present || typeof SHELL.diagnostic !== "function") {
+      diag.classList.add("hidden");
+    } else {
+      const d = SHELL.diagnostic();
+      diag.textContent = "桥诊断：AssistantShell=" + d.object + " · capabilities() " + d.reply
+                       + " 「" + d.text + "」 · 页面 " + d.page;
+      diag.classList.remove("hidden");
+    }
+  }
+
   if (native) {
     $("updateVal").textContent = shellVer || serverBuild || "当前版本";
     $("updateLinkVal").textContent = "";

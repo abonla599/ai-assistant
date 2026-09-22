@@ -2254,3 +2254,126 @@ def test_the_card_animation_has_a_reduced_motion_escape():
     assert media, "prefers-reduced-motion 那条媒体查询没写成块"
     assert "update-sheet" in media.group(1), "卡片的升起动画没有减弱动效退路"
     assert "update-sheet-rise" in css, "关键帧名字不见了：说明动画整个被删了"
+
+
+# ---------- 壳的桥：调用约定与诊断（2026-09-22 真机排查加的） ----------
+
+_SHELL_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const mode = process.argv[3];              // ok | undefined | null | none
+const calls = [];
+const replies = {
+  capabilities: JSON.stringify({ shell: 1, update: 1, version: "0.17" }),
+  listReminders: "[]", pendingShares: "[]", checkUpdate: '{"ok":true}',
+  setOwner: '{"ok":true}', scheduleReminder: '{"ok":true}',
+  cancelReminder: '{"ok":true}', readShareChunk: '{"b64":""}', consumeShare: '{"ok":true}',
+};
+function bridge() {
+  if (mode === "none") return undefined;                 // ① 对象压根没注入
+  return new Proxy({}, { get(t, name) {
+    if (typeof name !== "string") return undefined;
+    return function () {
+      calls.push(name + "/" + arguments.length);
+      if (name === "capabilities" && mode === "undefined") return undefined;   // ② 派发没匹配上
+      if (name === "capabilities" && mode === "null") return "null";           // ③ 被 origin 拒
+      return replies[name];
+    };
+  }});
+}
+const sandbox = {
+  window: {}, location: { protocol: "https:", host: "ai.fenever.xyz" },
+  console, JSON, Math, String, Number, Array, Object, Promise, Error, RegExp, Date,
+  atob: (s) => Buffer.from(s, "base64").toString("binary"), Uint8Array,
+  Blob: class Blob { constructor(p, o) { this.parts = p; this.type = (o || {}).type; } },
+};
+sandbox.window.AssistantShell = bridge();
+vm.createContext(sandbox);
+const out = vm.runInContext(src + "\n;(function(){ SHELL.setOwner('u'); SHELL.listReminders();"
+  + " SHELL.pendingShares(); SHELL.checkUpdate();"
+  + " return { present: SHELL.present, diag: SHELL.diagnostic() }; })()", sandbox);
+process.stdout.write(JSON.stringify({ present: out.present, diag: out.diag, calls: calls }));
+"""
+
+
+def _run_shell_js(mode: str) -> dict:
+    """在 node 里真跑仓库那份 shell.js，返回 {present, diag, calls}。
+
+    为什么必须真跑：这条 bug 的现场是「JS 怎么调用 → WebView 按方法名+参数表派发 →
+    Java 方法」，读源码看不出 `B[name]("")` 与 `B[name]()` 的差别，而壳那 42 条 JVM 单测
+    是【直接调 Java 方法】的，永远碰不到派发规则。判据只能问运行时。
+
+    这里也不走 _js() 那把尺子：它剥注释，而我们要执行的是磁盘上那份原文件。
+    读文件的是 node 自己，不是本函数——所以这条不是"绕过尺子读语料做文本断言"，
+    两回事。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    harness = Path(tempfile.mkdtemp(prefix="shell-js-")) / "harness.cjs"
+    harness.write_text(_SHELL_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(harness), str(STATIC / "shell.js"), mode],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_zero_arg_bridge_methods_are_called_with_no_arguments():
+    """Java 侧不收参数的四个方法，JS 就必须一个参数都不传。
+
+    多传一个空串的代价不是报错，是**整个壳在页面上凭空消失**：桥按"方法名 + 参数表"
+    去找 Java 方法，找不到就回 undefined，JSON.parse 抛错被 catch 咽成 null，
+    present=false，于是界面和手机浏览器长得一模一样。2026-09-22 真机第一次装 v0.17
+    就是这个表现——而它在此之前一直只在 JVM 单测里"通过"。
+    """
+    out = _run_shell_js("ok")
+    calls = out["calls"]
+    for name in ("capabilities", "listReminders", "pendingShares", "checkUpdate"):
+        assert f"{name}/0" in calls, (
+            f"{name}() 在 Java 侧不收参数，JS 却传了（实际记录：{calls}）")
+    assert "setOwner/1" in calls, f"收一个参数的那个反而没传：{calls}"
+    assert out["present"] is True, f"桥一切正常时 present 必须是 true：{out}"
+
+
+def test_the_bridge_diagnostic_names_which_layer_failed():
+    """无桥时那行诊断要能分出三种坏法，否则它只是把困惑重说一遍。
+
+    ① 对象没注入（typeof 不是 object）；② 注入了但调用没匹配上任何 Java 方法
+    （回 undefined）；③ 调用通了、壳主动拒了（capabilities() 回字符串 "null"，
+    那是 sameOrigin 闸门的口径）。③ 与"页面在别的源上"是同一件事的两面，所以顺带
+    钉住诊断里那份 page 是页面自己看到的 scheme+host。
+    """
+    none = _run_shell_js("none")
+    assert none["present"] is False and none["diag"]["object"] == "undefined", none
+
+    unmatched = _run_shell_js("undefined")
+    assert unmatched["present"] is False, unmatched
+    assert "undefined" in unmatched["diag"]["reply"], unmatched["diag"]
+
+    refused = _run_shell_js("null")
+    assert refused["present"] is False, refused
+    assert refused["diag"]["text"] == "null", refused["diag"]
+    assert refused["diag"]["page"] == "https://ai.fenever.xyz", refused["diag"]
+
+
+def test_the_bridge_diagnostic_reaches_the_page_only_when_there_is_no_bridge():
+    """诊断行：markup 里默认藏起来，只有认不到壳时 app.js 才填它、放它出来。
+
+    三个判据各防一种"看着做了其实没做"：① 只写了 JS 没写元素，$( ) 拿到 null，
+    那一行永远不出现；② 默认不藏，于是壳正常的时候也挂着一条排查信息；
+    ③ 用 innerHTML 写——那几个值全是从桥（外部可控）来的。
+    """
+    html = _html()
+    js = _js()
+    assert 'class="pane-note hidden" id="bridgeDiag"' in html, (
+        "诊断行不在 markup 里，或默认不是藏着的")
+    body = _js_fn(js, "renderAboutRows")
+    assert 'const diag = $("bridgeDiag")' in body, "JS 里没人填那一行"
+    assert "SHELL.diagnostic()" in body, "填进去的不是桥记录的那份"
+    assert "SHELL.present" in body, "没有按有没有壳决定露不露：有桥时也会挂着排查信息"
+    assert "textContent" in body and "innerHTML" not in body, "诊断文字来自桥，不许走 innerHTML"

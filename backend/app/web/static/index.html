@@ -209,6 +209,12 @@
             <div class="set-row set-plain">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.6"/></svg></span>
               <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span></div>
+            <!-- 桥诊断：只有页面认不到壳时才露出来（填它的是 app.js 的 renderAboutRows）。
+                 这不是给用户看的功能说明，是"桥静默失效"唯一的现场证据——present 一旦为
+                 false，整个界面和手机浏览器长得一模一样，光凭眼睛分不清是对象没注入、
+                 调用没匹配上 Java 方法、还是被壳那侧的 origin 闸门拒了。2026-09-22 那次
+                 真机排查就是因为没有这一行，只能靠拆 APK 数字符串。 -->
+            <p class="pane-note hidden" id="bridgeDiag"></p>
             <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
                  只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
                  两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a

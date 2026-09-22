@@ -24,15 +24,45 @@ const SHELL = (() => {
   const CHUNK = 512 * 1024;      // 与壳的 readShareChunk 单次上限同一个数（spec §2 铁律③）
   const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
+  /* 调用约定：**Java 侧不收参的方法，一个参数都不许传**。
+     `B[name]("")` 与 `B[name]()` 在这座桥上不是同一件事——桥是按"方法名 + 参数表"去
+     找 Java 方法的，多传一个空串有可能根本匹配不到；那样 JS 拿到 undefined，
+     下面那个 JSON.parse 抛错，被 catch 咽成 null，于是 present=false：
+     **整个壳在页面上凭空消失，而界面长得跟浏览器一模一样，一个字都不报错。**
+     零参的那四个：capabilities / checkUpdate / listReminders / pendingShares
+     （对照 ShellBridge.java 的签名）。2026-09-22 真机第一次装 v0.17 就是这个表现，
+     判据是 test_web_pwa.py 里那条"在 node 里真跑 shell.js、数每个方法收到几个参数"的锁——
+     JVM 那 42 条单测是直接调 Java 方法的，永远碰不到这条派发规则。 */
   function raw(name, arg) {
-    try { return JSON.parse(B[name](arg === undefined ? "" : arg)); }
+    try { return JSON.parse(arg === undefined ? B[name]() : B[name](arg)); }
     catch (e) { return null; }        // 桥没应答、老壳缺这个方法、JSON 坏了，一律当"没有"
   }
 
+  /* 桥诊断：只记"看到了什么"，不解释、不猜原因。present=false 之后界面与浏览器完全同形，
+     而这正是这仓最难查的那类静默失效，所以无桥时把这三样显示到「设置 → 关于」：
+     AssistantShell 这个对象在不在、capabilities() 到底回了什么、页面自认为在哪个源上。 */
+  const DIAG = { object: typeof window.AssistantShell, reply: "没调用", text: "", page: "" };
+  try { DIAG.page = location.protocol + "//" + location.host; } catch (e) {}
+
   /* 有没有桥由 capabilities() 说了算：assistantShell 这个对象可能因为页面不在
-     我们的主机上而调不通（壳那边按 origin 拒绝），那时 present 必须为 false，
-     否则界面会摆出一套点了没反应的控件。 */
-  const caps = (typeof B === "object" && B !== null) ? raw("capabilities") : null;
+     我们的主机上而调不通（壳那边按 origin 拒绝，回的是字符串 "null"），那时 present
+     必须为 false，否则界面会摆出一套点了没反应的控件。 */
+  const caps = (() => {
+    if (DIAG.object !== "object" || B === null) return null;
+    let reply;
+    try {
+      reply = B.capabilities();
+    } catch (e) {
+      DIAG.reply = "调用抛错";
+      DIAG.text = String((e && e.message) || e).slice(0, 60);
+      return null;
+    }
+    // 先记下"桥回了什么类型"再解析：解析失败与"压根没匹配上方法（回 undefined）"是两种
+    // 不同的坏法，混成一句"调用抛错"就把现场抹掉了——而那正是要靠这一行分清的东西。
+    DIAG.reply = "回了 " + (reply === undefined ? "undefined" : typeof reply);
+    DIAG.text = String(reply).slice(0, 60);
+    try { return JSON.parse(reply); } catch (e) { return null; }
+  })();
   const present = !!(caps && typeof caps === "object");
 
   function call(name, arg) {
@@ -65,6 +95,11 @@ const SHELL = (() => {
   return {
     present,
     capabilities() { return present ? caps : {}; },
+    /* 给「设置 → 关于」那行诊断用的原始记录。刻意不拼成一句人话、也不下结论：
+       解释留给读它的人，界面上多一句猜测就是第二个事实来源。 */
+    diagnostic() {
+      return { object: DIAG.object, reply: DIAG.reply, text: DIAG.text, page: DIAG.page };
+    },
     setOwner(user) {
       // 未登录 / 认不出人时传空串：壳那侧把 owner 清空，于是提醒与分享件全部不可见
       // （fail-closed，宁可看不见也不看见别人的）。
