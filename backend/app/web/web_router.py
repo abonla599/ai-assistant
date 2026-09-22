@@ -2,13 +2,20 @@
 
 静态资源与 API 同源，因此前端一律使用相对路径调用 /v1/*，不再需要把
 服务器地址硬编码进客户端——这正是此前 127.0.0.1 写法让手机端无法使用的根因。
+
+缓存策略（2026-09-22 改）：外壳一次开门要发 11 个请求，每一个此前都必须完整回源
+一趟。量过的数是源站 2~18ms、走隧道单趟 ttfb 300~430ms——慢的不是应用，是趟数。
+所以带版本号的资源给一年 immutable，不带版本号的仍旧 no-cache。
 """
 import os
+import re
 import sys
+import zlib
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse as StarletteFileResponse
 
 from app.core import releases
 
@@ -40,14 +47,99 @@ def _admin_dir() -> str:
 ADMIN_DIR = _admin_dir()
 
 
-def site_headers(response):
+# 一年 immutable。它之所以敢用，靠的是下面那个水印：文件一变水印就变、URL 就变。
+IMMUTABLE = "public, max-age=31536000, immutable"
+
+# 哪些引用要跟着水印走：按扩展名认，不另列清单——加一个新资源不需要想起来改第二处。
+_REF = re.compile(r'\b(?:src|href)="[^"?]*\.(?:css|js|png|jpe?g|svg|webmanifest)"')
+
+_TOKEN = ""
+
+
+def _newest_mtime() -> float:
+    newest = 0.0
+    for root in (STATIC_DIR, ADMIN_DIR, SITE_DIR):
+        for base, _, files in os.walk(root):
+            for name in files:
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(base, name)))
+                except OSError:      # 正好有人在替换文件：少看一个不丢正确性
+                    continue
+    return newest
+
+
+def asset_token() -> str:
+    """当下这一版静态资源的水印 = 三份静态目录里最新的修改时间。
+
+    算一次就够：这些文件只随构建变化。每次请求重扫一遍目录，等于把拖慢首屏的那个瓶颈
+    换个地方再放一遍。测试要换水印时改 `_TOKEN`——判据都从这里取，不存在第二份。
+    """
+    global _TOKEN
+    if not _TOKEN:
+        _TOKEN = f"{_newest_mtime():.0f}"
+    return _TOKEN
+
+
+def _query_token(scope) -> str:
+    for pair in (scope.get("query_string") or b"").split(b"&"):
+        if pair.startswith(b"v="):
+            return pair[2:].decode("utf-8", "replace")
+    return ""
+
+
+def stamp_assets(html: str) -> str:
+    """把 HTML 里对本地资源的引用换成带水印的那一个 URL。
+
+    `sw.js` 刻意跳过：service worker 的注册地址是写死的那一个，给它换 URL 等于每次
+    注册一个新 worker，而旧的那个永远等不到更新。
+    已经带 `?` 的引用不匹配，所以这个替换是幂等的——重复盖不会叠出 `?v=1?v=2`。
+    """
+    token = asset_token()
+
+    def one(match):
+        whole = match.group(0)
+        attr, _, value = whole.partition('="')
+        path = value[:-1]
+        if path.rsplit("/", 1)[-1] == "sw.js":
+            return whole
+        return f'{attr}="{path}?v={token}"'
+
+    return _REF.sub(one, html)
+
+
+def rewritten_html(source: StarletteFileResponse, token: str,
+                   if_none_match: str = "") -> Response:
+    """HTML（以及要盖水印的 sw.js）出门前的那一次改写，连带把条件请求保住。
+
+    为什么不缓存 HTML：它是"当前是哪一版"的唯一出处。缓存了它，就可能拿旧水印去
+    引用资源——那正是 2026-09-17 的形状。
+    为什么还要自己算 ETag：整页 HTML 有三十多 KB，丢了条件请求就变成"每次导航都要
+    重新下载一遍页面"，比改动之前更贵。
+    """
+    with open(source.path, "rb") as fh:
+        raw = fh.read().decode("utf-8")
+    text = stamp_assets(raw) if source.path.endswith(".html") \
+        else raw.replace("__ASSET_TOKEN__", token)
+    body = text.encode("utf-8")
+    etag = f'"st-{zlib.crc32(body):08x}-{len(body):x}"'
+    if etag in if_none_match:
+        return site_headers(Response(status_code=304, headers={"ETag": etag}))
+    return site_headers(Response(content=body, media_type=source.media_type,
+                                 headers={"ETag": etag}))
+
+
+def site_headers(response, versioned: bool = False):
     """全站响应共用的一组头，字面量只这一份：/app、/admin、/site 的静态资源走
     RevalidatingStaticFiles，官网 index.html 走 FileResponse，两头都收口在这里。
 
-    不抽出来的话就有第二份 no-cache 字面量，改一份漏一份——和 _PROTECTED_PREFIXES
+    不抽出来的话就有第二份缓存字面量，改一份漏一份——和 _PROTECTED_PREFIXES
     在测试里"不抄第二份清单"是同一个道理。
+
+    `versioned` 由调用方按"这一趟请求的 URL 带没带当下水印"回答。没带的（收藏夹里的
+    裸地址、老 service worker 预取过的那一批）继续 no-cache：长缓存只给名字里就写明
+    了是哪一版的资源，宁可多问一趟也不把人钉在一份旧文件上。
     """
-    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Cache-Control"] = IMMUTABLE if versioned else "no-cache"
     # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
     # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
     response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
@@ -55,19 +147,29 @@ def site_headers(response):
 
 
 class RevalidatingStaticFiles(StaticFiles):
-    """静态资源一律 no-cache：每次使用前必须回源问一次，ETag 就是那次问价。
+    """带当下水印的资源 → 一年 immutable；不带的、以及 HTML 与 sw.js → no-cache。
 
-    源站原先对 /app 与 /admin 下的文件完全不表态，于是缓存策略由别人代填：
-    Cloudflare 给 .css/.js 注入 max-age=14400，浏览器再按启发式各存一份。2026-09-17
-    重建并重启后，公网 /app/style.css 拿到的仍是 80 分钟前那份旧的
-    （cf-cache-status: HIT）——界面改版在用户那边就成了"改了没生效"。
+    HTML 与 sw.js 出门前还要盖一次水印（见 `stamp_assets`），所以"页面引用的资源是
+    上一版"这件事在结构上不成立：引用和它指向的文件由同一个水印绑在一起。
 
-    no-cache 不等于不缓存：命中 ETag 时源站回 304，只有一个头；离线也不受影响，
-    service worker 那份缓存不归 HTTP 缓存管。
+    这一套换掉的是一条更贵的旧规则：源站原先对 /app 与 /admin 完全不表态，缓存策略由
+    别人代填（Cloudflare 给 .css/.js 注入 max-age=14400），2026-09-17 重建重启之后
+    公网拿到的仍是 80 分钟前那份 `style.css`（`cf-cache-status: HIT`），界面改版在
+    用户那边成了"改了没生效"。当天的解法是一律 no-cache——正确，但一次开门那 11 个
+    请求每一个都要完整回源一趟，实测单趟 ttfb 300~430ms，代价最后落在首屏上。
     """
 
     async def get_response(self, path: str, scope):
-        return site_headers(await super().get_response(path, scope))
+        # 这一趟请求的东西一律走局部变量：一个 StaticFiles 实例服务所有并发请求，
+        # 把 If-None-Match 存在 self 上就是"下一个请求看见上一个请求的头"。
+        token = _query_token(scope)
+        incoming = next((v.decode("latin-1") for k, v in scope.get("headers") or ()
+                         if k == b"if-none-match"), "")
+        response = await super().get_response(path, scope)
+        target = getattr(response, "path", "") or ""
+        if isinstance(response, StarletteFileResponse) and target.endswith((".html", "sw.js")):
+            return rewritten_html(response, token or asset_token(), incoming)
+        return site_headers(response, versioned=token == asset_token())
 
 
 def mount_pwa(app: FastAPI) -> None:
@@ -112,7 +214,8 @@ def install_site(app: FastAPI) -> None:
     """
     @app.get("/", include_in_schema=False)
     async def site_index():
-        return site_headers(FileResponse(os.path.join(SITE_DIR, "index.html")))
+        # 和 /app、/admin 的 HTML 同一个出口：先盖水印再出门，且这一页自己不缓存。
+        return rewritten_html(FileResponse(os.path.join(SITE_DIR, "index.html")), asset_token())
 
     # 这条必须注册在 /site 那个 Mount **之前**：Mount 是按前缀匹配的，排在后面的
     # 精确路由永远轮不到——症状不是报错，是"点了安卓版 404"。

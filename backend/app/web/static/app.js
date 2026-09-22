@@ -884,12 +884,21 @@ function updateSendEnabled() {
   $("sendBtn").disabled = !state.streaming && !(text || state.pending.length);
 }
 
+/* 图片预览并发取（2026-09-22）。原先是 `for (const a of atts) { a.url = await ... }`：
+ * 一张一张排队，历史里有 N 张图就是 N 趟串行往返，每趟走隧道实测 300~430ms，
+ * 十条带图的历史光缩略图就要三秒多——这段等待和它锁住的 restore() 一起算在
+ * 「打开网页到看见对话界面」那条链上。
+ * 并发之后仍然保持的两条老语义，一条都不许松：
+ * ① 每张图各自把结果写回**自己那条** a.url（不是先收齐再整批赋同一个值）；
+ * ② catch 挂在每张图自己的链上、而不是整批上，所以坏一张只少一张缩略图，
+ *    其余的照旧落地，整个函数也永远不会因为某一张 404 而 reject——
+ *    「取不到就只显示文件名」说的是那一张，不是那一批。 */
 async function hydrateImageUrls(atts) {
-  for (const a of atts || []) {
-    if (a.kind === "image" && !a.url) {
-      try { a.url = await API.fileBlobUrl(a.id); } catch (_) { /* 取不到就只显示文件名 */ }
-    }
-  }
+  const images = (atts || []).filter((a) => a.kind === "image" && !a.url);
+  await Promise.all(images.map((a) => API.fileBlobUrl(a.id).then(
+    (url) => { a.url = url; },
+    () => { /* 取不到就只显示文件名 */ },
+  )));
 }
 
 /* ---------------- 会话侧栏 ---------------- */
@@ -2266,10 +2275,14 @@ function setupKeyboardAware() {
 }
 
 /* ---------------- 启动 ---------------- */
+/* 读回这一条指针指向的历史。返回 null = 没什么要交代的；返回一个 Error = "这次没读回
+   历史"，但**不自己写状态条**，交给 loadServerData 在三路都落定之后统一写。
+   理由见那里：并发之后状态条是谁后回来谁抢，自己写就可能被 loadModels 那句
+   setStatus("") 擦掉，症状从"空聊天区 + 一句实话"退化成"空聊天区 + 什么都没有"。 */
 async function restore() {
   // 没有指针不等于"没什么可做的"：那正是上一个人的对话该消失的时刻。
   // 原先这里直接 return，靠"拿旧 id 去 GET 会撞 404"才把消息清掉——那是运气。
-  if (!pref.sessionId) { state.messages = []; return; }
+  if (!pref.sessionId) { state.messages = []; return null; }
   try {
     const full = await API.getSession(pref.sessionId);
     state.messages = (full.messages || []).map((m) => ({
@@ -2277,16 +2290,50 @@ async function restore() {
     }));
     await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   } catch (e) {
-    if (e.status === 404) { pref.sessionId = ""; state.messages = []; }
-    else if (!needsAuth(e)) setStatus("会话加载失败：" + e.message, true);
+    // 指针指的这条会话在服务端已经没有了：归零指针，界面按"新对话"走，不是一句错误。
+    if (e.status === 404) { pref.sessionId = ""; state.messages = []; return null; }
+    return e;
   }
+  return null;
 }
 
-/** 服务端数据的四步：注册成功、令牌变更后都要原样重跑一遍，不能只活在 boot 里。 */
+/** 服务端数据的四步：注册成功、令牌变更后都要原样重跑一遍，不能只活在 boot 里。
+ *
+ * 前三步并发、第四步排最后（2026-09-22：用户报"每次重新打开网页版都要等很久才出
+ * 对话界面"，分段量下来源站本机 /health p50 7ms，慢的是**趟数 × 每趟的隧道往返**，
+ * 单趟 ttfb 300~430ms。旧的写法是 loadModels → loadSessions → restore 一路 await
+ * 一路，光这三趟就是 1 秒左右的纯等待）。
+ *
+ * 并发前逐一查过的先后依赖（结论：三路彼此不相干，只有 ensureSession 真排在后面）：
+ * - loadModels()：输入只有 /v1/models 那个响应；写 state.providers / serverDefault /
+ *   presets，并在本机存的 pref.provider 已不可用时换成服务端默认；读 state.me
+ *   （isAdmin()，零模型时按角色分流提示文案）——那是 loadWho 的产物，loadWho 仍第一。
+ * - loadSessions()：写 state.sessions 并重画侧栏；renderSessions() 读 pref.sessionId
+ *   只为标"当前这一条"，而 pref.sessionId 来自本机存储，在 loadWho 之前就定了。
+ * - restore()：GET 的 id 也来自本机的 pref.sessionId，用不到 loadModels 带回来的
+ *   provider——**这是本轮唯一一处"看起来要等 models、其实不用"**：它写进的
+ *   state.messages 只被 messageNode() 消费，那里读的是 m.role / m.content 和每条
+ *   附件自己的 a.kind / a.url（supports_vision 只出现在模型下拉的文案里，不参与
+ *   渲染判断），三路里没有一处把 providers 喂给它。
+ * - ensureSession()：两处硬依赖留到最后——判据 `!pref.sessionId && currentProvider()`
+ *   里的 currentProvider() 读的是 loadModels 纠正之后的 pref.provider，函数体第一句
+ *   `state.sessions.some(...)` 读的是 loadSessions 的结果。并发就并发在这三步。
+ *
+ * 等的是"全部落定"（Promise.allSettled）而不是"第一个坏消息"（Promise.all）：
+ * Promise.all 一有人 reject 就立刻返回，剩下那几路还在跑却再没人等，boot 会拿着
+ * 半空的状态渲染完，晚到的 restore() 把 state.messages 填上时已经没人重画了——
+ * "会话列表好了、聊天区一直空着、也不报错"就是这么来的。allSettled 让每一路都跑到
+ * 自己的终点，再把第一个失败按数组顺序（models → sessions → restore，与旧串行
+ * 一致）重新抛给 boot 那个 needsAuth(e) 出口：出口只有一个，几路失败都是它。
+ * 已经改写成功的 state 不回滚：谁坏了说谁，其余照旧露出来。 */
 async function loadServerData() {
-  await loadModels();
-  await loadSessions();
-  await restore();
+  const [models, sessions, history] = await Promise.allSettled([
+    loadModels(), loadSessions(), restore(),
+  ]);
+  const lost = history.status === "fulfilled" ? history.value : null;
+  if (lost && !needsAuth(lost)) setStatus("会话加载失败：" + lost.message, true);
+  const first = [models, sessions, history].find((r) => r.status === "rejected");
+  if (first) throw first.reason;
   if (!pref.sessionId && currentProvider()) await ensureSession();
 }
 

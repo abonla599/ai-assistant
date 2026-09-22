@@ -2695,3 +2695,311 @@ def test_the_update_card_stays_out_of_the_stack():
     assert 'const YIELDS = ["sidebar", "attachMenu"]' in _js("layers.js"), \
         "让位层名单改了：这条锁与 app.js 里那段理由必须同时改，否则注释与代码各说一遍"
     assert "hideUpdateSheet" in _handler_of(js, "updateLaterBtn"), "「稍后」不再走那份收尾：日期戳没人写"
+
+
+# ---------- 首屏的串行网络链（2026-09-22：打开网页版到看见对话界面） ----------
+
+_BOOT_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const realFns = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+const PREAMBLE = `
+const flow = [];
+const statuses = [];
+let inflight = 0, peak = 0;
+const state = { messages: [], sessions: [], providers: [], me: { role: "user" } };
+const pref = { sessionId: SC.sessionId || "", provider: "p1" };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function beat(tag, ms, failStatus) {
+  flow.push("start:" + tag);
+  inflight += 1; if (inflight > peak) peak = inflight;
+  await wait(ms);
+  inflight -= 1;
+  if (failStatus) { flow.push("fail:" + tag); const e = new Error(tag + " boom"); e.status = failStatus; throw e; }
+  flow.push("end:" + tag);
+}
+function setStatus(text, isErr) { statuses.push((text || "") + (isErr ? "!" : "")); }
+function needsAuth(err) { flow.push("needsAuth:" + err.status); return err.status === 401; }
+function currentProvider() { return SC.hasProvider === false ? null : { id: "p1" }; }
+// 三个假叶子：只照抄真函数对外可见的那一处副作用（loadModels 拿到可用模型会
+// setStatus("") 擦掉旧红字），因为本轮要钉的正是"批次里谁最后写状态条"。
+async function loadModels() { await beat("models", SC.modelsMs, SC.modelsFail); setStatus("", false); }
+async function loadSessions() { await beat("sessions", SC.sessionsMs, SC.sessionsFail); }
+async function ensureSession() { flow.push("call:ensureSession"); }
+const API = {
+  async getSession(id) {
+    await beat("getSession", SC.historyMs, SC.historyFail);
+    return { messages: SC.messages || [] };
+  },
+  async fileBlobUrl(id) {
+    flow.push("start:file:" + id);
+    inflight += 1; if (inflight > peak) peak = inflight;
+    await wait((SC.fileMs || {})[id] || 5);
+    inflight -= 1;
+    if ((SC.fileFail || []).indexOf(id) >= 0) { flow.push("fail:file:" + id); throw new Error("thumb 404"); }
+    flow.push("end:file:" + id);
+    return "blob:" + id;
+  },
+};
+async function drive() {
+  if (SC.entry === "hydrate") {
+    const atts = SC.atts || null;
+    let threw = null;
+    try { await hydrateImageUrls(atts); } catch (e) { threw = String((e && e.message) || e); }
+    return { flow: flow, statuses: statuses, peak: peak, threw: threw,
+      urls: (atts || []).map((a) => (a.url === undefined ? null : a.url)) };
+  }
+  let threw = null, thrownStatus = null;
+  flow.push("begin");
+  try { await loadServerData(); }
+  catch (e) { threw = String((e && e.message) || e); thrownStatus = (e && e.status) || null; }
+  flow.push("settle");
+  return { flow: flow, statuses: statuses, peak: peak, threw: threw,
+    thrownStatus: thrownStatus, messages: state.messages.length, pointer: pref.sessionId };
+}
+`;
+
+const sandbox = { setTimeout, console };
+vm.createContext(sandbox);
+const script = "const SC = " + JSON.stringify(SC) + ";\n" + PREAMBLE + "\n" + realFns + "\ndrive()";
+const done = vm.runInContext(script, sandbox);
+done.then((r) => process.stdout.write(JSON.stringify(r)),
+          (e) => { console.error(e); process.exit(2); });
+"""
+
+
+def _fn_text(js: str, name: str) -> str:
+    """`async function name(...) { ... }` 整段，**带 async 前缀**。
+
+    _js_fn() 从 `function` 关键字起切，async 被切在外面——直接拿去执行会得到一个
+    含 await 的非 async 函数，node 报的是语法错，而错话会说成"harness 自己坏了"，
+    看不出是被测代码的形状变了。
+    """
+    text = _js_fn(js, name)
+    at = js.index(f"function {name}(")
+    return ("async " + text) if js[:at].endswith("async ") else text
+
+
+def _run_boot_js(scenario: dict) -> dict:
+    """在 node 里真跑仓库那份 loadServerData / restore / hydrateImageUrls。
+
+    为什么必须真跑：这次改的东西**读源码读不出结论**。"三路之间没有 await"只说明
+    写法，不说明行为——`Promise.all` 一个 reject 就立刻返回、剩下两路还在改 state
+    却再没人等，那形状在文本上完全合规，症状却是本仓最贵的那一类（界面空着且不报错）。
+    只有运行时能回答"到底谁等谁、坏一路时另外两路跑没跑完、状态条最后是谁写的"。
+    叶子（loadModels/loadSessions/ensureSession/API）在这里是假的，因为真叶子要整个
+    DOM 和整个后端；被执行的**控制流**是仓库那一份，逐字取自 _js()。
+
+    与 _run_shell_js / _run_layers_js 同理：读文件的是 node，不是本函数；交给 node 的
+    那段函数文本经 _js() 那把尺子（剥注释），执行不受影响。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    js = _js()
+    snippet = "\n".join(_fn_text(js, n) for n in
+                        ("hydrateImageUrls", "restore", "loadServerData"))
+    d = Path(tempfile.mkdtemp(prefix="boot-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_BOOT_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def _at(out: dict, tag: str) -> int:
+    assert tag in out["flow"], f"{tag} 压根没发生：{out['flow']}"
+    return out["flow"].index(tag)
+
+
+def test_the_three_boot_reads_go_out_at_the_same_time():
+    """开门那三趟（models / sessions / 历史）并发发出去，第四趟（建会话）仍排最后。
+
+    flow 是逐字的时间线：串行的写法是 start:models,end:models,start:sessions,…，
+    并发才是三个 start 连在一起。peak==3 是"同一刻在途三条"的第二种说法（万一有人
+    把排队藏进 helper 里，顺序看不出来，同时在途数瞒不住）。
+    第二趟跑的是"本机没有指针"那一路：ensureSession 必须排在 models 与 sessions 两个
+    end 之后——它读 currentProvider()（loadModels 纠正过的 pref.provider）和
+    state.sessions（loadSessions 的结果），这两样没回来就建会话，会拿错模型、
+    或把清单里已有的那条再建一遍。restore 在那一路不发请求（没指针），所以三个 start
+    只有两个，这正好也是"没指针就别多发一枪"的口径。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "sessionsMs": 30,
+                        "historyMs": 20,
+                        "messages": [{"role": "user"}, {"role": "assistant"}]})
+    assert out["threw"] is None, out
+    assert out["flow"][1:4] == ["start:models", "start:sessions", "start:getSession"], \
+        f"三路不是同时发出去的：{out['flow']}"
+    assert out["peak"] == 3, f"同一刻在途的不是三条（退回串行就只剩一条）：{out['peak']}"
+    assert out["messages"] == 2, f"历史读回来了却没落进 state：{out}"
+
+    fresh = _run_boot_js({"modelsMs": 40, "sessionsMs": 20})
+    assert fresh["flow"][-2:] == ["call:ensureSession", "settle"], fresh["flow"]
+    for end in ("end:models", "end:sessions"):
+        assert _at(fresh, "call:ensureSession") > _at(fresh, end), \
+            f"建会话抢在 {end} 前面了：那一趟读的还是空清单"
+
+
+def test_an_existing_pointer_skips_creating_a_session():
+    """本机已经有指针时不该多发那一枪 POST——省一趟隧道，也省得把已有会话重置成空。
+
+    ensureSession 的判据 `!pref.sessionId` 由 loadServerData 在批次**之后**才评：
+    那时 restore() 已经跑完，它可能因为服务端回 404 把指针归零了（见 test_a_pointer_…），
+    所以"要不要新建"用的不是开机那一刻的本机值，而是查过历史之后的值。
+    """
+    kept = _run_boot_js({"sessionId": "s-1", "modelsMs": 10, "sessionsMs": 10,
+                         "historyMs": 10, "messages": [{"role": "user"}]})
+    assert "call:ensureSession" not in kept["flow"], kept["flow"]
+    assert kept["messages"] == 1 and kept["pointer"] == "s-1", kept
+
+
+def test_a_failed_boot_read_waits_for_the_others_before_it_reports():
+    """并行之后最贵的一种坏法：一路先失败，另外两路还在跑却没人等——boot 拿着半空的
+    状态渲染完，晚到的历史填进 state 时已经没人重画，界面就"安静地空着"。
+
+    所以这里等的是 Promise.allSettled（全部落定）而不是 Promise.all（第一个坏消息）。
+    判据是时间线的形状：settle 必须是**最后一格**——换成 Promise.all，fail:models
+    一落地（这一路故意最快）settle 就挤到中间去，end:sessions / end:getSession 掉在
+    它后面，这条红。历史那一路照样写进了 state（不回滚：谁坏了说谁，其余照旧露出来）；
+    抛给 boot 的那个 reason 是**按数组顺序**的第一个失败（第二趟：sessions 先在时间里
+    坏掉，报的仍是 models，与旧的串行行为一致），于是 needsAuth(e) 那个唯一出口原样不动。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 5, "modelsFail": 503,
+                        "sessionsMs": 40, "historyMs": 30,
+                        "messages": [{"role": "user"}, {"role": "assistant"}]})
+    assert out["flow"][-1] == "settle", f"有请求掉在 settle 之后：{out['flow']}"
+    assert "end:sessions" in out["flow"] and "end:getSession" in out["flow"], out["flow"]
+    assert _at(out, "end:getSession") < _at(out, "settle"), out["flow"]
+    assert out["messages"] == 2, f"另一路失败却把已读回的历史丢了：{out}"
+    assert out["thrownStatus"] == 503 and "models" in out["threw"], out
+
+    both = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "modelsFail": 503,
+                         "sessionsMs": 5, "sessionsFail": 500, "historyMs": 10})
+    assert both["thrownStatus"] == 503, \
+        f"报的是**时间上**第一个坏消息，不是数组顺序那个：{both['thrownStatus']}"
+
+
+def test_a_broken_history_read_still_leaves_its_error_line_on_the_screen():
+    """历史读失败时那句红字必须是**最后**写下的，否则等于什么都没发生。
+
+    并发之后状态条是谁后回来谁抢：loadModels 成功时要 setStatus("") 擦掉上一轮的旧
+    红字，如果 restore 在自己的 catch 里就地写"会话加载失败"、而 models 慢一步回来，
+    那句实话就被擦掉了——症状正是"聊天区空着、也不报错"。所以 restore 只把错交出来，
+    写由 loadServerData 在三路都落定之后做。这里故意让历史最快（5ms）、models 最慢
+    （40ms）：谁在批内就地写，谁就红。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "sessionsMs": 20,
+                        "historyMs": 5, "historyFail": 500})
+    assert out["threw"] is None, f"restore 不该把失败抛出去（那会盖过别的路的实话）：{out}"
+    assert out["statuses"] and out["statuses"][-1].startswith("会话加载失败"), \
+        f"最后写在状态条上的不是那句实话：{out['statuses']}"
+    assert "" in out["statuses"], f"loadModels 那句擦除没发生，测例自己坏了：{out['statuses']}"
+
+
+def test_a_pointer_the_server_no_longer_knows_still_becomes_a_new_chat():
+    """指针指的会话在服务端没了：归零指针、清屏、按"新对话"补一条——不许留一句错误。
+
+    404 这一路跨过了并发的那个边界："要不要新建"发生在批次之后，restore 的 404 处理
+    才顺得下来。少这一步，用户守着一个空聊天区，发送键点下去还在往那个已经不存在的
+    id 上写。状态条上只该有 loadModels 那句擦除（""），没有任何红色错误。
+    """
+    out = _run_boot_js({"sessionId": "gone", "modelsMs": 10, "sessionsMs": 10,
+                        "historyMs": 10, "historyFail": 404})
+    assert out["threw"] is None and out["statuses"] == [""], out
+    assert out["pointer"] == "" and out["messages"] == 0, out
+    assert _at(out, "call:ensureSession") > _at(out, "fail:getSession"), \
+        "补建新会话抢在\"这条指针已经作废\"之前：它建完立刻又被下一句归零"
+
+
+def test_a_401_from_the_history_read_still_reaches_the_auth_exit():
+    """401 仍然走 needsAuth 那道出口，而不是被并发改成一句普通红字。
+
+    boot 的那个出口决定"露登录层还是露外壳"，几路失败都得汇到它那儿。restore 把错误
+    对象交出来（不自己吞掉也不自己写条），needsAuth 由批次之后统一调一次。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 10, "sessionsMs": 10,
+                        "historyMs": 5, "historyFail": 401})
+    assert "needsAuth:401" in out["flow"], out["flow"]
+    assert not [s for s in out["statuses"] if s.startswith("会话加载失败")], out["statuses"]
+
+
+def test_history_thumbnails_are_fetched_at_once_and_land_on_their_own_row():
+    """N 张图 = N 趟串行往返那段（每趟 300~430ms）改成同时发，但每张仍写自己那条 url。
+
+    延迟是**反序**的（a1 最慢、a3 最快）：并发时到达顺序与请求顺序相反，而三条 url
+    必须还是各归各的——"先收齐再整批赋同一个值"那种写法在这里就红了。
+    三个 start 连排管"没排队"，peak==3 管"不是靠嵌套回调装出来的并发"。
+    """
+    out = _run_boot_js({"entry": "hydrate", "atts": [
+        {"kind": "image", "id": "a1"}, {"kind": "image", "id": "a2"},
+        {"kind": "image", "id": "a3"}], "fileMs": {"a1": 30, "a2": 20, "a3": 10}})
+    assert out["flow"][:3] == ["start:file:a1", "start:file:a2", "start:file:a3"], out["flow"]
+    assert out["peak"] == 3, out
+    assert out["urls"] == ["blob:a1", "blob:a2", "blob:a3"], \
+        f"到达顺序反了就把 url 串错了（每张必须落回自己那条）：{out}"
+    assert out["threw"] is None, out
+
+
+def test_one_broken_thumbnail_costs_only_that_thumbnail():
+    """原来那句 catch 的语义是"这一张取不到就只显示文件名"，不许变成"整批放弃"。
+
+    a2 抛错，a1/a3 仍各自拿到 url、函数本身不 reject：catch 挂在每张自己的链上。
+    把 catch 挪到整批（Promise.all 外面套一个 try），这一条立刻红——那次的代价不是
+    少一张图，是历史里所有缩略图一起没了而没人说话。
+    """
+    out = _run_boot_js({"entry": "hydrate", "fileFail": ["a2"], "fileMs": {"a2": 5},
+                        "atts": [{"kind": "image", "id": "a1"}, {"kind": "image", "id": "a2"},
+                                 {"kind": "image", "id": "a3"}]})
+    assert out["threw"] is None, f"一张坏图把整批带崩了：{out}"
+    assert out["urls"] == ["blob:a1", None, "blob:a3"], \
+        f"坏的那一张连累了别人（或它自己没被跳过）：{out}"
+
+
+def test_hydration_still_asks_only_for_missing_images():
+    """非图片、已经有 url 的、以及压根没有附件的历史：一枪都不该发。
+
+    这条与并发无关，是原来 if 里那半句的语义——重排成 filter/map 时最容易顺手把条件
+    丢掉，症状是每次切会话都把已有的图重新下载一遍（走隧道就是几百毫秒一张）。
+    """
+    out = _run_boot_js({"entry": "hydrate", "atts": [
+        {"kind": "text", "id": "t1"}, {"kind": "image", "id": "a2", "url": "blob:cached"},
+        {"kind": "image", "id": "a3"}]})
+    assert [f for f in out["flow"] if f.startswith("start:file:")] == ["start:file:a3"], out["flow"]
+    assert out["urls"] == [None, "blob:cached", "blob:a3"], out
+    empty = _run_boot_js({"entry": "hydrate"})
+    assert empty["threw"] is None, f"没有附件的历史直接把整次 restore 带崩了：{empty['threw']}"
+    assert empty["flow"] == [] and empty["urls"] == [], empty
+
+
+def test_the_boot_chain_does_not_slip_back_into_one_await_per_request():
+    """文本锁兜底：跑不了 node 的机器上（那几条会 skip）也得能抓住"退回串行"。
+
+    行为锁管"并发得真成立"，这把尺子管"三路之间不许再横着放 await、状态条不许有人
+    在批内就地写"。判的是 _js()（已剥注释），所以"把 await 藏回注释里"喂不绿它。
+    """
+    js = _js()
+    body = _function_body(js, "loadServerData")
+    for name in ("loadModels", "loadSessions", "restore"):
+        assert f"await {name}()" not in body, f"{name}() 又变成单独一等"
+    marks = [body.index(f"{n}(") for n in ("loadModels", "loadSessions", "restore")]
+    assert "await" not in body[min(marks):max(marks)], \
+        "三路之间横着 await：写在同一个数组里也是排队"
+    assert "Promise.allSettled" in body, "退回 Promise.all 了：一路失败就没人等其余两路"
+    assert re.search(r"\bthrow\b", body), "没人把失败交回 boot 那个 needsAuth 出口"
+    assert body.index("Promise.allSettled") < body.index("ensureSession"), \
+        "建会话不再排最后：它读的是这三路的产物"
+    assert "会话加载失败" in body, "restore 交出来的错误没人写了（空聊天区 + 一句实话那条）"
+
+    hy = _function_body(js, "hydrateImageUrls")
+    assert "Promise.all" in hy and "await API.fileBlobUrl" not in hy, "缩略图又一张张 await 了"
+    assert hy.count("await") == 1, f"每张图自己 await 一次就是串行：{hy}"
+    assert "setStatus" not in _function_body(js, "restore"), \
+        "restore 又在批内就地写状态条：慢一步回来的 loadModels 会把它擦掉"

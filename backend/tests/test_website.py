@@ -198,7 +198,9 @@ def test_scripts_are_same_origin_only():
     不该出现在一个自己托管的官网上。
     """
     page = _page()
-    assert 'src="/site/site.js"' in page, "交互脚本要走自己的 /site 前缀"
+    # 水印后缀见 tests/test_asset_versioning.py；这条只管"脚本从哪来"，把 ?v= 剥掉再看。
+    srcs = [s.split("?")[0] for s in re.findall(r'src="([^"]+)"', page)]
+    assert "/site/site.js" in srcs, "交互脚本要走自己的 /site 前缀"
     for bad in ("<script src=\"http", "<script src='http", "import(", "onclick=",
                 "onload=", "addEventListener(\"click\",window."):
         assert bad not in page, f"外部依赖或内联事件处理器：{bad}"
