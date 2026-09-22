@@ -15,7 +15,7 @@ import re
 import time
 from app.tools import availability
 from app.tools.registry import register_tool, tools_registry, is_available
-from ddgs import DDGS
+from app.tools import web_search as search_source
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
 sandbox = SandboxManager()
@@ -115,7 +115,7 @@ def _value_of(node):
 
     raise _Refusal("表达式包含不支持的写法")
 
-# ---------- 搜索引擎工具 ----------
+# ---------- 联网搜索工具 ----------
 @register_tool(
     name="web_search",
     description="搜索互联网获取实时信息。输入搜索关键词。",
@@ -130,19 +130,24 @@ def _value_of(node):
         "required": ["query"]
     },
     # 这里必须是 availability 模块属性调用（而不是 from ... import search_reachable），
-    # 也不能在导入期求值：搜索源通不通是后台每 5 分钟重测一次的，导入期定死就退化成名单。
+    # 也不能在导入期求值：源站通不通是后台每 15 分钟真跑一次查询测出来的，
+    # 导入期定死就退化成名单。
     available=lambda: availability.search_reachable()
 )
-def web_search(query: str) -> str:
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-        if not results:
-            return "未找到任何结果。"
-        summaries = [f"- {r['title']}: {r['body']}" for r in results]
-        return "\n".join(summaries)
-    except Exception as e:
-        return f"搜索失败: {e}"
+def web_search_tool(query: str) -> str:
+    """一次真实搜索。永远回一句人话：不回异常，也不回假结果。
+
+    空结果那句是特意写成"不要据此断定不存在"的：模型拿到一句"没找到"就顺手回答
+    "这事不存在"，是这类工具最贵的错法——搜不到与不存在是两回事。
+    """
+    rows = search_source.search(query)
+    if not rows:
+        return ("这次搜索没有返回结果。可能是源站暂时不给，也可能是关键词的问题；"
+                "不要据此断定这件事不存在，可以换个说法再搜一次，或者如实说查不到。")
+    # 真人搜成功一次 = 源此刻好用，这是比定时探测更强的证据，也让探测别再敲源站
+    availability.note_search_ok()
+    return "\n".join(f"- {r['title']}: {r['snippet']} （来源 {r['url']}）" for r in rows)
+
 @register_tool(
     name="help",
     description="查看当前可用的工具列表及其用途",

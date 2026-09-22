@@ -113,6 +113,5 @@ python-multipart>=0.0.9
 # 以下三条都是 backend/app 的顶层导入，却长期只靠"我机器上恰好装了"而没进本清单。
 # CI 是按本文件从零装包的，所以缺一条就在收集期整轮报错——本地全绿从未证明过依赖完整。
 # 现在由 backend/tests/test_dependencies.py 把这件事变成断言，不再靠运气。
-ddgs>=9.0            # app/tools/builtin_tools.py: 联网搜索工具
 docker>=7.0         # app/sandbox/sandbox_manager.py: 经 builtin_tools 进入 app.main 导入链
 pymupdf>=1.24       # app/core/uploads.py 里的 `import fitz`：PDF 正文抽取

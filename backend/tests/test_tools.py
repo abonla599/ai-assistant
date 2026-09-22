@@ -84,13 +84,6 @@ def test_calculator_refuses_work_that_would_blow_up_the_context():
     assert len(result) < 500, "结果本身变成了上下文炸弹"
 
 
-@pytest.mark.skip(reason="依赖公网 DDGS 且搜索结果不确定，不适合当回归锁")
-def test_web_search():
-    result = execute_tool("web_search", {"query": "Python"})
-    assert "✓" in result
-    assert "Python" in result
-
-
 def test_help_lists_the_tools_that_can_run(monkeypatch):
     """help 的清单从 2026-09-20 起按实测可用性裁剪（见 test_tool_availability.py），
     所以这里不能只读结果就断言"三个都在"——本机没 Docker 时它本来就只剩两个，
@@ -249,3 +242,41 @@ def test_the_agent_path_has_no_second_tool_registry():
     task = (agents / "task_agent.py").read_text(encoding="utf-8")
     assert "execute_tool(tool_name, tool_args, user_id=self.user_id)" in task, (
         "TaskAgent 又绕过执行器直接 call 注册表里的函数：needs_user 与输出预算同时失效")
+
+
+def test_only_a_search_that_actually_returned_something_ages_the_probe(monkeypatch):
+    """真搜出结果才告诉探测"别再敲源站"；空结果不算成功。
+
+    反过来的代价不是报错，是把一个坏源永远钉在清单上：每次搜出空 → note_search_ok →
+    探测跳过 → 工具一直递给模型 → 用户每次得到"没找到"。所以这一条要能抓住
+    "在 return 之前无条件 note" 的写法。
+    """
+    from app.tools import availability, builtin_tools, web_search as ws   # noqa: F401
+
+    notes = []
+    monkeypatch.setattr(availability, "note_search_ok", lambda: notes.append(1))
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [])
+    execute_tool("web_search", {"query": "x"})
+    assert notes == [], "空结果也刷新了可用性：坏源会被自己的工具判成好用"
+
+    monkeypatch.setattr(ws, "search",
+                        lambda query, max_results=3: [{"title": "标题",
+                                                        "url": "https://e/1", "snippet": "摘要"}])
+    out = execute_tool("web_search", {"query": "x"})
+    assert notes == [1], f"搜成功却没告诉探测，探测会照旧每 15 分钟空敲：{out[:60]}"
+
+
+def test_the_search_result_carries_the_source_url_to_the_model(monkeypatch):
+    """URL 必须进工具输出：模型引用来源、用户在手机上想点开原文，靠的都是它。
+
+    只给标题与摘要的搜索结果没法核对，等于把"信不信由我"塞回模型。
+    """
+    from app.tools import web_search as ws
+
+    monkeypatch.setattr(ws, "search",
+                        lambda query, max_results=3: [{"title": "某校招生简章",
+                                                        "url": "https://example.edu/zsjz",
+                                                        "snippet": "2026 年计划……"}])
+    out = execute_tool("web_search", {"query": "某校 招生"})
+    assert "https://example.edu/zsjz" in out, out
+    assert "某校招生简章" in out and "2026 年计划" in out, out
