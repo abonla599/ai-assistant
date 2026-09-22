@@ -285,3 +285,152 @@ def test_python_and_the_shell_agree_on_every_case_the_shell_tests():
     for a, b, expected in cases:
         got = releases.compare(a, b)
         assert (got > 0) - (got < 0) == expected, f"compare({a!r}, {b!r}) 两边给的答案不同：{got} vs {expected}"
+
+
+# ---------- 官网那颗「安卓版」按钮：服务端代取 APK ----------
+
+_SPOOFY = "0.17" + chr(13) + chr(10) + "X-Spoof: 1"
+
+
+def _payload(version="0.17", name="ai-assistant-0.17.apk",
+             url="https://github.com/abonla599/ai-assistant/releases/download/v0.17/ai-assistant-0.17.apk",
+             size=102_400):
+    return {"version": version, "url": f"https://github.com/x/releases/tag/v{version}",
+            "asset_name": name, "asset_url": url, "size": size}
+
+
+def _prime(monkeypatch, payload):
+    monkeypatch.setattr(releases, "_payload", payload)
+    monkeypatch.setattr(releases, "_fetched_at", 1e9)      # 让它以为刚拉过，不碰网络
+
+
+def test_download_plan_accepts_a_normal_release(monkeypatch):
+    _prime(monkeypatch, _payload())
+    plan, reason = releases.download_plan()
+    assert reason == "" and plan["name"] == "ai-assistant-0.17.apk"
+    assert plan["url"].startswith("https://") and plan["size"] == 102_400
+
+
+@pytest.mark.parametrize("broken, why", [
+    (lambda: _payload(url="http://github.com/x/apk"), "明文 http 不代理"),
+    (lambda: _payload(url="https://evil.example.com/apk"), "白名单外的主机不代理"),
+    (lambda: _payload(name="ai-assistant-0.16.apk", version="0.17"), "名字与版本不一致"),
+    (lambda: _payload(size=0), "大小不知道就不代理"),
+    (lambda: _payload(size=64 * 1024 * 1024), "大得离谱的资产不当 apk 代理"),
+    # 资产名要原样进 Content-Disposition。光靠"名字等于 ai-assistant-<版本>.apk"挡不住它：
+    # 名字是拿版本号拼出来的，而 tag_name 来自对面——一个带 CR/LF 的 tag_name 拼出来的是
+    # 一个能对响应头做注入的值。所以形状必须先过一遍正则。
+    (lambda: _payload(version=_SPOOFY, name="ai-assistant-" + _SPOOFY + ".apk"),
+     "资产名形状不对就不代理（防响应头注入）"),
+])
+def test_download_plan_refuses_without_raising(monkeypatch, broken, why):
+    """五种坏形状全部回 (None, 一句理由)，一句都不抛。
+
+    这个返回值决定的是"陌生人的浏览器从我们这台服务器下载哪个字节流"，所以宁可拒。
+    白名单只放 GitHub 的两个主机：`browser_download_url` 会再跳一次到
+    objects.githubusercontent.com，那是这条链路上唯一合法的第二次落脚。
+    """
+    _prime(monkeypatch, broken())
+    plan, reason = releases.download_plan()
+    assert plan is None, f"{why}，却还是给了下载地址：{plan}"
+    assert reason, f"{why}，但没给出理由（调用方就没法解释为什么退回 GitHub 页面）"
+
+
+def test_download_plan_with_no_snapshot_says_so(monkeypatch):
+    _prime(monkeypatch, None)
+    monkeypatch.setattr(releases, "_fetch", lambda: (None, "拉取发布页失败：Simulate"))
+    plan, reason = releases.download_plan()
+    plan2, reason2 = releases.download_plan()
+    assert plan is None and "发布页" in reason2, reason2
+
+
+def test_the_asset_is_fetched_over_the_system_trust_anchor(monkeypatch):
+    """取字节必须走 core/tls 那份系统信任锚，而且不许自动跟跳转。
+
+    跟跳转的权力要自己拿着：每一跳的目标都得重新过白名单，否则第一跳合法、
+    第二跳就能把人送到任何地方去——那正是这条代理存在的理由所反对的事。
+    """
+    import ssl as _ssl
+
+    seen = {}
+
+    class _OnlyKwargs:
+        """记录构造参数就够了：这一条不关心请求，只关心客户端是怎么建起来的。"""
+        def __call__(self, **kwargs):
+            seen.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(releases.httpx, "Client", _OnlyKwargs())
+    releases._open_asset()
+    ctx = seen.get("verify")
+    assert isinstance(ctx, _ssl.SSLContext) and ctx.verify_mode == _ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True and seen.get("follow_redirects") is False
+
+
+class _Hops:
+    """假客户端：按脚本一跳一跳地回，让我们能真跑到"跟着跳转并逐跳复核"那段。"""
+
+    class _R:
+        def __init__(self, status, location=None, chunks=()):
+            self.status_code, self._chunks = status, list(chunks)
+            self.headers = {"location": location} if location else {}
+            self.url = "https://example.invalid/req"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def iter_bytes(self):
+            return iter(self._chunks)
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.requested = []
+
+    def __call__(self):
+        return self                      # 当 _open_asset 的替身用
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def stream(self, method, url):
+        self.requested.append(url)
+        if not self.script:
+            raise AssertionError("跳转过多了：脚本已经用完")
+        response = self.script.pop(0)
+        # 真的 httpx 会把 response.url 填成"这一跳请求的是谁"，相对 Location 就是
+        # 拿它当基准解析的。假响应里留一个固定值，测出来的就是假行为。
+        response.url = url
+        return response
+
+
+def test_fetch_asset_follows_the_hop_to_the_host_github_really_redirects_to(monkeypatch):
+    """跟跳转要自己管，而且**每一跳的目标都重新过白名单**。
+
+    这条的存在理由是一次真实翻车形状：真机量到 `browser_download_url` 在 github.com，
+    而它 302 去 release-assets.githubusercontent.com；白名单只写了 objects.* 的话，
+    每一次代取都在第二跳被自己拒掉，端点看起来"能用"（回 200 是回不了的，
+    但静默 302 回发布页，点的人会以为自己点的链接本来就这样）。
+    """
+    hops = _Hops([_Hops._R(302, location="https://release-assets.githubusercontent.com/a.apk"),
+                  _Hops._R(200, chunks=[b"PK\x03\x04", b"more"])])
+    monkeypatch.setattr(releases, "_open_asset", hops)
+    data, why = releases.fetch_asset("https://github.com/o/r/releases/download/v1/a.apk")
+    assert why == "", why
+    assert data == b"PK\x03\x04more", data
+    assert hops.requested[-1] == "https://release-assets.githubusercontent.com/a.apk", hops.requested
+
+    evil = _Hops([_Hops._R(302, location="https://evil.example.com/a.apk")])
+    monkeypatch.setattr(releases, "_open_asset", evil)
+    data, why = releases.fetch_asset("https://github.com/o/r/releases/download/v1/a.apk")
+    assert data is None and "白名单" in why, f"第二跳没复核：{data!r} / {why}"
+
+    relative = _Hops([_Hops._R(302, location="/elsewhere/a.apk"), _Hops._R(200, chunks=[b"ok"])])
+    monkeypatch.setattr(releases, "_open_asset", relative)
+    data, why = releases.fetch_asset("https://github.com/o/r/releases/download/v1/a.apk")
+    assert data == b"ok", f"相对跳转没接住（真实响应里这种写法很常见）：{data!r} / {why}"

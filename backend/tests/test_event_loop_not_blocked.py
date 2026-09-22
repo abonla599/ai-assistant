@@ -48,6 +48,9 @@ NETWORK_BOUND_ENDPOINTS = [
     "/v1/uploads/{upload_id}/file",
     # 反馈：全表扫消息 + 整份 feedback.json 读写 + chroma 逐条改权重 + 再整读一遍分析
     "/v1/feedback",
+    # 官网代取 APK：一次点击要朝 GitHub 搬一百来 KB（超时上限 20s），
+    # 写成 async 就是拿整台服务换这一个下载。
+    "/site/android.apk",
 ]
 
 # 上游卡住的模拟时长，与 /health 的容忍上限。上限比"循环被占住"的任何形状低一个

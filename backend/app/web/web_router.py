@@ -7,8 +7,14 @@ import os
 import sys
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from app.core import releases
+
+# APK 的 MIME 只写这一次；浏览器认的是它 + Content-Disposition，两样缺一就变成
+# "下载已完成，但点开后系统问这是什么文件"。
+APK_MEDIA_TYPE = "application/vnd.android.package-archive"
 
 
 def _static_dir() -> str:
@@ -107,5 +113,33 @@ def install_site(app: FastAPI) -> None:
     @app.get("/", include_in_schema=False)
     async def site_index():
         return site_headers(FileResponse(os.path.join(SITE_DIR, "index.html")))
+
+    # 这条必须注册在 /site 那个 Mount **之前**：Mount 是按前缀匹配的，排在后面的
+    # 精确路由永远轮不到——症状不是报错，是"点了安卓版 404"。
+    @app.get("/site/android.apk", include_in_schema=False)
+    def site_android_apk():
+        """官网那颗「安卓版」：服务端替访问者把这一版的 APK 取回来，一次点击直接落盘。
+
+        为什么不 302 到 GitHub：那正是这颗按钮原本把人丢去的地方。取不到就退回发布页
+        ——那是本次改动之前的行为，所以最坏情况不比以前差；但绝不回 200 空文件，
+        那在手机上长成"下载完成了，点开却没反应"。
+
+        必须是**同步 def**：这条要朝 GitHub 搬一百来 KB 的字节，写成 async 就是占着
+        事件循环干活（判据在 tests/test_event_loop_not_blocked.py 的名单里）。
+        reason 一律打进日志：EXE 是隐藏窗口起的，不打印就只剩人猜是哪一层坏了。
+        """
+        plan, why = releases.download_plan()
+        data = None
+        if plan:
+            data, why = releases.fetch_asset(plan["url"])
+        if not plan or data is None:
+            print(f"[site] 代取 APK 失败，退回发布页：{why}", flush=True)
+            return RedirectResponse(releases.RELEASES_PAGE, status_code=302)
+        return Response(content=data, media_type=APK_MEDIA_TYPE,
+                        headers={"Content-Disposition": f'attachment; filename="{plan["name"]}"',
+                                 # 代理的是"最新那一版"，而这份快照 10 分钟才换一次；
+                                 # 缓存这条响应就等于让下一个人下到上一版。
+                                 "Cache-Control": "no-cache",
+                                 "X-Content-Type-Options": "nosniff"})
 
     app.mount("/site", RevalidatingStaticFiles(directory=SITE_DIR), name="site")

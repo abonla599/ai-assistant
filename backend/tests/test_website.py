@@ -104,12 +104,15 @@ def test_invite_code_is_stated_as_not_needed():
     assert "向作者要" not in page, "v0.11 起自助注册,这句会把人挡在门外"
 
 
-def test_unavailable_features_stay_in_the_not_now_section():
-    """联网搜索、代码执行、扫描版 PDF 只许出现在「当前未开启」那一节里。
+def test_what_stays_unavailable_and_what_became_real():
+    """代码执行与扫描版 PDF 仍留在「当前未开启」；联网搜索 2026-09-22 起是现成能力。
 
+    两半都要钉：
+    - 还开不了的东西不许被写成现成的（"沙箱"仍禁在正文）；
+    - 已经开得了的东西不许继续装作开不了——官网低估自己也是不诚实，而且这条一旦
+      反向钉住，将来谁把搜索源改回坏的那条路，正文与代码就当场对不上。
     节的边界按 `<section id="not-now">` 这个标签算，不按「当前未开启」这四个字算：
-    正文里一句"见下面「当前未开启」"的指引会把后者锚点提前，那样 head 就悄悄漏掉了
-    真那一节，"沙箱/支持联网不许出现在正文"这半条就没牙了（Task 3 实拍轮就是这么露馅的）。
+    正文里一句指引会把锚点提前，那样 head 就悄悄漏掉真那一节（Task 3 实拍轮露过馅）。
     """
     page = _page()
     anchor = page.find('<section id="not-now">')
@@ -117,17 +120,31 @@ def test_unavailable_features_stay_in_the_not_now_section():
     end = page.find("</section>", anchor)
     assert end != -1, "「当前未开启」那一节没闭合"
     body = page[anchor:end]
-    for term in ("代码执行", "联网搜索", "扫描版 PDF"):
-        assert term in body, f"「{term}」应当在该节里说明"
+    for term in ("代码执行", "扫描版 PDF"):
+        assert term in body, f"「{term}」仍应在该节里说明"
+    assert "联网搜索" not in body and "能查实时信息" not in body,         "搜索已经能用了，还挂在「当前未开启」里就是低估"
     head = page[:anchor] + page[end:]
-    for banned in ("沙箱", "支持联网"):
-        assert banned not in head, f"「{banned}」被当成现成能力写进了正文"
+    assert "沙箱" not in head, "「沙箱」被当成现成能力写进了正文"
+    can = head.find('<section id="can-do">')
+    can_end = head.find("</section>", can)
+    assert can != -1 and can_end != -1, "找不到「已有功能」那一节"
+    assert "能查实时信息" in head[can:can_end], "搜索没被写进「已有功能」"
+    assert "来源" in head[can:can_end] and "查不到" in head[can:can_end],         "那条卡片必须自带限定：结果附来源、查不到就说查不到"
 
 
-def test_download_points_at_latest_not_a_pinned_filename():
+def test_the_android_button_downloads_through_our_own_endpoint():
+    """点「安卓版」要直接落盘，而不是把人丢到 GitHub 页面上自己找那颗按钮。
+
+    页面里不许留任何带版本号的资产名：下一次发版它就腐烂（这条判据从原来那条
+    "指向 releases/latest" 的锁继承下来，换了方向但换了理由——现在指向的是我们自己的
+    代理端点，版本号那件事全部留在服务端那份 10 分钟缓存里判断）。
+    """
     page = _page()
-    assert "releases/latest" in page
-    assert "ai-assistant-0.13.apk" not in page, "钉死文件名的链接下一次发版就腐烂"
+    button = re.search(r'<a[^>]*class="btn[^"]*"[^>]*href="([^"]+)"[^>]*>\s*安卓版', page)
+    assert button, f"找不到安卓版那颗按钮：{page[:200]}"
+    assert button.group(1) == "/site/android.apk", f"按钮指向 {button.group(1)}，不是我们自己的下载端点"
+    assert not re.search(r"ai-assistant-[0-9][\d.]*\.apk", page), "页面里出现了带版本号的资产名"
+    assert "github.com/abonla599/ai-assistant" in page, "源码入口还在，别顺手把它也删了"
 
 
 def test_the_page_never_states_a_version_number():
@@ -508,3 +525,63 @@ def test_the_packaging_spec_lists_the_version_file(tmp_path):
     spec = (root / "run_backend.spec").read_text(encoding="utf-8")
     assert "'version.txt'" in spec, "spec 不再把构建戳打进包里：冻结版将永远显示不出服务端版本"
     assert "os.path.isfile('version.txt')" in spec, "变成了无条件列项：没有该文件时 PyInstaller 会直接报错"
+
+
+# ---------- 2b. 服务端代取 APK ----------
+
+def _fake_plan(monkeypatch, plan=(None, "模拟：没有快照")):
+    from app.core import releases
+
+    monkeypatch.setattr(releases, "download_plan", lambda: plan)
+    return releases
+
+
+def test_the_apk_route_hands_over_bytes_with_a_save_header(monkeypatch):
+    """一次点击 = 直接落盘。类型与 Content-Disposition 就是"别在浏览器里打开它"。"""
+    releases = _fake_plan(monkeypatch, ({
+        "url": "https://github.com/o/r/releases/download/v0.17/ai-assistant-0.17.apk",
+        "name": "ai-assistant-0.17.apk", "size": 5, "version": "0.17"}, ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"12345", ""))
+
+    res = client.get("/site/android.apk")          # 不带任何凭据：朋友没登录也要能下
+    assert res.status_code == 200, res.status_code
+    assert res.headers["content-type"].startswith("application/vnd.android.package-archive")
+    assert res.headers["content-disposition"] == 'attachment; filename="ai-assistant-0.17.apk"'
+    assert res.content == b"12345"
+    assert res.headers["cache-control"] == "no-cache", "缓存住了就等于让人下到上一版"
+
+
+def test_the_apk_route_falls_back_to_the_release_page(monkeypatch):
+    """拿不到包（没快照、或取字节失败）时退回发布页，而不是回一个 404。
+
+    退这一步不是把用户丢回去自生自灭：按钮原来就在那儿，所以最坏情况等于改动之前。
+    但绝不允许"回 200 空文件"——那是手机上"下载已完成，打开无反应"的形状。
+    """
+    releases = _fake_plan(monkeypatch)
+    res = client.get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307), res.status_code
+    assert res.headers["location"] == releases.RELEASES_PAGE
+
+    _fake_plan(monkeypatch, ({"url": "https://github.com/o/a.apk", "name": "ai-assistant-0.17.apk",
+                             "size": 5, "version": "0.17"}, ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (None, "上游回 404"))
+    res = client.get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307), f"取不到字节却没退回发布页：{res.status_code}"
+    assert res.headers["location"] == releases.RELEASES_PAGE
+
+
+def test_the_apk_route_says_which_layer_failed(monkeypatch, capsys):
+    """失败原因要落在服务日志里，不然线上永远只能猜。
+
+    这台机器的 EXE 是隐藏窗口启动的，stdout 平时没人看得见——所以这条只保证
+    那句 reason 真被打出来了（打印而不是吞进返回值，是这里唯一能被抓到的形状）。
+    """
+    import io
+    import contextlib
+
+    releases = _fake_plan(monkeypatch, (None, "模拟：白名单外的主机"))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        client.get("/site/android.apk", follow_redirects=False)
+    out = buf.getvalue() + capsys.readouterr().out
+    assert "白名单外的主机" in out, f"没把失败原因说出来，只看见一次跳转：{out!r}"

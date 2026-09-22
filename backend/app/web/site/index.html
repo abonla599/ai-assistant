@@ -46,7 +46,7 @@
   <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事，能算数，能读你发过去的文件，每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版</a>
-    <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">安卓版</a>
+    <a class="btn" href="/site/android.apk" download>安卓版</a>
   </p>
   <p class="note">不需要邀请码，不需要填 API 密钥。用户名密码自己定，注册完就能聊。</p>
 </header>
@@ -58,6 +58,7 @@
     <li class="reveal"><h3>会算数</h3><p>复杂运算调用计算器工具，本机安全解析算式，避免模型心算出错。</p></li>
     <li class="reveal"><h3>读你发过去的文件</h3><p>支持 PDF、docx、txt、代码文件提取文本；视觉模型可识别截图文字，无视觉能力的模型会拒绝识图。</p></li>
     <li class="reveal"><h3>长期记忆</h3><p>自动保存你的偏好，相关对话可自动唤起记忆；记忆内容可在设置页查看、删除。</p></li>
+    <li class="reveal"><h3>能查实时信息</h3><p>模型可以先联网搜索再回答，结果取自公开网页搜索并附来源链接。查不到时会说查不到，不会替你编一个；很长的问句偶尔只认开头的几个词，换个说法再问通常就行。</p></li>
     <li class="reveal"><h3>多人各用各的</h3><p>会话、文件、记忆独立绑定账号，用户数据互相隔离、不可见。</p></li>
   </ul>
 </section>
@@ -110,7 +111,6 @@
 <section id="not-now">
   <h2>当前未开启</h2>
   <ul>
-    <li><strong>联网搜索</strong>：代码里有，但这台服务器够不着搜索源，现在给不出实时信息。</li>
     <li><strong>代码执行（沙箱）</strong>：代码里有，但需要宿主机上的 Docker，当前没开。</li>
     <li><strong>扫描版 PDF</strong>：图片式的 PDF 要先经过 OCR，今天还不行。有文字层的 PDF 可以直接读，整页贴图的 Word 也一样读不出。</li>
     <li><strong>离线使用</strong>：没有。界面和数据都在线上，断网就只能等着。</li>

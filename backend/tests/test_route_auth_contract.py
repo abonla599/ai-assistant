@@ -78,7 +78,10 @@ EXEMPT_PATHS = {"/", "/health"}
 # 这种改动不可能悄悄发生。页面本身是 `GET /`,已在 EXEMPT_PATHS 里。
 # 为什么不干脆挂 Mount("/")：它的 .path 是空串,且会抢走 redirect_slashes,
 # 把 /health/、/docs/ 变成 404 —— 详见 backend/app/web/web_router.py:install_site。
-SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin", "/site"}
+# /site/android.apk：官网那颗「安卓版」按钮的代取端点。公开的正是发布在 GitHub 上的
+# 同一个文件，不含任何用户数据；它贵的是"要朝 GitHub 搬一百来 KB"，所以那条出站
+# 走的是 releases 那一份缓存 + 主机白名单（判据见 tests/test_release_probe.py）。
+SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin", "/site", "/site/android.apk"}
 
 
 def _is_v1(path: str) -> bool:
