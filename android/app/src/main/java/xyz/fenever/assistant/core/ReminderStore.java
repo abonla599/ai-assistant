@@ -49,7 +49,8 @@ public final class ReminderStore {
             if (id == null || own == null || !(m.get("at") instanceof Number)) continue;
             items.add(new Reminder(id, own, ((Number) m.get("at")).longValue(),
                     strOr(m.get("title"), ""), strOr(m.get("body"), ""),
-                    strOr(m.get("repeat"), "once")));
+                    strOr(m.get("repeat"), "once"),
+                    longOr(m.get("firedAt")), longOr(m.get("missed"))));
         }
     }
 
@@ -58,6 +59,9 @@ public final class ReminderStore {
     private static String strOr(Object v, String fallback) {
         return v instanceof String ? (String) v : fallback;
     }
+
+    /** 上一版落盘的文件里根本没有这两个键，读不出数字就是 0（没响过、没丢过）。 */
+    private static long longOr(Object v) { return v instanceof Number ? ((Number) v).longValue() : 0L; }
 
     private synchronized void flush() {
         Map<String, Object> root = new LinkedHashMap<>();
@@ -71,10 +75,32 @@ public final class ReminderStore {
             row.put("title", r.title);
             row.put("body", r.body);
             row.put("repeat", r.repeat);
+            row.put("firedAt", r.firedAt);
+            row.put("missed", r.missed);
             rows.add(row);
         }
         root.put("items", rows);
         io.write(MiniJson.encode(root));
+    }
+
+    /**
+     * 记一笔"这条真的走到了发通知那一步"。
+     *
+     * <p>{@code once} 的时序是 notify → advance → 删除，所以接收器标记的时候对象往往
+     * 已经不在表里了。这里只改调用方手里那个对象：{@link #flush()} 写的就是 {@code items}，
+     * 摘掉的东西不会被这一笔写回去（那正是 {@link #reload()} 要治的那个 bug 的反面）。
+     */
+    public synchronized void markFired(Reminder reminder, long at) {
+        if (reminder == null) return;
+        reminder.firedAt = at;
+        flush();
+    }
+
+    /** 记一笔"到点了，但通知没发出去"（Android 13+ 没给通知权限）。不推进排期：吞掉一条是系统的决定，把这条抹掉是我们的决定。 */
+    public synchronized void markMissed(Reminder reminder) {
+        if (reminder == null) return;
+        reminder.missed++;
+        flush();
     }
 
     public synchronized void setOwner(String user) {
