@@ -1635,6 +1635,65 @@ function reofferUpdate() {
   if (updateSeen) offerUpdate(updateSeen);
 }
 
+/** 一条提醒"到底响过没有"。firedAt 与 missed 是两回事，所以分着说：前者是"通知发出去了"
+ *  （人看没看见网页不知道），后者是"到点了但没发出去"。
+ *  老壳这两个键压根没有（undefined）→ 一个字都不说。那是"读不到"，不是"没响过"，
+ *  把没查过的事说得像查过，比不答更糟——而这一屏的全部意义就是让这句话可信。 */
+function fmtFiredHistory(r) {
+  const fired = r ? r.firedAt : undefined, lost = r ? r.missed : undefined;
+  if (typeof fired !== "number" || typeof lost !== "number") return "";
+  const parts = [];
+  if (fired) parts.push("上次发出 " + fmtReminderAt(fired));
+  if (lost) parts.push(lost + " 次到点没发出");
+  return parts.length ? parts.join(" · ") : "到点还没响过";
+}
+
+/** 提醒页顶部那一行常驻状态：通知给没给、闹钟排不排得出准点。
+ *  三态（1 / 0 / 这个键压根没有）分开画，因为它们是三句不同的话——v0.17 及更早的壳
+ *  不报这两个键，把它显示成"没授权"就是朝反方向说谎。
+ *  值每次现问（见 shell.js capabilities()），从系统那一页回来时由 visibilitychange 重画。 */
+function reminderStatusCard(caps) {
+  const card = document.createElement("div");
+  card.className = "set-card";
+  card.dataset.role = "reminder-status";   // 只重画这一张时靠它认领，不靠"第一个 .set-card"猜
+  const rows = [
+    ["通知", caps.notifications, "notifications", "已授权", "没授权：到点发不出去"],
+    ["闹钟", caps.exactAlarms, "alarms", "能准点", "没给精准闹钟：可能被省电推迟"],
+  ];
+  let known = 0;
+  rows.forEach((pair) => {
+    if (pair[1] !== 0 && pair[1] !== 1) return;
+    known += 1;
+    const row = document.createElement("div");
+    row.className = "set-row";
+    const lbl = document.createElement("span");
+    lbl.className = "set-lbl";
+    lbl.textContent = pair[0];
+    const val = document.createElement("span");
+    val.className = "set-val";
+    val.textContent = pair[1] ? pair[3] : pair[4];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "set-mini";
+    btn.textContent = "去设置";
+    // 只报"递没递出去"。那一页里改完回来靠 visibilitychange 重画，不在这里当场翻绿——
+    // 点一下就说"已授权"是最容易骗到人的一种假状态。
+    btn.onclick = () => {
+      const r = SHELL.openSettings(pair[2]);
+      if (!r.ok) setStatus("打不开系统那一页，请到系统设置里搜「AI 助手」", true);
+    };
+    row.append(lbl, val, btn);
+    card.appendChild(row);
+  });
+  if (!known) {
+    const note = document.createElement("p");
+    note.className = "pane-note";
+    note.textContent = "这版壳读不到通知与闹钟权限，升级壳后才能看到。";
+    card.appendChild(note);
+  }
+  return card;
+}
+
 /** 提醒页（设置 → 设备 → 提醒）。
  *  没有桥时这一页只剩一句说明：提醒是壳在手机上排的，网页自己存一份就变成第二个
  *  事实来源，而且那一份永远不会响——按了没反应的表单比没有表单更坏。 */
@@ -1650,6 +1709,9 @@ function renderReminders(host) {
 
   const items = SHELL.listReminders();
   $("remindersVal").textContent = items.length ? items.length + " 条" : "";
+  // 状态行排在表单之前、且空列表时也在：它回答的是"为什么不响"，一条提醒都没有的时候
+  // 恰恰是最需要它的时刻。
+  host.appendChild(reminderStatusCard(SHELL.capabilities()));
 
   const form = document.createElement("form");
   form.className = "row";
@@ -1706,8 +1768,10 @@ function renderReminders(host) {
     lbl.textContent = r.title || "提醒";
     const val = document.createElement("span");
     val.className = "set-val";
+    const hist = fmtFiredHistory(r);
     val.textContent = fmtReminderAt(r.at)
-      + (r.repeat === "daily" ? " 每天" : r.repeat === "weekly" ? " 每周" : "");
+      + (r.repeat === "daily" ? " 每天" : r.repeat === "weekly" ? " 每周" : "")
+      + (hist ? " · " + hist : "");
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "set-mini set-del";
@@ -1718,6 +1782,20 @@ function renderReminders(host) {
   });
   host.appendChild(card);
 }
+
+/* 从系统那一页（点「去设置」过去的）回到应用时，WebView 不会重新加载页面，那一行还挂着
+   旧权限。这里只换状态这一张卡片、不整页重画：整页重画会连带清掉他刚打进表单却没点
+   "添加"的那句提醒——为了刷新两个权限字丢掉一条正在写的提醒，是拿一个真问题换一个假问题。
+   列表里的"上次发出/几次没发出"不在这里跟：它只在提醒真的到点时变，而那时壳会推一条
+   reminder 事件过来，onShellEvent 会整页重画。 */
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !SHELL.present) return;
+  const page = $("paneReminders");
+  const old = page && page.querySelector('[data-role="reminder-status"]');
+  if (page && old && !page.classList.contains("hidden")) {
+    page.replaceChild(reminderStatusCard(SHELL.capabilities()), old);
+  }
+});
 
 /** 提醒行上的时间：月/日 时:分。跨年的提醒在本产品里没有意义，不值得占这一行。 */
 function fmtReminderAt(ms) {

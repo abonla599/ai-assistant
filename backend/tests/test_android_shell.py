@@ -235,6 +235,56 @@ def test_bridge_advertises_the_update_capability_the_page_depends_on():
         "capabilities 没报 version：设置那一行就没地方显示装的是哪一版"
 
 
+def test_bridge_advertises_the_two_permissions_the_status_row_depends_on():
+    """提醒页那一行读的 notifications / exactAlarms 两个键，判定必须只有 PermissionStatus
+    与 ReminderScheduler 那一处。
+
+    桥里再 checkSelfPermission 一遍是最容易顺手写出的形状（"这里就三行，抄一下快了"），
+    而两份判定的分叉方式永远是"接收器以为能发、界面显示没授权"——两边各自都自洽，
+    只有人对上屏幕时才看见矛盾，这正是本项目最贵的那一类。
+    """
+    bridge = _code(SHELL_BRIDGE)
+    block = bridge[bridge.index("public String capabilities()"):]
+    block = block[:block.index("\n    }")]
+    assert '"notifications"' in block and "PermissionStatus.notificationsGranted" in block, \
+        f"capabilities 没报 notifications，或者它自己判定了一遍：{block}"
+    assert '"exactAlarms"' in block and "ReminderScheduler.exactAllowed" in block, \
+        f"capabilities 没报 exactAlarms，或者它自己判定了一遍：{block}"
+    assert "checkSelfPermission" not in bridge, "桥里自己判权限：那是第二份真相"
+    assert "canScheduleExactAlarms" not in bridge, "桥里自己问闹钟特权：那是第二份真相"
+
+
+def test_a_silent_drop_and_a_fired_reminder_both_leave_a_trace():
+    """到点这一支必须留下证据：发出去了记 firedAt，发不出去记 missed。
+
+    以前通知没授权时 ReminderReceiver 直接 return、一笔不记，于是"设过的提醒从来没响过"
+    在屏幕上读不出来——用户只能在手机上翻系统设置猜。这一条锁的是"两支都记账"这个形状，
+    特别是**没有**只剩一句 return 的那一支。
+    """
+    recv = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ReminderReceiver.java")
+    at = recv.index("notificationsGranted")
+    block = recv[at:recv.index("\n        }", at)]
+    assert "markMissed" in block, f"没授权那一支没记 missed（它又变回静默 return 了）：{block}"
+    assert "markFired" in recv, "发出去的那一支没记 firedAt"
+    assert "notify(manager" in recv, "发通知那一支整条不见了：上面两条断言在空转"
+
+
+def test_the_bridge_exposes_exactly_the_methods_the_page_calls():
+    """桥面方法的名字只有一份真相：Java 侧的 @JavascriptInterface 与 shell.js 的调用点。
+
+    这条锁替代了原来的"八个方法"存在性断言——那种写法加方法不会红，所以 v0.16 加了
+    checkUpdate 之后那句"八个"散文独自谎了两个版本；而"shell.js 漏接一个方法"这种真事故
+    它同样一声不吭。两边各扫一遍比集合，改名、漏接、壳里加了页面没接的方法三种都当场红。
+    """
+    from tests.test_web_pwa import _js      # JS 那把剥注释的尺子只有一份，不在这里抄第二遍
+    java = _code(SHELL_BRIDGE)
+    exposed = set(re.findall(r"@JavascriptInterface\s+public String\s+(\w+)\s*\(", java))
+    called = set(re.findall(r"\b(?:raw|call|rows)\(\s*\"(\w+)\"", _js("shell.js")))
+    assert len(exposed) >= 10, f"Java 侧只扫到 {len(exposed)} 个方法，正则失效了：{exposed}"
+    assert exposed == called, (
+        f"壳有页面没接：{sorted(exposed - called)}；页面调了壳没有：{sorted(called - exposed)}")
+
+
 def test_the_release_endpoint_is_named_exactly_once():
     """全仓只有一处提到 api.github.com，而且就在 ReleasePlan.LATEST_URL。
 

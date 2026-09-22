@@ -5,9 +5,11 @@
  * 既跑在 APK 里也跑在直接访问网址的人手里，而本项目的前端验收就是在没有壳的
  * headless 浏览器里跑的（spec §2 末尾、§6 那张表的最后一行）。
  *
- * 桥的八个方法一字不差、全部同步返回一段 JSON 字符串：
- *   capabilities() setOwner(user) scheduleReminder(json) cancelReminder(id)
- *   listReminders() pendingShares() readShareChunk(json) consumeShare(id)
+ * 桥面方法一字不差、全部同步返回一段 JSON 字符串。这里刻意不列清单也不写"几个"：
+ * 上一版加 checkUpdate 时那句方法数就已经少算一个，而当时唯一的锁只查"每个名字至少
+ * 出现一次"——加方法永远不会红，于是那句散文独自谎了两个版本。
+ * 真正的清单由 backend/tests/test_android_shell.py 从 ShellBridge.java 的 @JavascriptInterface
+ * 和下面这些调用点各扫一遍比对出来。
  * 方法只加不减不改语义（老壳还在人手上，改名等于静默少一项功能）。
  *
  * 原生 → JS 只有一个入口 window.__shellEvent(payload)，payload 是**只含 type 与 id**
@@ -29,10 +31,10 @@ const SHELL = (() => {
      找 Java 方法的，多传一个空串有可能根本匹配不到；那样 JS 拿到 undefined，
      下面那个 JSON.parse 抛错，被 catch 咽成 null，于是 present=false：
      **整个壳在页面上凭空消失，而界面长得跟浏览器一模一样，一个字都不报错。**
-     零参的那四个：capabilities / checkUpdate / listReminders / pendingShares
-     （对照 ShellBridge.java 的签名）。2026-09-22 真机第一次装 v0.17 就是这个表现，
-     判据是 test_web_pwa.py 里那条"在 node 里真跑 shell.js、数每个方法收到几个参数"的锁——
-     JVM 那 42 条单测是直接调 Java 方法的，永远碰不到这条派发规则。 */
+     哪些方法是零参的，对照 ShellBridge.java 的签名——但不靠这里的一句话来记：
+     test_web_pwa.py 里那把派生锁在 node 里真跑 shell.js、数每个方法收到几个参数，
+     漏传或多传都会红。2026-09-22 真机第一次装 v0.17 就是那个表现，
+     而 JVM 那 115 条单测是直接调 Java 方法的，永远碰不到这条派发规则。 */
   function raw(name, arg) {
     try { return JSON.parse(arg === undefined ? B[name]() : B[name](arg)); }
     catch (e) { return null; }        // 桥没应答、老壳缺这个方法、JSON 坏了，一律当"没有"
@@ -94,7 +96,16 @@ const SHELL = (() => {
 
   return {
     present,
-    capabilities() { return present ? caps : {}; },
+    /* 每次现问，不交回加载时那份快照。这一版要把「通知给没给」「排不排得出准点」显示到
+       屏幕上，而这两项都能在页面开着的时候被用户去系统设置里改掉——用快照就会把"已经开了"
+       永远显示成"没开"，那恰好是这一版要消灭的那类"改了没生效"。
+       问不到答案时退回加载时那份：present 回答的是"这座桥有没有"，不该被一次空回改动，
+       否则行会闪没，而"设置里那一行忽然消失"比它慢半拍更难查。 */
+    capabilities() {
+      if (!present) return {};
+      const fresh = raw("capabilities");
+      return (fresh && typeof fresh === "object") ? fresh : (caps || {});
+    },
     /* 给「设置 → 关于」那行诊断用的原始记录。刻意不拼成一句人话、也不下结论：
        解释留给读它的人，界面上多一句猜测就是第二个事实来源。 */
     diagnostic() {
@@ -121,6 +132,13 @@ const SHELL = (() => {
       }));
     },
     cancelReminder(id) { return call("cancelReminder", String(id || "")); },
+    /* 送用户去系统那一页开权限。target 只有 "notifications" 与 "alarms" 两个取值，
+       白名单在壳的 PermissionStatus 里，这里不抄第二份。
+       回 true 只代表"那一页递出去了"，不代表用户开了——所以调用方事后要重新现问
+       capabilities()，绝不能点完就把行改成"已授权"。
+       老壳没这个方法，call() 回 {ok:false,error:"bad-reply"}，所以这一行的两颗按钮
+       要先看 capabilities() 里有没有对应的那两项才摆出来。 */
+    openSettings(target) { return call("openSettings", JSON.stringify({ target: String(target || "") })); },
     pendingShares() { return rows("pendingShares"); },
     /* 分块取字节：一张 8MB 照片不该一次性穿过桥（上限 512KB/块，超了壳直接拒绝）。
        拿不到块（文件被系统清了或已过期）就返回 null，由调用方说"请重新分享一次"，

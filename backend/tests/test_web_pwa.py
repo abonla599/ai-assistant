@@ -1605,19 +1605,6 @@ def test_export_asks_the_server_for_a_downloadable_url():
 # ---------- Task 4：原生壳桥的适配层（shell.js） ----------
 
 
-def test_the_bridge_surface_is_locked_to_eight_methods():
-    """桥的方法只加不减不改语义；名字漂了老壳会静默少功能，所以锁成语料。
-
-    兼容性是单向钉死的（spec §7）：新壳带新方法没人管，但 shell.js 一旦改了调用名，
-    老壳上那些方法就调不到了——而**不会报错**，只会静默少一项功能。
-    语料走 _js()（先剥注释）：把真调用删掉、原地留一句含方法名的注释就能骗过 in 判断。
-    """
-    src = _js("shell.js")
-    for name in ("capabilities", "setOwner", "scheduleReminder", "cancelReminder",
-                 "listReminders", "pendingShares", "readShareChunk", "consumeShare"):
-        assert src.count(name) >= 1, f"shell.js 里找不到桥方法 {name}"
-
-
 def test_shell_degrades_without_the_bridge():
     """浏览器直接开网址、以及 headless Edge 跑 CDP 时没有 AssistantShell。
 
@@ -2267,22 +2254,38 @@ def test_the_card_animation_has_a_reduced_motion_escape():
 _SHELL_JS_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
 const src = fs.readFileSync(process.argv[2], "utf8");
-const mode = process.argv[3];              // ok | undefined | null | none
+const mode = process.argv[3];              // ok | undefined | null | none | flip | later-null
 const calls = [];
 const replies = {
-  capabilities: JSON.stringify({ shell: 1, update: 1, version: "0.17" }),
+  capabilities: JSON.stringify({ shell: 1, update: 1, version: "0.17", notifications: 0,
+                                 exactAlarms: 0 }),
   listReminders: "[]", pendingShares: "[]", checkUpdate: '{"ok":true}',
   setOwner: '{"ok":true}', scheduleReminder: '{"ok":true}',
   cancelReminder: '{"ok":true}', readShareChunk: '{"b64":""}', consumeShare: '{"ok":true}',
+  openSettings: '{"ok":true}',
 };
+let capsCount = 0;
+function capsReply() {
+  capsCount += 1;
+  if (mode === "flip") {
+    // 第 3 次起"用户已经在系统那一页里把通知打开了"：加载时那次 + 驱动里两次
+    return JSON.stringify({ shell: 1, update: 1, version: "0.17",
+                            notifications: capsCount >= 3 ? 1 : 0, exactAlarms: 0 });
+  }
+  if (mode === "later-null") return capsCount === 1 ? replies.capabilities : "null";
+  return replies.capabilities;
+}
 function bridge() {
   if (mode === "none") return undefined;                 // ① 对象压根没注入
   return new Proxy({}, { get(t, name) {
     if (typeof name !== "string") return undefined;
     return function () {
       calls.push(name + "/" + arguments.length);
-      if (name === "capabilities" && mode === "undefined") return undefined;   // ② 派发没匹配上
-      if (name === "capabilities" && mode === "null") return "null";           // ③ 被 origin 拒
+      if (name === "capabilities") {
+        if (mode === "undefined") return undefined;      // ② 派发没匹配上
+        if (mode === "null") return "null";              // ③ 被 origin 拒
+        return capsReply();
+      }
       return replies[name];
     };
   }});
@@ -2296,9 +2299,13 @@ const sandbox = {
 sandbox.window.AssistantShell = bridge();
 vm.createContext(sandbox);
 const out = vm.runInContext(src + "\n;(function(){ SHELL.setOwner('u'); SHELL.listReminders();"
-  + " SHELL.pendingShares(); SHELL.checkUpdate();"
-  + " return { present: SHELL.present, diag: SHELL.diagnostic() }; })()", sandbox);
-process.stdout.write(JSON.stringify({ present: out.present, diag: out.diag, calls: calls }));
+  + " SHELL.pendingShares(); SHELL.checkUpdate(); SHELL.openSettings('alarms');"
+  + " const a = SHELL.capabilities().notifications;"
+  + " const b = SHELL.capabilities().notifications;"
+  + " return { present: SHELL.present, diag: SHELL.diagnostic(), capsA: a, capsB: b }; })()",
+  sandbox);
+process.stdout.write(JSON.stringify({ present: out.present, diag: out.diag, calls: calls,
+                                      capsA: out.capsA, capsB: out.capsB }));
 """
 
 
@@ -2330,12 +2337,14 @@ def _run_shell_js(mode: str) -> dict:
 
 
 def test_zero_arg_bridge_methods_are_called_with_no_arguments():
-    """Java 侧不收参数的四个方法，JS 就必须一个参数都不传。
+    """Java 侧不收参数的那些方法，JS 就必须一个参数都不传。
 
     多传一个空串的代价不是报错，是**整个壳在页面上凭空消失**：桥按"方法名 + 参数表"
     去找 Java 方法，找不到就回 undefined，JSON.parse 抛错被 catch 咽成 null，
     present=false，于是界面和手机浏览器长得一模一样。2026-09-22 真机第一次装 v0.17
     就是这个表现——而它在此之前一直只在 JVM 单测里"通过"。
+    下面这份名单对着 ShellBridge.java 的签名核过；方法名有没有漏接由
+    test_android_shell.py 那条派生锁管，这里只管参数个数。
     """
     out = _run_shell_js("ok")
     calls = out["calls"]
@@ -2343,7 +2352,34 @@ def test_zero_arg_bridge_methods_are_called_with_no_arguments():
         assert f"{name}/0" in calls, (
             f"{name}() 在 Java 侧不收参数，JS 却传了（实际记录：{calls}）")
     assert "setOwner/1" in calls, f"收一个参数的那个反而没传：{calls}"
+    assert "openSettings/1" in calls, f"openSettings 收一段 JSON，JS 却没带参数：{calls}"
     assert out["present"] is True, f"桥一切正常时 present 必须是 true：{out}"
+
+
+def test_capabilities_is_re_asked_rather_than_served_from_a_load_time_snapshot():
+    """capabilities() 每次现问：权限是能在页面开着的时候被改掉的。
+
+    假想场景就是这一版要修的那件事：提醒页那一行显示"没授权"，用户点「去设置」进去打开，
+    回到应用——如果这一行读的是加载时那份快照，它会继续显示"没授权"，而这一次它是错的。
+    "改了没生效"在本项目历史上被误判成代码坏了不止一次，所以这条不能靠读源码判定：
+    快照与现问在文本上可以长得一样（都写 capabilities()），只有运行时知道答案。
+    """
+    out = _run_shell_js("flip")
+    assert out["present"] is True, out
+    assert out["capsA"] == 0, f"桥已经回了 1 之前那次读到的就不是 0：{out}"
+    assert out["capsB"] == 1, f"第二次问还是旧值——那是快照不是现问：{out}"
+
+
+def test_a_failed_re_ask_falls_back_to_the_snapshot_instead_of_vanishing():
+    """现问失败时退回加载时那份，而不是把那一行抹掉。
+
+    方向要分清：capabilities() 现问是为了"别把已改的显示成旧的"，不是为了"桥偶尔没应答
+    就把整行撤掉"。后者会让设置里那一行忽有忽无，而"上一眼还有"是本仓最难复查的证词。
+    """
+    out = _run_shell_js("later-null")
+    assert out["present"] is True, f"桥应答了一次就不该被判定为无桥：{out}"
+    assert out["capsA"] == 0 and out["capsB"] == 0, \
+        f"现问失败时要退回加载时那份，别回一个空对象让整行消失：{out}"
 
 
 def test_the_bridge_diagnostic_names_which_layer_failed():
@@ -2383,6 +2419,154 @@ def test_the_bridge_diagnostic_reaches_the_page_only_when_there_is_no_bridge():
     assert "SHELL.diagnostic()" in body, "填进去的不是桥记录的那份"
     assert "SHELL.present" in body, "没有按有没有壳决定露不露：有桥时也会挂着排查信息"
     assert "textContent" in body and "innerHTML" not in body, "诊断文字来自桥，不许走 innerHTML"
+
+
+_RENDER_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+class El {
+  constructor(tag) {
+    this.tag = tag; this.kids = []; this.dataset = {}; this.attrs = {};
+    this.className = ""; this.textContent = ""; this.onclick = null;
+  }
+  appendChild(c) { this.kids.push(c); return c; }
+  append(...cs) { cs.forEach((c) => this.kids.push(c)); }
+  setAttribute(k, v) { this.attrs[k] = v; }
+}
+function dump(el, out) {
+  if (el.textContent) out.push(el.textContent);
+  el.kids.forEach((k) => dump(k, out));
+  return out;
+}
+function buttons(el, out) {
+  if (el.onclick) out.push(el);
+  el.kids.forEach((k) => buttons(k, out));
+  return out;
+}
+const openCalls = [];
+const statuses = [];
+const SHELL = {
+  openSettings(target) {
+    openCalls.push(target);
+    return (SC.openReply !== undefined) ? SC.openReply : { ok: true };
+  },
+};
+function setStatus(text, isErr) { statuses.push((text || "") + (isErr ? "!" : "")); }
+const sandbox = {
+  SC,
+  document: { createElement: (t) => new El(t) },
+  SHELL, setStatus, console, JSON, Math, String, Number, Array, Object, Date, Boolean,
+};
+vm.createContext(sandbox);
+const driver = "\n;(function(){ return { card: reminderStatusCard(SC.caps),"
+  + " hist: (SC.reminders || []).map(fmtFiredHistory) }; })()";
+const out = vm.runInContext(src + driver, sandbox);
+const textsBefore = dump(out.card, []);
+buttons(out.card, []).forEach((b) => b.onclick());
+process.stdout.write(JSON.stringify({
+  texts: textsBefore,
+  afterClick: dump(out.card, []),
+  clicks: openCalls,
+  statuses: statuses,
+  hist: out.hist,
+  role: out.card.dataset.role || "",
+}));
+"""
+
+
+def _run_render_js(scenario: dict) -> dict:
+    """在 node 里真跑 app.js 的 reminderStatusCard / fmtFiredHistory，读回渲染出来的文字。
+
+    为什么不走 `_js()` 那把尺子做文本断言：这一屏要钉的三件事全是"给定这几种输入，
+    屏幕上出现哪句话"。文本断言只能证明那句话**在文件里**，而把 `pair[1] ? ok : bad`
+    改成 `pair[1] ? bad : ok`（或者反过来把 undefined 当成 0）在文本上一字未改，
+    症状却是"已授权的显示成没授权"和"老壳被说成从没响过"——两种都是说谎。
+    渲染用的 DOM 是假的，被执行的**判定与文字选择**是仓库那一份。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    snippet = "\n".join(_fn_text(_js(), n) for n in
+                        ("reminderStatusCard", "fmtFiredHistory", "fmtReminderAt"))
+    d = Path(tempfile.mkdtemp(prefix="render-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_RENDER_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_the_status_row_has_three_states_not_two():
+    """1 / 0 / 这个键压根没有是三种情况，画成三种话；把"读不到"画成"没授权"是说谎。
+
+    v0.17 及更早的壳不报 notifications 与 exactAlarms。如果那一行把缺键当成 0，
+    老壳用户看到的是"没授权"——而他真去设置里翻一遍会发现本来就是开着的。
+    这一版修的就是"看不见的状态"，别再造一个新的看不见的状态。
+    """
+    granted = _run_render_js({"caps": {"notifications": 1, "exactAlarms": 1}})
+    denied = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0}})
+    old = _run_render_js({"caps": {"shell": 1, "update": 1, "version": "0.17"}})
+
+    assert any("已授权" in t for t in granted["texts"]), granted
+    assert any("能准点" in t for t in granted["texts"]), granted
+    assert any("没授权" in t for t in denied["texts"]), denied
+    assert any("省电" in t for t in denied["texts"]), denied
+    assert not any("没授权" in t or "能准点" in t for t in old["texts"]), \
+        f"老壳不报这两个键，那一行却给了结论：{old['texts']}"
+    assert any("读不到" in t for t in old["texts"]), old
+
+
+def test_clicking_go_to_settings_does_not_flip_the_row_itself():
+    """点「去设置」只负责把那一页递出去，不改这一行的字。
+
+    改完权限回到应用才是状态该变的时刻（由 visibilitychange 现问）。在这里当场翻绿，
+    等于把"用户可能根本没开"显示成"已经开了"——那一行从此不可信，而它是这一版唯一的依据。
+    壳回 ok:false 时要把话说出来，别静默。
+    """
+    out = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0}})
+    assert out["clicks"] == ["notifications", "alarms"], out["clicks"]
+    assert out["afterClick"] == out["texts"], f"点一下自己就把状态改了：{out}"
+    assert out["statuses"] == [], out["statuses"]
+
+    refused = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0},
+                              "openReply": {"ok": False, "error": "bad-reply"}})
+    assert refused["statuses"], "那一页没递出去，屏幕上却一个字都没说"
+
+
+def test_the_history_text_distinguishes_never_fired_from_an_old_shell():
+    """firedAt/missed 缺键时一个字都不说；两个键都在且都是 0 才说"到点还没响过"。
+
+    老壳的 listReminders 里没有这两个键。把它们当成 0 会显示成"还没响过"——那恰好是
+    这一版要回答的那个问题，答错了比不答更糟，因为它读起来像查过了。
+    """
+    out = _run_render_js({"caps": {}, "reminders": [
+        {"title": "旧壳那条"},
+        {"title": "没响过", "firedAt": 0, "missed": 0},
+        {"title": "响过又丢过", "firedAt": 1758450000000, "missed": 3},
+    ]})
+    assert out["hist"][0] == "", f"老壳没这两个键，却给出了结论：{out['hist']!r}"
+    assert "还没响过" in out["hist"][1], out["hist"]
+    assert "上次发出" in out["hist"][2] and "3 次到点没发出" in out["hist"][2], out["hist"]
+
+
+def test_the_status_card_names_itself_so_the_page_can_refresh_only_it():
+    """卡片自己带着身份：从系统那一页回来时只换这一张，不整页重画。
+
+    整页重画会连带清掉他刚打进表单却没点"添加"的那句提醒。身份写在 dataset 上而不是
+    "页面里第一个 .set-card"那种位置约定——下一个人往前面加一张卡片，位置就变了，
+    而那种错法不会报错，只会让他刷不回来。
+    """
+    out = _run_render_js({"caps": {"notifications": 1, "exactAlarms": 1}})
+    assert out["role"] == "reminder-status", out["role"]
 
 
 _LAYERS_JS_HARNESS = r"""

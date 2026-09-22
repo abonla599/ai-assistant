@@ -31,7 +31,7 @@ import xyz.fenever.assistant.core.ShellEvents;
  *
  * <p>这里刻意不写「几个方法」：v0.16 加 {@code checkUpdate} 时这句话就已经少算一个，
  * 而当时唯一的锁只查「每个名字至少出现一次」——加方法不会红，于是那句散文独自谎了
- * 两个版本。方法清单由 backend/tests/test_web_pwa.py 那把派生锁从这里和 shell.js
+ * 两个版本。方法清单由 backend/tests/test_android_shell.py 那把派生锁从这里和 shell.js
  * 各扫一遍比对，不再靠人数。
  *
  * 三条铁律逐条落在这里：
@@ -390,12 +390,12 @@ public final class ShellBridge {
 
     /**
      * 第一次设提醒时问一次通知权限（spec §1）。被永久拒绝后再调它只会立刻回调失败、
-     * 不再弹框，所以不需要额外的「问过了」标记。
+     * 不再弹框，所以不需要额外的「问过了」标记——问不出来的人由提醒页那一行接住（见
+     * {@link PermissionStatus#openSettings}）。
      * requestPermissions 属界面动作，必须回主线程。
      */
     private void askNotificationPermissionOnce() {
-        if (activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        if (PermissionStatus.notificationsGranted(activity)) {
             return;
         }
         activity.runOnUiThread(() -> activity.requestPermissions(
