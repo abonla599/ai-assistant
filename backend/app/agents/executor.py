@@ -18,7 +18,9 @@ class Executor:
     回答里——这正是本项目最贵的那类失败：效果没了，还一声不响。
     """
 
-    def __init__(self, model="deepseek-chat"):
+    def __init__(self, model: str = None):
+        # model 留空 = 走 setDefault 的那份 provider 配置（口径同 ReActAgent）。
+        # 这里原先写死一个服务商名当默认值：服务商名不该刻进被跟踪的源码。
         self.model = model
 
     def execute_task(self, task: str, user_id: str = None) -> str:

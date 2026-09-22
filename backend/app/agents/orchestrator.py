@@ -11,7 +11,9 @@ from ..core.llm_client import get_llm_response
 
 
 class Orchestrator:
-    def __init__(self, model="deepseek-chat"):
+    def __init__(self, model: str = None):
+        # model 留空 = 走 setDefault 的 provider（口径同 ReActAgent）；服务商名
+        # 不刻进源码。planner/executor 同源透传，一条解析规则管三个类。
         self.model = model
         self.planner = Planner(model)
         self.executor = Executor(model)
