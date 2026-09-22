@@ -54,9 +54,9 @@
 
 <div class="card">
   <label>Base URL</label>
-  <input id="base" value="https://api.deepseek.com" autocomplete="off" spellcheck="false">
+  <input id="base" placeholder="https://（你的服务商给的地址）" autocomplete="off" spellcheck="false">
   <label>模型名</label>
-  <input id="model" value="deepseek-flash" autocomplete="off" spellcheck="false">
+  <input id="model" placeholder="服务商控制台里列出的模型 ID" autocomplete="off" spellcheck="false">
   <label>API Key（只留在这台手机的内存里，本页不存盘）</label>
   <input id="key" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
   <button id="run">跑全部六项</button>
@@ -182,7 +182,8 @@ async function callStream(label, extra, opts) {
       if (done || aborted) break;
       if (firstByte === null) firstByte = performance.now() - started;
       buf += dec.decode(value, { stream: true });
-      // SSE 帧之间用空行分隔；这里按行拆，兼容 ": OPENAI-COMPLETION" 之类注释行。
+      // SSE 帧之间用空行分隔；这里按行拆。以冒号开头的行是 SSE 注释帧
+      // （有的服务商拿它当保活填充），不是 data 帧，天然被下面的前缀判断跳过。
       const lines = buf.split("\n");
       buf = lines.pop();
       let broke_on_done = false;
@@ -221,6 +222,13 @@ async function runAll() {
   if (!$("key").value.trim()) {
     put("1", false, "key 没填，后面五项全部跳过");
     return;                       // 按钮交还给 finally 去解，别在这里再写一遍
+  }
+  // base/model 没有默认值兜底（页面上不许写死任何服务商），空着时必须当场停：
+  // 否则 endpoint() 拼出的是相对路径，这一页会掉头给本站服务器——破了头注里
+  // 「对本站后端零请求」那条硬规矩。
+  if (!/^https?:\/\//i.test($("base").value.trim()) || !$("model").value.trim()) {
+    put("1", false, "Base URL（要带 https://）或模型名没填，后面五项全部跳过");
+    return;
   }
   running("1");
   // 1 流式连通
@@ -284,6 +292,12 @@ async function runAll() {
 }
 
 async function runOffline() {
+  // 与 runAll 同一条底线：base 空着时这一枪会打向本站自己（相对路径），
+  // 而飞行模式下它"必然失败"，等于用一次假成功骗过第 6 项。先拦住。
+  if (!/^https?:\/\//i.test($("base").value.trim()) || !$("model").value.trim()) {
+    put("6", false, "Base URL（要带 https://）或模型名没填，这一项跑了也不算数");
+    return;
+  }
   $("run").disabled = $("one").disabled = true;
   state.at = new Date().toLocaleString("zh-CN", { hour12: false });
   try {

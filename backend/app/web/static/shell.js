@@ -5,9 +5,9 @@
  * 既跑在 APK 里也跑在直接访问网址的人手里，而本项目的前端验收就是在没有壳的
  * headless 浏览器里跑的（spec §2 末尾、§6 那张表的最后一行）。
  *
- * 桥的八个方法一字不差、全部同步返回一段 JSON 字符串：
- *   capabilities() setOwner(user) scheduleReminder(json) cancelReminder(id)
- *   listReminders() pendingShares() readShareChunk(json) consumeShare(id)
+ * 桥的九个方法一字不差、全部同步返回一段 JSON 字符串：
+ *   capabilities() checkUpdate() setOwner(user) scheduleReminder(json)
+ *   cancelReminder(id) listReminders() pendingShares() readShareChunk(json) consumeShare(id)
  * 方法只加不减不改语义（老壳还在人手上，改名等于静默少一项功能）。
  *
  * 原生 → JS 只有一个入口 window.__shellEvent(payload)，payload 是**只含 type 与 id**
