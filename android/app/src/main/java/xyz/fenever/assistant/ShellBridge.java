@@ -20,13 +20,19 @@ import xyz.fenever.assistant.core.ShareInbox;
 import xyz.fenever.assistant.core.ShellEvents;
 
 /**
- * 唯一注入 JS 世界的对象（{@code window.AssistantShell}）。八个方法、一字不差、
- * 全部同步返回一段 JSON 字符串（spec §2）：
+ * 唯一注入 JS 世界的对象（{@code window.AssistantShell}）。每个方法都同步返回一段
+ * JSON 字符串（spec §2）：
  *
  * <pre>
  * capabilities()  setOwner(user)  scheduleReminder(json)  cancelReminder(id)
  * listReminders()  pendingShares()  readShareChunk(json)  consumeShare(id)
+ * checkUpdate()  openSettings(json)
  * </pre>
+ *
+ * <p>这里刻意不写「几个方法」：v0.16 加 {@code checkUpdate} 时这句话就已经少算一个，
+ * 而当时唯一的锁只查「每个名字至少出现一次」——加方法不会红，于是那句散文独自谎了
+ * 两个版本。方法清单由 backend/tests/test_web_pwa.py 那把派生锁从这里和 shell.js
+ * 各扫一遍比对，不再靠人数。
  *
  * 三条铁律逐条落在这里：
  * 1. 不接触会话令牌、不回显任何外部文本，原生到 JS 只有一个固定句式（见 {@link #deliverNow()}），
@@ -180,7 +186,7 @@ public final class ShellBridge {
                 && host.equalsIgnoreCase(ALLOWED_HOST);
     }
 
-    // ---------------------------------------------------------------- 八个方法
+    // ---------------------------------------------------------------- 桥面方法
 
     /**
      * 碰表之前先重读一次。
@@ -207,6 +213,11 @@ public final class ShellBridge {
         // 而它看起来和新壳上一模一样。version 顺带报出去，行上要显示装的是哪一版。
         out.put("update", 1L);
         out.put("version", BuildConfig.VERSION_NAME);
+        // 下面两个键是 2026-09-22 加的。起因是「提醒设过却从来没响」在屏幕上读不出来：
+        // 通知没授权、省电把广播拖走、真的响了但人没看见，三种情况长得一模一样。
+        // 判定只有 PermissionStatus / ReminderScheduler 那一处，这里只是把它报给界面。
+        out.put("notifications", PermissionStatus.notificationsGranted(activity) ? 1L : 0L);
+        out.put("exactAlarms", ReminderScheduler.exactAllowed(activity) ? 1L : 0L);
         return MiniJson.encode(out);
     }
 
@@ -292,9 +303,41 @@ public final class ShellBridge {
             row.put("at", r.at);
             row.put("title", r.title);
             row.put("repeat", r.repeat);
+            // 网页那一行「上次实际到点 xx:xx，被丢掉 N 次」就靠这两个数。
+            row.put("firedAt", r.firedAt);
+            row.put("missed", r.missed);
             rows.add(row);                                // 不含 body：列表页用不到正文
         }
         return MiniJson.encode(rows);
+    }
+
+    /**
+     * 把用户送到系统那一页去开权限：target 只认 {@code notifications} 与 {@code alarms}，
+     * 白名单写在 {@link PermissionStatus#openSettings} 里，不写第二份在这里。
+     *
+     * <p>回 {@code {"ok":false,"error":"unknown-target"}} 而不是静默什么都不做——
+     * 「点了没反应」正是这一版要消灭的那类症状。
+     *
+     * <p>这一条刻意**不**转主线程（和 {@code askNotificationPermissionOnce} 相反）：
+     * 那个是弹系统授权框，属于界面动作；这里是把一个 intent 交给系统，
+     * {@code startActivity} 走的是 binder 调用，不碰视图。转主线程就得异步，
+     * 而异步的代价是这个返回值只能说「我递交了」，不能说「那一页打开了没有」——
+     * 后者才是网页那一行需要的信息。
+     */
+    @JavascriptInterface
+    public String openSettings(String payload) {
+        if (!sameOrigin()) return refused("origin");
+        Object decoded;
+        try {
+            decoded = MiniJson.decode(payload);
+        } catch (RuntimeException e) {
+            return refused("bad-payload");
+        }
+        Object target = decoded instanceof Map ? ((Map<?, ?>) decoded).get("target") : null;
+        if (!("notifications".equals(target) || "alarms".equals(target))) {
+            return refused("unknown-target");
+        }
+        return done(PermissionStatus.openSettings(activity, (String) target));
     }
 
     @JavascriptInterface

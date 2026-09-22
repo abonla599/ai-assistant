@@ -4,15 +4,19 @@ import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
+import xyz.fenever.assistant.core.AlarmPolicy;
 import xyz.fenever.assistant.core.Reminder;
 
 /**
  * 往 AlarmManager 排/撤一条闹钟。
  *
- * <p>只用 {@code setAndAllowWhileIdle}：这是不需要 {@code SCHEDULE_EXACT_ALARM}
- * （Android 12+ 的精确闹钟特权）就能用的最高档，代价是 Doze 深睡下可能晚几分钟，
- * 系统还会额外限流。spec §1 已经把这条代价写死了——产品不承诺准点，
- * 所以这里既不申请特权，也不做任何「近似闹钟降级」的分支。
+ * <p>档位由 {@link AlarmPolicy} 决定——那个判断在 {@code core/} 里，因为只有那里能在
+ * 本地被 JVM 跑到，而它选错的代价恰好是**不报错**：31 以上没有精确闹钟特权时调
+ * {@code setExactAndAllowWhileIdle} 抛 SecurityException，提醒设进去了、列表里也看得见，
+ * 但它永远不响。这一层只负责照着结论执行，并且**任何情况下都至少排上一档**：
+ * 拿不到精确特权就退回 {@code setAndAllowWhileIdle}（可能晚几分钟，Doze 下更晚），
+ * 绝不因为"没授权"就把这条提醒整个丢掉。
  */
 public final class ReminderScheduler {
 
@@ -22,8 +26,25 @@ public final class ReminderScheduler {
         if (reminder == null) return;
         AlarmManager manager = context.getSystemService(AlarmManager.class);
         if (manager == null) return;
-        manager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP, reminder.at, pendingFor(context, reminder.id));
+        PendingIntent pending = pendingFor(context, reminder.id);
+        if (AlarmPolicy.pick(canScheduleExact(manager), Build.VERSION.SDK_INT)
+                == AlarmPolicy.Mode.EXACT) {
+            manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, pending);
+        } else {
+            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, pending);
+        }
+    }
+
+    /** 网页那一行要显示"当前排得出准点还是只能晚几分钟"，判据与排期共用这一个。 */
+    public static boolean exactAllowed(Context context) {
+        AlarmManager manager = context.getSystemService(AlarmManager.class);
+        return manager != null && canScheduleExact(manager);
+    }
+
+    /** 31 以下没这个问法，也不需要问：见 {@link AlarmPolicy}。短路顺序就是版本判定。 */
+    private static boolean canScheduleExact(AlarmManager manager) {
+        return Build.VERSION.SDK_INT < AlarmPolicy.API_EXACT_ALARM_GATE
+                || manager.canScheduleExactAlarms();
     }
 
     /** 撤掉排期。没有这条闹钟时调用它是无害的空操作。 */

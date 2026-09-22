@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
         // 只走 HTTPS，不放行混合内容
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
-        // 原生能力（提醒/分享入口）唯一的入口：一个对象、八个方法，见 ShellBridge 的类注释。
+        // 原生能力（提醒/分享入口）唯一的入口：一个对象，方法清单见 ShellBridge 的类注释。
         // 通知渠道要先建好——第一次设提醒时发的那条通知没有渠道会在 Android 8+ 上直接发不出去。
         NotificationChannels.ensure(this);
         reminderStore = new ReminderStore(PrefsIo.reminders(this));
