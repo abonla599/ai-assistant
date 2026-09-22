@@ -2377,3 +2377,321 @@ def test_the_bridge_diagnostic_reaches_the_page_only_when_there_is_no_bridge():
     assert "SHELL.diagnostic()" in body, "填进去的不是桥记录的那份"
     assert "SHELL.present" in body, "没有按有没有壳决定露不露：有桥时也会挂着排查信息"
     assert "textContent" in body and "innerHTML" not in body, "诊断文字来自桥，不许走 innerHTML"
+
+
+_LAYERS_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const ops = JSON.parse(process.argv[3]);
+const stale = JSON.parse(process.argv[4] || "[]");
+
+const hidden = [];      // which layer's hide() actually ran, in order
+const flow = [];        // what the stack asked history to do: push / replace / go / exit
+const snaps = [];       // labelled checkpoints the Python side asserts on
+
+const entries = [{ layers: stale.slice() }];
+let idx = 0, pending = false, rec = false;
+const lay = (s) => (((s || {}).layers) || []).join(",");
+const copy = (s) => ((((s || {}).layers) || []).slice());
+const note = (v) => { if (rec) flow.push(v); };
+const history = {
+  get state() { return entries[idx]; },
+  // 照抄浏览器的两处行为：pushState 丢掉"当前位置之后"的前进记录，go() 只留下一个
+  // 待交付的 popstate。前一条不模仿，"关掉中间那一层再开一层"就会拿到一份假历史。
+  pushState(s) {
+    entries.splice(idx + 1);
+    entries.push({ layers: copy(s) });
+    idx = entries.length - 1;
+    note("push:" + lay(s));
+  },
+  replaceState(s) { entries[idx] = { layers: copy(s) }; note("replace:" + lay(s)); },
+  go(d) {
+    const t = idx + d;
+    if (t < 0 || t >= entries.length) { note("go-dropped:" + d); return; }
+    idx = t; pending = true; note("go:" + d);
+  },
+};
+
+const sandbox = { JSON, console, Array, Object, Math, Error };
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const L = sandbox.makeLayerStack(history);
+rec = true;                                          // 构造时那次 replaceState 不计入流水
+
+function spy(id, bad) {
+  return function () { hidden.push(id); if (bad) throw new Error("close refused"); };
+}
+
+for (const op of ops) {
+  const k = op[0];
+  if (k === "open") L.open(op[1], spy(op[1], op[2] === "bad"));
+  else if (k === "close") L.close(op[1]);
+  else if (k === "closeTop") { if (op[1] === "detached") { const f = L.closeTop; f(); } else L.closeTop(); }
+  else if (k === "flush") { if (pending) { pending = false; L.reconcile(history.state); } }
+  else if (k === "back") {                            // 返回键：浏览器自己走一步并派发 popstate
+    if (idx === 0) note("exit");
+    else { idx -= 1; pending = false; L.reconcile(entries[idx]); }
+  } else if (k === "snap") {
+    snaps.push({ at: op[1], depth: L.depth(), top: String(L.top()), hidden: hidden.slice() });
+  } else throw new Error("unknown op: " + k);
+}
+process.stdout.write(JSON.stringify({
+  hidden, flow, snaps, depth: L.depth(), top: String(L.top()),
+  entries: entries.map((e) => (e && e.layers) || []),
+}));
+"""
+
+
+def _run_layers_js(ops: list, stale: list = None) -> dict:
+    """在 node 里真跑仓库那份 layers.js：按 ops 脚本操作一个假的 history，回收执行流水。
+
+    判据只能问运行时。这一节的锁全是"返回键按下去到底退掉了哪一层"——读源码看得出写法
+    对不对，看不出**多步回退只派发一次 popstate**、**开一层时让位层该被换掉而不是压上去**
+    这两条行为，而那两条正是这次改动的全部难点。流水（flow）是逐字比对的：多一条、少一条、
+    顺序换了都红，这样"绿"只有一种解释。
+
+    与 _run_shell_js 同理，这里不经过 _js()：那把尺子剥注释，而要被执行的是磁盘上那份
+    原文件，且读文件的是 node 不是本函数。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    harness = Path(tempfile.mkdtemp(prefix="layers-js-")) / "harness.cjs"
+    harness.write_text(_LAYERS_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(harness), str(STATIC / "layers.js"),
+         json.dumps(ops), json.dumps(stale or [])],
+        capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def _snaps(out: dict) -> dict:
+    return {s["at"]: s for s in out["snaps"]}
+
+
+def test_the_back_key_closes_one_layer_at_a_time():
+    """这次改动的验收标准本身：按一层、再按一层，最后一按才退应用。
+
+    原来是一按就退桌面：壳写的是 canGoBack() ? goBack() : 退，而页面这些层从不产生
+    历史条目，所以 canGoBack() 恒假。hidden 记"哪一层的收尾真跑了"，depth 记"栈里还剩
+    几层"，两个都要——只看 hidden 会漏掉"层没退但界面关了"，只看 depth 会漏掉
+    "层退了却没人关界面"。flow 逐字比对，第三条"exit"钉的是已拍的栈底行为。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"], ["snap", "开着两层"],
+        ["back"], ["snap", "第一次按"], ["back"], ["snap", "第二次按"],
+        ["back"], ["snap", "第三次按"],
+    ])
+    s = _snaps(out)
+    assert s["开着两层"]["depth"] == 2, s["开着两层"]
+    assert s["第一次按"]["hidden"] == ["setPage"], "头一下该只退掉最上面那层（二级页回列表）"
+    assert s["第二次按"]["hidden"] == ["setPage", "settings"], "第二下才该关设置弹层"
+    assert s["第三次按"]["depth"] == 0, s["第三次按"]
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "exit"], \
+        f"历史操作对不上（多一条就是多按一次才有反应）：{out['flow']}"
+
+
+def test_a_drawer_yields_to_the_page_it_navigates_to():
+    """从侧栏点进设置是"换页"，不是"叠一层"：历史条目被替换，深度不涨。
+
+    压上去会怎样：栈成了 [侧栏, 设置]，而"关掉侧栏"只能往回退——那一退把刚打开的设置
+    一起退掉，症状是"点了记忆，界面闪一下又回到聊天"。所以让位这一档走 replaceState。
+    flow 里没有 push:settings,setPage 是这条的牙：把让位分支删掉，那个 push 立刻出现。
+    """
+    out = _run_layers_js([
+        ["open", "sidebar"], ["open", "settings"], ["snap", "从侧栏进了设置"],
+        ["back"], ["snap", "退掉设置"], ["back"],
+    ])
+    s = _snaps(out)
+    assert s["从侧栏进了设置"]["hidden"] == ["sidebar"], "侧栏没让位：它正挡在设置前面"
+    assert s["从侧栏进了设置"]["depth"] == 1, "设置被压到侧栏上面了，返回键要按两次才回聊天"
+    assert out["flow"] == ["push:sidebar", "replace:settings", "exit"], out["flow"]
+    assert out["entries"] == [[], ["settings"]], f"历史条目对不上：{out['entries']}"
+    assert s["退掉设置"]["depth"] == 0, "关掉设置就该回到聊天，中间不该再有一层「只退侧栏」"
+
+
+def test_closing_a_layer_below_the_top_rewinds_in_one_popstate_top_down():
+    """关中间那一层 = 往回走 N 步，而 N 步只派发一次 popstate。
+
+    所以 reconcile 必须按"目标链"整体对齐、从最上面往下收，不能假设一次只退一层。
+    收的顺序是相机→二级页→设置：hideCamera 要停摄像头轨，反过来的话指示灯要等到
+    下一次返回才灭（"效果晚了一拍"也算效果没了）。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"], ["open", "camera"], ["snap", "三层"],
+        ["close", "settings"], ["flush"], ["snap", "一次回退之后"],
+    ])
+    s = _snaps(out)
+    assert s["三层"]["depth"] == 3, s["三层"]
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "push:settings,setPage,camera", "go:-3"], \
+        f"没走一次多步回退：{out['flow']}"
+    assert s["一次回退之后"]["hidden"] == ["camera", "setPage", "settings"], out["flow"]
+    assert s["一次回退之后"]["depth"] == 0, "一次 popstate 只收了一层：剩下两层永远关不掉"
+
+
+def test_reopening_an_existing_layer_rewinds_instead_of_stacking():
+    """已经开着的层再开一次：回到它那一层，不产生第二条历史；已在最上层则什么都不做。
+
+    设置里两个二级页之间来回切就是"最上层"那一档——调用方自己把 DOM 改完了，栈再记
+    一条就等于"看一眼角色设定"之后要多按一次返回。逐字比对的 flow 是唯一能同时钉住
+    "该有一次 go:-1"和"不该有第二次 push"的写法。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"],
+        ["open", "settings"], ["flush"], ["snap", "重开底下那层"],
+        ["open", "settings"], ["snap", "重开最上层"],
+    ])
+    s = _snaps(out)
+    assert s["重开底下那层"]["hidden"] == ["setPage"], s["重开底下那层"]
+    assert s["重开最上层"]["depth"] == 1, "第二次 open 压出了第二层设置"
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "go:-1"], \
+        f"重开的那两次动了多余的历史操作（每多一条就是白吃一次返回）：{out['flow']}"
+
+
+def test_closing_a_layer_that_is_not_open_costs_nothing():
+    """没开过的层去关它：不能真的往回走一步。
+
+    这条是"同一层被关两次"的兜底（设置里那行改密码就是先 closeSettings 再点别的）。
+    多退的那一步发生在用户看不见的地方，症状是"返回键按一次，跳回刚才那个页面"。
+    """
+    out = _run_layers_js([["open", "settings"], ["close", "camera"], ["snap", "还是设置"]])
+    assert out["flow"] == ["push:settings"], f"关一层却动了历史：{out['flow']}"
+    assert out["depth"] == 1 and out["top"] == "settings", out
+
+
+def test_a_stale_history_entry_does_not_open_a_layer_that_is_not_there():
+    """刷新之后历史条目还在，界面却是全新的：构造时那一次 replaceState 把它抹平。
+
+    少了这一步，栈里凭空有"设置"这一层而屏上没有——返回键头一下什么都没发生，要按
+    两下才关掉一个根本没开的弹层。这类"第一下没反应"最容易被当成手机卡。
+    """
+    out = _run_layers_js([["snap", "刚加载"], ["back"]], stale=["settings", "setPage"])
+    assert out["snaps"][0]["depth"] == 0, "拿着旧的 state 建栈：返回键头一下会空按"
+    assert out["entries"][0] == [], f"当前那条历史没被重置：{out['entries']}"
+    assert out["flow"] == ["exit"], f"重置之后栈底就该是栈底：{out['flow']}"
+
+
+def test_a_layer_that_refuses_to_close_does_not_wedge_the_back_key():
+    """某一层的收尾自己抛错，不能把返回键整个卡死。
+
+    hide 里要碰 DOM、要停摄像头轨，抛错不是假想。去掉那个 try 之后异常从 popstate
+    监听里逃出去，栈与历史从这一刻起永久错位——此后每次返回都只退半层。所以要一路
+    退到目标（depth 归零）才算修好：抛出异常的那层必须先摘掉再往下收。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage", "bad"],
+        ["close", "settings"], ["flush"], ["snap", "一次回退之后"],
+    ])
+    assert out["snaps"][0]["hidden"] == ["setPage", "settings"], out["snaps"][0]
+    assert out["snaps"][0]["depth"] == 0, "抛错的那层没被摘掉：它把剩下的高度永远占住了"
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "go:-2"], out["flow"]
+
+
+def test_closeTop_survives_being_handed_over_as_a_callback():
+    """`const f = Layers.closeTop; f()` 必须照常工作：Esc 那条路就是这么挂上去的。
+
+    写成 closeTop() { this.close(...) } 的话，脱离 this 的调用直接 TypeError，
+    而手机上没有控制台——Esc 从此没反应，返回键却一切正常。中间那次 flush 是
+    popstate：closeTop 只朝历史发一个请求，收界面的是回退之后那一条路。
+    """
+    out = _run_layers_js([["open", "settings"], ["closeTop", "detached"],
+                          ["flush"], ["snap", "脱离 this"]])
+    assert out["snaps"][0]["hidden"] == ["settings"], out["snaps"][0]
+    assert out["depth"] == 0, out
+    assert out["flow"] == ["push:settings", "go:-1"], out["flow"]
+
+
+def test_the_page_loads_the_stack_before_any_layer_code_runs():
+    """layers.js 要在 app.js 之前加载，而且要真的挂进外壳清单。
+
+    app.js 顶层就调 makeLayerStack()，脚本顺序写反得到的是 ReferenceError——整页 JS
+    一起停摆，症状是"手机上一片空白"，比返回键失灵严重得多。sw.js 少一行则是离线时
+    外壳缺这一块，网络一断就开不回来。
+    """
+    html = _html()
+    at_layers, at_app = html.find('src="layers.js"'), html.find('src="app.js"')
+    assert at_layers >= 0, "index.html 根本没加载 layers.js"
+    assert at_app >= 0, "index.html 里没有 app.js？"
+    assert at_layers < at_app, "layers.js 排在了 app.js 后面：app.js 顶层那次调用会直接抛错"
+    js = _js()
+    assert "makeLayerStack(window.history)" in js, "没建栈：返回键还是原来那副样子"
+    assert 'addEventListener("popstate"' in js and "Layers.reconcile(" in js, \
+        "没接 popstate：界面只在按 × 时收，历史条目却一路涨"
+    assert '"layers.js"' in _js("sw.js"), "sw.js 的外壳清单里少了它：离线打开时层栈整个丢失"
+
+
+def test_every_layer_is_closed_by_the_stack_and_only_by_it():
+    """每层的"收起"在源码里只能出现一次，而且必须是被 open() 注册进栈的那一个。
+
+    四段写死的 classList 各数一次出现次数：多出来的一处就是第二个执行者，它关掉界面
+    却不退历史——历史里从此多一层，返回键要按两下才关一层。注册那一半（open 的第二
+    个参数）钉的是反方向：只把 close 接上、open 没登记 hide，被返回键收掉的层就没人关
+    （层从栈里消失了，DOM 还挂着）。
+    """
+    js = _js()
+    for needle in ('$("settings").classList.add("hidden")',
+                   '$("cameraModal").classList.add("hidden")',
+                   '$("attachMenu").classList.add("hidden")',
+                   '$("sidebar").classList.remove("open")'):
+        assert js.count(needle) == 1, f"{needle} 在 app.js 里出现 {js.count(needle)} 次：只许栈收的那一处"
+    for call in ('Layers.open("settings", hideSettings)',
+                 'Layers.open("setPage", showSetList)',
+                 'Layers.open("camera", hideCamera)',
+                 'Layers.open("attachMenu", hideAttachMenu)',
+                 'Layers.open("sidebar", hideSidebar)'):
+        assert call in js, f"这一层没把收起的手法登记进栈：{call}"
+    for name, lid in (("closeSettings", "settings"), ("closeSetPage", "setPage"),
+                      ("closeCamera", "camera"), ("closeSidebar", "sidebar")):
+        assert f'Layers.close("{lid}")' in _js_fn(js, name), f"{name}() 没走栈：它关的是界面不是历史"
+    assert 'Layers.close("attachMenu")' in _js_fn(js, "setAttachMenu"), \
+        "附件菜单的关法没走栈：它一关，历史里就多一条没人负责的条目"
+
+
+def test_the_camera_button_does_not_close_the_menu_it_came_from():
+    """点「拍照」时，收掉附件菜单的必须是栈（让位），不是那颗按钮自己。
+
+    顺序在这里是要命的：关是 history.go(-1)（异步交付），开是 pushState（同步）。
+    同一拍里先请求回退再压新条目，落点就不是"拍照"那条——从这一刻起返回键与界面对不上，
+    而对不上的那一拍用户什么也看不见。
+    """
+    js = _js()
+    handler = _handler_of(js, "pickCamera")
+    assert "openCamera" in handler, f"拍照那颗按钮没接上开层：{handler}"
+    assert "setAttachMenu" not in handler, \
+        f"按钮自己关了菜单：异步回退紧跟着一次 push，历史会错位：{handler}"
+
+
+def test_escape_takes_the_same_single_path_as_the_back_key():
+    """Esc 只许调 closeTop()，不许自己点名该关哪一层。
+
+    点名就是第二个执行者，而且它一定落后于现实：这次新增的两档（设置里的二级页、改走栈
+    的相机）都没进原来那串 if，Esc 对它们一概不理而返回键管——两条路从那天起行为不同，
+    下次改层的人只会去改"看起来对的那条"。
+    """
+    js = _js()
+    at = js.index('document.addEventListener("keydown"')
+    body = _up_to_matching_brace(js[js.index("{", at):])
+    assert "Layers.closeTop()" in body, f"Esc 没接到层栈上：{body}"
+    for named in ("closeSettings", "closeSidebar", "closeCamera", "setAttachMenu",
+                  "cameraModal"):
+        assert named not in body, f"Esc 还在自己点名该关哪一层（{named}）：它与返回键成了两套真相"
+
+
+def test_the_update_card_stays_out_of_the_stack():
+    """底部那张卡片不进层栈，而且理由要能被机器查到。
+
+    它的"今天不再问"只该由他自己按掉。进了栈，"被别的层顶掉"也算收起，日期戳就被偷偷
+    写上——在今天剩下的时间里再也不问，而他根本没看到第二眼。所以：没有
+    Layers.open("update")，让位层名单里也没有它；收尾仍然是那两颗按钮。
+    """
+    js = _js()
+    assert 'Layers.open("update"' not in js, "卡片进栈了：被顶掉也会写下「今天问过了」"
+    assert 'const YIELDS = ["sidebar", "attachMenu"]' in _js("layers.js"), \
+        "让位层名单改了：这条锁与 app.js 里那段理由必须同时改，否则注释与代码各说一遍"
+    assert "hideUpdateSheet" in _handler_of(js, "updateLaterBtn"), "「稍后」不再走那份收尾：日期戳没人写"

@@ -508,6 +508,9 @@
   <!-- shell.js 必须排在 app.js 之前：它定义的全局 SHELL 是 app.js 里三处 setOwner 与
        提醒/分享那几段的唯一入口，而它本身在没有桥的浏览器里就是一堆空操作。 -->
   <script src="shell.js"></script>
+  <!-- layers.js 提供 makeLayerStack，app.js 在加载时就调它建栈（那时会 replaceState 一次），
+       所以必须排在前面。它只认 history、不碰 DOM，因此也能被 node 直接跑起来验行为。 -->
+  <script src="layers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

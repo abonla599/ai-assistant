@@ -199,6 +199,16 @@ function needsAuth(err) {
   return true;
 }
 
+/* ---------------- 层栈：返回键与 Esc ----------------
+ * 系统的返回键和键盘的 Esc 从这里走同一条路：退掉最上面那一层（实现见 layers.js）。
+ * 每个界面自己负责"显示"，关闭只由栈在 popstate 里执行一次。所以规矩是：
+ * 开一层调 openX()，收一层调 closeX()（它只是朝历史发一个请求），而 hideX() 是那段
+ * 纯 DOM 的收尾、由栈来调。按钮里直接 classList.add("hidden") 就是让历史比屏幕上
+ * 多出一层——症状是"返回要按两下才关一层"，正是本仓最恨的"效果没了但不报错"。
+ */
+const Layers = makeLayerStack(window.history);
+window.addEventListener("popstate", (e) => Layers.reconcile(e.state));
+
 /* ---------------- 首屏凭据层 ----------------
  * 登录与注册共用一张表单：注册只是多走一步——第一步定用户名与密码，第二步留三道
  * 找回题的答案。找回密码在同一层里换另一张表单（recoverForm），谁都不该是第二个弹窗。
@@ -1326,19 +1336,21 @@ async function sendFeedback(index, rating, btn) {
 }
 
 /* ---------------- 设置弹层 ----------------
- * 一级是分组列表，二级页在同一个弹层内换 view（不新开一层：手机上两层弹层
- * 意味着人不知道自己按哪个 × 才能出去）。openSettings 不再挑"默认页签"——
- * 列表本身就是入口，没有"落在哪一页"这回事了。
+ * 一级是分组列表，二级页在同一个弹层内换 view（不新开一张弹层：手机上两层弹层
+ * 意味着人不知道自己按哪个 × 才能出去）。二级页**不进弹层的 DOM 层级，但要进层栈**——
+ * 返回键该先退回列表、再关弹层，而不是直接把整个设置关掉。
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
                     persona: "角色设定", memory: "长期记忆", reminders: "提醒" };
 
 function openSettings(page) {
   $("settings").classList.remove("hidden");
+  Layers.open("settings", hideSettings);
   showSetList();
   if (page) openSetPage(page);
 }
-function closeSettings() { $("settings").classList.add("hidden"); }
+function hideSettings() { $("settings").classList.add("hidden"); }
+function closeSettings() { Layers.close("settings"); }
 
 function showSetList() {
   $("setPages").classList.add("hidden");
@@ -1360,12 +1372,14 @@ function openSetPage(name) {
   $("setPages").classList.remove("hidden");
   document.querySelectorAll(".set-page")
     .forEach((p) => p.classList.toggle("hidden", p !== page));
+  Layers.open("setPage", showSetList);
   if (name === "providers") loadProviders();
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
   if (name === "reminders") renderReminders($("paneReminders"));
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
+function closeSetPage() { Layers.close("setPage"); }
 
 /** 账户页的两处回显。令牌输入框在管理员的「模型服务」页里，所以这一页
  *  没打开时也要能把它填上——值统一从 pref 取，不做第二份。 */
@@ -1597,6 +1611,10 @@ function offerUpdate(info) {
   sheet.classList.add("show");
 }
 
+/* 纯 DOM 的收尾，**不进层栈**：这张卡是一次提示不是一个界面，所以"被别的层顶掉"不能
+   等同于"他已经表过态了"。日期戳只在他自己按了两颗按钮之一（或链接跳走）时写——
+   这就是它不登记历史的原因：一进栈，"收起"就多了一条没有用户意图的路，而那条路会顺手
+   把"今天不再问"给记上。栈底的返回键因此直接退应用，与设置里那条规矩一致。 */
 function hideUpdateSheet() {
   const sheet = $("updateSheet");
   if (sheet) { sheet.classList.add("hidden"); sheet.classList.remove("show"); }
@@ -1915,9 +1933,17 @@ function syncPersonaChip() {
   $("personaVal").textContent = $("personaInput").value.trim() ? "已填写" : "";
 }
 
+/* 附件菜单是一颗气泡：开合都走栈，别处（拍照那一路）靠它排在栈顶时自动让位。 */
 function setAttachMenu(open) {
-  $("attachMenu").classList.toggle("hidden", !open);
-  $("attachBtn").classList.toggle("open", !!open);
+  if (!open) { Layers.close("attachMenu"); return; }
+  $("attachMenu").classList.remove("hidden");
+  $("attachBtn").classList.add("open");
+  Layers.open("attachMenu", hideAttachMenu);
+}
+
+function hideAttachMenu() {
+  $("attachMenu").classList.add("hidden");
+  $("attachBtn").classList.remove("open");
 }
 
 function toggleAttachMenu() {
@@ -1940,6 +1966,7 @@ async function openCamera() {
   $("camRetake").classList.add("hidden");
   $("camUse").classList.add("hidden");
   $("cameraModal").classList.remove("hidden");
+  Layers.open("camera", hideCamera);
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     const reason = "该浏览器不支持网页相机，请使用文件选择器";
@@ -1965,13 +1992,17 @@ async function openCamera() {
   }
 }
 
-function closeCamera() {
+/* 停轨必须跟着"这一层真的收起了"走，而不是跟着某个按钮：权限被拒时的延时关闭、
+   返回键、Esc、点「取消」四条路都得把摄像头指示灯关掉，漏一条就是一直亮着。 */
+function hideCamera() {
   if (cam.stream) {
-    cam.stream.getTracks().forEach((t) => t.stop());   // 必须停轨，否则摄像头指示灯常亮
+    cam.stream.getTracks().forEach((t) => t.stop());
     cam.stream = null;
   }
   $("cameraModal").classList.add("hidden");
 }
+
+function closeCamera() { Layers.close("camera"); }
 
 function shootPhoto() {
   const video = $("camVideo");
@@ -2016,12 +2047,14 @@ async function usePhoto() {
 /* ---------------- 侧栏开合 ---------------- */
 function openSidebar() {
   $("sidebar").classList.add("open"); $("backdrop").classList.add("show");
+  Layers.open("sidebar", hideSidebar);
   /* 他点名的补弹时机：首屏那一弹可能被登录层盖住（.auth 的 z 更高），也可能他正忙着
      打字直接划走了。拉开侧栏是一个"在看界面"的时刻，此时只要内存里已知有新版就再给一次
      机会——注意是 reoffer 而不是 maybeAsk：这里绝不发请求，☰ 一晚上按十次也不多出一次网络。 */
   reofferUpdate();
 }
-function closeSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
+function hideSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
+function closeSidebar() { Layers.close("sidebar"); }
 
 function autosize(el) {
   el.style.height = "auto";
@@ -2074,7 +2107,10 @@ function bind() {
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
-  $("pickCamera").onclick = () => { setAttachMenu(false); openCamera(); };
+  // 不给它写 setAttachMenu(false)：附件菜单是"让位层"，openCamera 自己会把它连同
+  // 那条历史一起换掉。这里再关一次就是同一件事的两个执行者——而且关是异步的
+  // （history.go），紧跟着的 pushState 会落错条目，返回键从这一刻起就对不上界面。
+  $("pickCamera").onclick = () => openCamera();
   $("pickImage").onclick = () => { setAttachMenu(false); $("imageInput").click(); };
   $("pickFile").onclick = () => { setAttachMenu(false); $("fileInput").click(); };
   document.addEventListener("click", (e) => {
@@ -2091,7 +2127,7 @@ function bind() {
 
   $("closeSettings").onclick = closeSettings;
   $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };
-  $("setBack").onclick = showSetList;
+  $("setBack").onclick = closeSetPage;
   $("rowAccounts").onclick = () => openSetPage("accounts");
   $("rowProviders").onclick = () => openSetPage("providers");
   $("rowPersona").onclick = () => openSetPage("persona");
@@ -2181,12 +2217,12 @@ function bind() {
   $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };
   renderRecoveryQuestions();
 
+  /* Esc 与手机的返回键是同一个动作：退掉最上面一层。写成两段（各自判断该关哪个）就是
+     两份真相——相机已经改成"关掉那一层时停轨"之后，这里漏掉一层不会报错，只会让
+     指示灯一直亮着。顺序、让位、多步回退全在 layers.js 那一处算。 */
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!$("cameraModal").classList.contains("hidden")) { closeCamera(); return; }
-    closeSettings();
-    closeSidebar();
-    setAttachMenu(false);
+    Layers.closeTop();
   });
 }
 
