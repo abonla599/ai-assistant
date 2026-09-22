@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>AI 智能助手——一个记得住你的在线助手</title>
+<title>AI 智能助手：一个记得住你的在线助手</title>
 <meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆,每个人各用各的。">
 <meta name="theme-color" content="#0b0e15">
 <link rel="stylesheet" href="/site/site.css">
@@ -25,9 +25,6 @@
 
 <a class="skip" href="#can-do">跳到正文</a>
 
-<!-- 阅读进度：纯装饰，site.js 逐帧改写它的 scaleX；没有 JS 时整条不显示（CSS 里藏的） -->
-<div class="progress" aria-hidden="true"></div>
-
 <nav class="topbar" aria-label="页面导航">
   <span class="brand">AI 智能助手</span>
   <ul class="navlinks">
@@ -45,9 +42,8 @@
 </nav>
 
 <header class="hero">
-  <p class="eyebrow">在线 · 多人 · 注册就能用</p>
   <h1>AI 智能助手</h1>
-  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,而且每个人各用各的、互不串味。</p>
+  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事,能算数,能读你发过去的文件,每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版</a>
     <a class="btn" href="https://github.com/abonla599/ai-assistant/releases/latest">装安卓壳（约 96 KB）</a>
@@ -58,21 +54,21 @@
 <section id="can-do">
   <h2>它现在真能做的</h2>
   <ul class="cards">
-    <li class="reveal"><h3>多模型切换</h3><p>同一个助手里换着用当前可用的模型——清单和「能用几条」都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
-    <li class="reveal"><h3>会算数</h3><p>让它算数,它走计算器而不是自己心算:表达式在本机按 AST 白名单解析,不会原样执行模型给来的字符串。65 位的 50! 就是这么算出来的。</p></li>
-    <li class="reveal"><h3>读你发过去的文件</h3><p>发 PDF、Word（.docx）、txt 或代码文件,它会先把里面的文字读出来再回答,不用你抄一遍。图片走的是另一条路:当前默认模型带视觉,截图发进去它读得出图里的字;换成一个不带视觉的模型这条路就断,那时会明确拒绝而不是硬答。</p></li>
-    <li class="reveal"><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来;哪些记忆在存着,你在设置里能看到、能删。</p></li>
+    <li class="reveal"><h3>多模型切换</h3><p>在现在可用的那几个模型之间换着用。清单和各自能用几条都写在设置那一格里,默认用哪个由服务端定,你不用配任何东西。</p></li>
+    <li class="reveal"><h3>会算数</h3><p>让它算数,它走计算器,不是自己心算:表达式在本机按 AST 白名单解析,不会原样执行模型给来的字符串。65 位的 50! 就是这么算出来的。</p></li>
+    <li class="reveal"><h3>读你发过去的文件</h3><p>发 PDF、Word（.docx）、txt 或代码文件,它先把里面的文字读出来再回答,不用你抄一遍。图片要当前模型带视觉才行:默认那条带,截图发进去读得出图里的字;换成不带视觉的模型就会明确拒绝,不会硬答。</p></li>
+    <li class="reveal"><h3>长期记忆</h3><p>你说过的偏好存成语义可检索的记忆,聊到相关的地方它会想起来。存了哪些,你在设置里能看到、能删。</p></li>
     <li class="reveal"><h3>多人各用各的</h3><p>会话、附件、记忆都挂在你这个账号上。别人看不到你的,你也看不到别人的。</p></li>
   </ul>
 </section>
 
 <section id="shell-only">
   <h2>装壳多出来的三件事</h2>
-  <p>下面这三件只有装了那个 96 KB 的壳才有——浏览器拿不到系统通知、分享入口和桌面组件。壳本身只是一个指向本站的地址,里面不含任何口令或密钥,所以服务端改版你不用重装;改壳的这三项功能才要重装。</p>
+  <p>这三件要装那个 96 KB 的壳才有,浏览器拿不到系统通知、分享入口和桌面组件。壳只是一个指向本站的地址,不含口令也不含密钥,所以服务端改版不用重装;改壳的这三项才要重装。</p>
   <ul class="cards">
-    <li class="reveal"><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟到——它不申请精确闹钟权限。</p></li>
-    <li class="reveal"><h3>分享进来</h3><p>在相册或 PDF 上点「分享」→ 选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
-    <li class="reveal"><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话（拍照提问同样要模型带视觉才读得出图）。</p></li>
+    <li class="reveal"><h3>提醒</h3><p>设置 → 提醒。到点弹系统通知,手机重启后依然生效。提醒只存在这台手机上,不上传服务器。可能晚几分钟,它不申请精确闹钟权限。</p></li>
+    <li class="reveal"><h3>分享进来</h3><p>在相册或 PDF 上点「分享」,选「AI 助手」,文件直接挂到附件栏,不用先存再传。挂上去只是第一步,读不读得动仍要看当前模型带不带视觉。</p></li>
+    <li class="reveal"><h3>桌面组件</h3><p>主屏放一个小组件,显示今天的提醒,两个按钮直达拍照提问与新对话。拍照提问也要模型带视觉才读得出图。</p></li>
   </ul>
 </section>
 
@@ -80,16 +76,16 @@
   <h2>三步上手</h2>
   <!-- 编号是 CSS counter 画的（list-style 被去掉了，Safari 会因此丢列表语义，role 补回来） -->
   <ol class="steps" role="list">
-    <li class="reveal"><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它会自动跳到同一个地址）。</li>
-    <li class="reveal"><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题(忘记密码时用它自己取回)。</li>
-    <li class="reveal"><strong>开始聊</strong>:换手机、换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
+    <li class="reveal"><strong>打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（或装上面那个壳,它自动跳到同一个地址）。</li>
+    <li class="reveal"><strong>注册</strong>:在登录页切到「注册」,填用户名、密码,再答三条固定的找回问题,忘记密码时拿它自己取回。</li>
+    <li class="reveal"><strong>开始聊</strong>:换手机换设备,用同一个用户名再登录一次,记录和记忆都在。</li>
   </ol>
-  <p class="note">提示「当前没有可用模型,请联系管理员配置模型服务」不是你的问题——那是这台助手的主人还没接上模型,找他。</p>
+  <p class="note">看到「当前没有可用模型,请联系管理员配置模型服务」,那是这台助手的主人还没接上模型,找他,跟你的账号无关。</p>
 </section>
 
 <section id="shots" class="shots-section">
   <h2>界面长这样</h2>
-  <p class="note">四张都是线上实拍,不是设计稿。</p>
+  <p class="note">四张都是线上实拍。</p>
 
   <div class="carousel" data-carousel>
     <div class="stage" id="stage" aria-live="polite">
@@ -128,9 +124,8 @@
 
 <section id="not-now">
   <h2>当前未开启</h2>
-  <p>与其让你现场发现,不如先说清:</p>
   <ul>
-    <li><strong>联网搜索</strong>:代码里有,但这台服务器够不着搜索源,所以它现在给不出实时信息。</li>
+    <li><strong>联网搜索</strong>:代码里有,但这台服务器够不着搜索源,现在给不出实时信息。</li>
     <li><strong>代码执行（沙箱）</strong>:代码里有,但需要宿主机上的 Docker,当前没开。</li>
     <li><strong>扫描版 PDF</strong>:图片式的 PDF 要先经过 OCR,今天还不行。有文字层的 PDF 可以直接读,整页贴图的 Word 也一样读不出。</li>
     <li><strong>离线使用</strong>:没有。界面和数据都在线上,断网就只能等着。</li>
@@ -139,21 +134,19 @@
 
 <section id="faq">
   <h2>常见问题</h2>
-  <details><summary>要自己配 API 密钥吗?</summary><p>不用。模型由这台助手的管理员配。普通人在这里什么都不用填。</p></details>
-  <details><summary>换手机 / 重装 App,记录会丢吗?</summary><p>不会丢:聊天记录、附件、长期记忆都在服务器上你这个账号里,用同一个用户名再登录一次就回来。提醒存在旧手机本机,不跟着账号走。</p></details>
-  <details><summary>谁能看到我的数据?</summary><p>只有你。会话、附件、记忆都按账号隔离,别人（包括另一个注册用户）看不到你的。</p></details>
-  <details><summary>怎么删干净?</summary><p>设置里删会话与记忆条目;要注销整个账号,联系这台助手的管理员做删除。删除动作不会把记忆库里的历史一并抹平的那部分,请当面问清再做。</p></details>
-  <details><summary>有 iOS 吗?</summary><p>没有壳,但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用,加到主屏幕后接近全屏体验;只是没有提醒、分享入口和桌面组件。</p></details>
-  <details><summary>打不开怎么办?</summary><p>这台助手跑在一台个人电脑上,机器关机、断网或重启后没人登录,它就会暂时够不着——那不是你的账号出了问题,等一会儿再试。</p></details>
+  <details><summary>要自己配 API 密钥吗?</summary><p>不用。模型由这台助手的管理员配,普通人什么都不用填。</p></details>
+  <details><summary>换手机 / 重装 App,记录会丢吗?</summary><p>不会丢。聊天记录、附件、长期记忆都在服务器上你这个账号里,用同一个用户名再登录一次就回来。提醒存在旧手机本机,不跟着账号走。</p></details>
+  <details><summary>谁能看到我的数据?</summary><p>只有你。会话、附件、记忆按账号隔离,别的注册用户看不到你的。</p></details>
+  <details><summary>怎么删干净?</summary><p>设置里删会话与记忆条目。要注销整个账号,联系这台助手的管理员做删除;记忆库里哪些会一起被抹掉,删之前当面问清。</p></details>
+  <details><summary>有 iOS 吗?</summary><p>没有壳,但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用,加到主屏幕后接近全屏体验,只是没有提醒、分享入口和桌面组件。</p></details>
+  <details><summary>打不开怎么办?</summary><p>这台助手跑在一台个人电脑上。机器关机、断网,或者重启后没人登录,它就会暂时够不着。那不是你的账号出了问题,等一会儿再试。</p></details>
 </section>
 
 <footer>
   <p><a href="https://github.com/abonla599/ai-assistant">GitHub · abonla599/ai-assistant</a>
      <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
   <p class="note" id="copyHint" role="status"></p>
-  <p class="note">界面跑在服务器上,没有"更新"这个动作:下次打开就是当前这一版。壳的版本号写在
-     <a href="https://github.com/abonla599/ai-assistant/releases/latest">Releases</a> 那一页,这里不抄——抄来的数字第二天就过期。</p>
-  <p class="note">本站不放后台入口。管理页不在这里,也不会出现在这里。</p>
+  <p class="note">界面跑在服务器上,没有"更新"这个动作,下次打开就是当前这一版。</p>
 </footer>
 
 <button class="totop" type="button" id="topBtn" aria-label="回到顶部" hidden>

@@ -195,21 +195,17 @@
     });
   }
 
-  /* ---------- 滚动联动：进度条、导航吸起、回到顶部 ---------- */
-  /* 三件事共用一个 rAF 循环：scroll 一次手势能触发上百次，读布局/写样式每帧最多一次，
+  /* ---------- 滚动联动：导航吸起、回到顶部 ---------- */
+  /* 两件事共用一个 rAF 循环：scroll 一次手势能触发上百次，读布局/写样式每帧最多一次，
      否则手机上这几处合成会互相抢主线程，滚起来就是掉帧。 */
-  var progress = document.querySelector(".progress");
   var topbar = document.querySelector(".topbar");
   var topBtn = document.getElementById("topBtn");
-  if (progress || topbar || topBtn) {
+  if (topbar || topBtn) {
     var frame = 0;
     var paint = function () {
       frame = 0;
       var box = document.documentElement;
       var y = window.pageYOffset || box.scrollTop || 0;
-      var rest = box.scrollHeight - window.innerHeight;
-      var ratio = rest > 0 ? Math.min(1, Math.max(0, y / rest)) : 0;
-      if (progress) progress.style.transform = "scaleX(" + ratio.toFixed(4) + ")";
       if (topbar) topbar.classList.toggle("is-stuck", y > 8);
       if (topBtn) topBtn.hidden = y < 600;
     };
@@ -223,38 +219,5 @@
         window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
       });
     }
-  }
-
-  /* ---------- 卡片追光 ---------- */
-  /* 把命中点换算成卡片自己的百分比坐标写进 --mx/--my，CSS 用这两个值定位那团
-     radial-gradient——光跟着指针走，卡片就像块会被反光的玻璃。
-     只在真指针设备绑：手机上没有「悬停」，绑了会在最后一次触摸的位置留一坨光。
-     JS 没跑或条件不匹配时，CSS 的默认值让它仍是中间那团正常的 hover 光。 */
-  var finePointer = window.matchMedia &&
-    window.matchMedia("(hover: hover) and (pointer: fine)").matches;
-  if (finePointer) {
-    [].slice.call(document.querySelectorAll(".cards")).forEach(function (list) {
-      function cardOf(node) {
-        while (node && node !== list) {           /* 不用 closest()：老 WebView 上没有 */
-          if (node.tagName === "LI") return node;
-          node = node.parentNode;
-        }
-        return null;
-      }
-      var cframe = 0, hit = null;
-      function apply() {
-        cframe = 0;
-        var p = hit; hit = null;
-        if (!p || !p.card || !p.card.style) return;
-        var r = p.card.getBoundingClientRect();
-        if (!r.width || !r.height) return;
-        p.card.style.setProperty("--mx", ((p.x - r.left) / r.width * 100).toFixed(1) + "%");
-        p.card.style.setProperty("--my", ((p.y - r.top) / r.height * 100).toFixed(1) + "%");
-      }
-      list.addEventListener("pointermove", function (e) {
-        hit = { card: cardOf(e.target), x: e.clientX, y: e.clientY };
-        if (!cframe) cframe = raf(apply);
-      }, { passive: true });
-    });
   }
 })();

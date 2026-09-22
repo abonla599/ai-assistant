@@ -69,7 +69,6 @@ html[data-theme="dark"] {
   --cta: linear-gradient(115deg,#2fbf8f 0%,#2fae95 42%,#6c7bff 100%);
   --cta-ink: #062518;
   --seam: linear-gradient(90deg,rgba(47,191,143,0),rgba(47,191,143,.45) 22%,rgba(108,123,255,.4) 55%,rgba(47,191,143,0));
-  --sheen: rgba(255,255,255,.42);
   color-scheme: dark;
 }
 html[data-theme="light"] {
@@ -100,7 +99,6 @@ html[data-theme="light"] {
   --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
   --cta-ink: #ffffff;
   --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
-  --sheen: rgba(255,255,255,.6);
   color-scheme: light;
 }
 /* 脚本没跑起来时（禁用 JS、或首帧前）也按系统偏好选色，别硬吃深色。
@@ -133,7 +131,6 @@ html[data-theme="light"] {
     --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
     --cta-ink: #ffffff;
     --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
-    --sheen: rgba(255,255,255,.6);
     color-scheme: light;
   }
 }
@@ -187,15 +184,6 @@ body::after {
   background-image: var(--grain); background-size: 180px 180px;
   opacity: var(--grain-a);
 }
-
-/* ---------- 阅读进度 ---------- */
-.progress {
-  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 40;
-  transform: scaleX(0); transform-origin: 0 50%; will-change: transform;
-  background: linear-gradient(90deg, var(--brand), var(--brand-3) 45%, var(--brand-2));
-  box-shadow: 0 0 14px var(--glow);
-}
-html:not(.js) .progress { display: none; }   /* 没脚本就没有数值，别留一根空杠 */
 
 h1, h2, h3 { margin: 0; font-weight: 700; line-height: 1.22; text-wrap: balance; }
 h1, h2 { letter-spacing: -.022em; }
@@ -306,20 +294,6 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
   background: radial-gradient(58% 52% at 50% 42%, var(--glow) 0%, var(--glow-0) 70%);
   opacity: .95;
 }
-.eyebrow {
-  display: inline-flex; align-items: center; gap: 8px; margin: 0 0 18px; padding: 6px 14px 6px 11px;
-  font-size: var(--step--1); letter-spacing: .08em; color: var(--brand);
-  background: linear-gradient(120deg, color-mix(in srgb, var(--brand) 18%, transparent), color-mix(in srgb, var(--brand-2) 12%, transparent));
-  border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent);
-  border-radius: var(--radius-pill); box-shadow: inset 0 1px 0 var(--hairline);
-}
-.eyebrow::before {
-  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
-  background: radial-gradient(circle at 35% 35%, var(--brand-3), var(--brand));
-  box-shadow: 0 0 10px var(--glow);
-  animation: pulse 3.6s var(--ease) infinite alternate;
-}
-@keyframes pulse { from { opacity: .55; transform: scale(.86); } to { opacity: 1; transform: scale(1.06); } }
 .lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 26em; margin: 0 0 30px; line-height: 1.7; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; }
 .btn {
@@ -338,29 +312,16 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
   box-shadow: inset 0 1px 0 var(--hairline), var(--lift);
 }
 .btn:active { transform: translateY(0); }
-/* 主 CTA：渐变底慢慢走位（呼吸），另加一道掠光。两者都是纯装饰，动画关掉不影响文字 */
 .btn.primary {
-  background: var(--cta); background-size: 220% 220%; background-position: 8% 50%;
+  background: var(--cta);
   border-color: color-mix(in srgb, var(--brand) 70%, transparent);
   color: var(--cta-ink);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 10px 30px -12px var(--glow);
-  animation: cta-drift 12s var(--ease) infinite alternate;
-}
-@keyframes cta-drift {
-  from { background-position: 6% 42%; }
-  to   { background-position: 96% 60%; }
-}
-.btn.primary::after {
-  content: ""; position: absolute; inset: 0; z-index: -1; opacity: .45;
-  background: linear-gradient(100deg, rgba(255,255,255,0) 26%, var(--sheen) 46%, rgba(255,255,255,0) 66%);
-  background-size: 240% 100%; background-position: 190% 0;
-  transition: background-position var(--dur-3) var(--ease);
 }
 .btn.primary:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.32), 0 16px 40px -14px var(--glow); }
-.btn.primary:hover::after { background-position: -70% 0; }
 .note { color: var(--ink-soft); font-size: var(--step--1); max-width: var(--measure); }
 
-/* ---------- 区块：编号眉标 + 玻璃卡片 ---------- */
+/* ---------- 区块：玻璃卡片 ---------- */
 section { position: relative; }
 section > p { max-width: var(--measure); }
 section:nth-of-type(even) { background: var(--band); max-width: none; }
@@ -371,18 +332,6 @@ section:nth-of-type(even)::before, section:nth-of-type(even)::after {
 }
 section:nth-of-type(even)::before { top: 0; }
 section:nth-of-type(even)::after { bottom: 0; }
-/* 眉标是纯 CSS 计数器：没有 JS 也在，且不往 HTML 里塞装饰文字 */
-section { counter-increment: sec; }
-section > h2 { display: flex; align-items: baseline; gap: 12px; }
-section > h2::before {
-  content: counter(sec, decimal-leading-zero);
-  flex: 0 0 auto; font-size: var(--step--1); font-weight: 600; letter-spacing: .1em;
-  font-variant-numeric: tabular-nums; color: var(--brand);
-  padding: 4px 10px; border-radius: var(--radius-pill);
-  background: linear-gradient(140deg, color-mix(in srgb, var(--brand) 20%, transparent), color-mix(in srgb, var(--brand-2) 14%, transparent));
-  border: 1px solid color-mix(in srgb, var(--brand) 24%, transparent);
-  box-shadow: inset 0 1px 0 var(--hairline);
-}
 .cards {
   list-style: none; padding: 0; margin: 0; display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -394,12 +343,6 @@ section > h2::before {
   box-shadow: inset 0 1px 0 var(--hairline), var(--card-shadow);
   transition: transform var(--dur-2) var(--ease-out), border-color var(--dur-2), box-shadow var(--dur-2) var(--ease-out);
 }
-.cards li::after {
-  /* 追光：位置由 site.js 写进 --mx/--my，鼠标在哪儿光就在哪儿。默认值保证 JS 不在时也像个正常 hover */
-  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  background: radial-gradient(200px 200px at var(--mx, 50%) var(--my, 0%), var(--glow), var(--glow-0) 62%);
-  opacity: 0; transition: opacity var(--dur-2) var(--ease);
-}
 @supports ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
   .cards li { backdrop-filter: blur(10px) saturate(140%); -webkit-backdrop-filter: blur(10px) saturate(140%); }
 }
@@ -408,9 +351,8 @@ section > h2::before {
   border-color: color-mix(in srgb, var(--brand) 45%, var(--line));
   box-shadow: inset 0 1px 0 var(--hairline), var(--lift), 0 0 0 1px color-mix(in srgb, var(--brand) 12%, transparent);
 }
-.cards li:hover::after { opacity: 1; }
 .cards p { margin: 0; color: var(--ink-soft); font-size: var(--step--1); line-height: 1.85; max-width: 40em; }
-/* 三步上手：编号自己数（CSS counter，不靠 JS、不占文案），圆牌和区块眉标同一套语气 */
+/* 三步上手：编号自己数（CSS counter，不靠 JS、不占文案），圆牌用同一套语气 */
 .steps { list-style: none; padding-left: 0; counter-reset: st; display: grid; gap: 14px; max-width: var(--measure); }
 .steps li { position: relative; padding-left: 48px; line-height: 1.85; counter-increment: st; }
 .steps li::before {
@@ -542,7 +484,6 @@ footer::before {
 @media (max-width: 420px) {
   .hero, section, footer { padding: 44px 16px; }
   .cards li { padding: 18px; }
-  section > h2 { gap: 9px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -554,7 +495,7 @@ footer::before {
        那比不动更糟——先把迭代次数钉死，再把它们整个关掉，只留静态渐变。 */
     animation-iteration-count: 1 !important;
   }
-  html::before, body::before, .btn.primary, .eyebrow::before { animation: none !important; }
+  html::before, body::before { animation: none !important; }
   html.js .reveal { opacity: 1; transform: none; transition: none !important; }
   html.js .stage, html.js .slide { transition: none !important; }
 }
