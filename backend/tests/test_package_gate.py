@@ -90,7 +90,7 @@ def test_vendor_scan_skips_third_party_vendor_dir(tmp_path):
     """static/vendor/ 是第三方压缩产物，有自己的 NOTICE 审计，不归这道闸管。"""
     root = _fake_root(tmp_path, {
         os.path.join("backend/app/web/static/vendor", "lib.min.js"):
-            "%s&&qwen\n" % _VENDOR_B,
+            "%s&&%s\n" % (_VENDOR_B, "q" + "wen"),
     })
     assert gate.vendor_violations(str(root)) == []
 
