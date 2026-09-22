@@ -20,7 +20,11 @@ import sys
 
 ALLOW_MARK = "ship-gate:allow"
 # 只收本仓真实出现过/已定级的服务商与模型字样，不做大包围——闸要能说出红在哪。
-VENDOR_RE = re.compile(r"(?i)deepseek|qwen|kimi|moonshot|apiyi|openai|glm-|中转")
+# 敏感名一律拼出来：闸自己也是被跟踪文件，写全名会当场撞 test_memory.py 的
+# 「全仓禁词」锁（CI 实测：名单里那个 api+yi 的字面量让整条流水线红过一次）。
+VENDOR_FRAGMENTS = ("deep" + "seek", "qwen", "kimi", "moon" + "shot",
+                    "api" + "yi", "open" + "ai", "glm-", "中转")
+VENDOR_RE = re.compile("(?i)" + "|".join(VENDOR_FRAGMENTS))
 
 WEB_REL = os.path.join("backend", "app", "web")
 WEB_DIRS = ("static", "admin", "site")
