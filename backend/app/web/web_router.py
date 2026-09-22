@@ -50,6 +50,11 @@ ADMIN_DIR = _admin_dir()
 # 一年 immutable。它之所以敢用，靠的是下面那个水印：文件一变水印就变、URL 就变。
 IMMUTABLE = "public, max-age=31536000, immutable"
 
+# HTML 只允许晚 30 秒。这是"重复打开"剩下最后那一趟回源的价钱：30 秒内可能拿到旧
+# 页面配新脚本，所以页面自己带构建号去对一次、对不上就重载（见 static/index.html 里
+# 的 window.__ASSETS__ 与 app.js 的 staleBuild）。测试里按这个数字钉，谁把它调大就红。
+PAGE_CACHE = "public, max-age=30"
+
 # 哪些引用要跟着水印走：按扩展名认，不另列清单——加一个新资源不需要想起来改第二处。
 _REF = re.compile(r'\b(?:src|href)="[^"?]*\.(?:css|js|png|jpe?g|svg|webmanifest)"')
 
@@ -111,35 +116,40 @@ def rewritten_html(source: StarletteFileResponse, token: str,
                    if_none_match: str = "") -> Response:
     """HTML（以及要盖水印的 sw.js）出门前的那一次改写，连带把条件请求保住。
 
-    为什么不缓存 HTML：它是"当前是哪一版"的唯一出处。缓存了它，就可能拿旧水印去
-    引用资源——那正是 2026-09-17 的形状。
-    为什么还要自己算 ETag：整页 HTML 有三十多 KB，丢了条件请求就变成"每次导航都要
-    重新下载一遍页面"，比改动之前更贵。
+    HTML 允许缓存 `PAGE_CACHE` 这么久：它是"重复打开"这条路上剩下的最后那一趟回源。
+    代价要说明白——这几十秒里可能拿到旧 HTML 配新 JS，界面会缺元素、点不动。所以同
+    一次改写把 `__ASSET_TOKEN__` 也填进页面（`window.__ASSETS__`），app.js 拿它跟服务
+    端当下那一版对一次，对不上就自己重载一次（只重载一次，见 app.js 的 `staleBuild`）：
+    "改版后有一小会儿是坏的"从等人刷新变成自己好回来。
+    `sw.js` 继续 no-cache：它是注册的入口，晚一步发现新版就等于再等一次开页面。
+    自己算 ETag 是为了条件请求：整页 HTML 三十多 KB，丢了它每次导航都全量重发。
     """
     with open(source.path, "rb") as fh:
         raw = fh.read().decode("utf-8")
-    text = stamp_assets(raw) if source.path.endswith(".html") \
-        else raw.replace("__ASSET_TOKEN__", token)
-    body = text.encode("utf-8")
+    is_page = source.path.endswith(".html")
+    body = stamp_assets(raw).replace("__ASSET_TOKEN__", token).encode("utf-8")
     etag = f'"st-{zlib.crc32(body):08x}-{len(body):x}"'
+    cache = PAGE_CACHE if is_page else "no-cache"
     if etag in if_none_match:
-        return site_headers(Response(status_code=304, headers={"ETag": etag}))
+        return site_headers(Response(status_code=304, headers={"ETag": etag}), cache=cache)
     return site_headers(Response(content=body, media_type=source.media_type,
-                                 headers={"ETag": etag}))
+                                 headers={"ETag": etag}), cache=cache)
 
 
-def site_headers(response, versioned: bool = False):
+def site_headers(response, cache: str = "no-cache"):
     """全站响应共用的一组头，字面量只这一份：/app、/admin、/site 的静态资源走
     RevalidatingStaticFiles，官网 index.html 走 FileResponse，两头都收口在这里。
 
     不抽出来的话就有第二份缓存字面量，改一份漏一份——和 _PROTECTED_PREFIXES
     在测试里"不抄第二份清单"是同一个道理。
 
-    `versioned` 由调用方按"这一趟请求的 URL 带没带当下水印"回答。没带的（收藏夹里的
-    裸地址、老 service worker 预取过的那一批）继续 no-cache：长缓存只给名字里就写明
-    了是哪一版的资源，宁可多问一趟也不把人钉在一份旧文件上。
+    调用方传进来的 `cache` 只有三种取值，每一种对应一笔说得出名字的取舍：
+    - `IMMUTABLE`：URL 里已经写明是哪一版的资源（带当下水印）；
+    - `PAGE_CACHE`：HTML，允许晚 30 秒，且页面带着自己的水印去对账、不对就自己重载；
+    - `"no-cache"`：裸地址与旧水印的资源、以及 `sw.js`。宁可多问一趟也不把人钉在一份
+      旧文件上——旧 URL 一旦被允许长缓存，就直接复刻 2026-09-17 那次"改了没生效"。
     """
-    response.headers["Cache-Control"] = IMMUTABLE if versioned else "no-cache"
+    response.headers["Cache-Control"] = cache
     # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
     # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
     response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
@@ -147,10 +157,11 @@ def site_headers(response, versioned: bool = False):
 
 
 class RevalidatingStaticFiles(StaticFiles):
-    """带当下水印的资源 → 一年 immutable；不带的、以及 HTML 与 sw.js → no-cache。
+    """带当下水印的资源 → 一年 immutable；HTML → 30 秒；裸地址、旧水印、sw.js → no-cache。
 
     HTML 与 sw.js 出门前还要盖一次水印（见 `stamp_assets`），所以"页面引用的资源是
-    上一版"这件事在结构上不成立：引用和它指向的文件由同一个水印绑在一起。
+    上一版"这件事不会悄悄发生：引用和它指向的文件由同一个水印绑在一起，而页面带着
+    自己的水印去对账（`window.__ASSETS__`）。
 
     这一套换掉的是一条更贵的旧规则：源站原先对 /app 与 /admin 完全不表态，缓存策略由
     别人代填（Cloudflare 给 .css/.js 注入 max-age=14400），2026-09-17 重建重启之后
@@ -169,7 +180,7 @@ class RevalidatingStaticFiles(StaticFiles):
         target = getattr(response, "path", "") or ""
         if isinstance(response, StarletteFileResponse) and target.endswith((".html", "sw.js")):
             return rewritten_html(response, token or asset_token(), incoming)
-        return site_headers(response, versioned=token == asset_token())
+        return site_headers(response, cache=IMMUTABLE if token == asset_token() else "no-cache")
 
 
 def mount_pwa(app: FastAPI) -> None:

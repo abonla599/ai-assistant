@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from app.main import app
+from app.web.web_router import IMMUTABLE, asset_token
 
 client = TestClient(app)
 
@@ -16,22 +17,34 @@ client = TestClient(app)
 # ---------- 1. 挂载与不回归 ----------
 
 def test_root_serves_the_site_with_the_same_cache_policy_as_app():
+    """官网首页与 /app、/admin 是同一套页面口径——包括"允许晚 30 秒"这一笔。
+
+    判据是拿 /app/ 的头来比，不是抄一份字面量：三处页面各自的价钱必须一起动，
+    动一处就是第二份真相。窗口本身的大小钉在 tests/test_asset_versioning.py。
+    """
     res = client.get("/")
     assert res.status_code == 200
-    assert res.headers["cache-control"] == "no-cache"
+    assert res.headers["cache-control"] == client.get("/app/").headers["cache-control"], \
+        "官网首页的缓存口径和 PWA 走岔了"
     assert "frame-src 'none'" in res.headers["content-security-policy"]
 
 
 def test_site_assets_are_public_and_uncached():
-    """`/site/...` 是官网资源。公开是刻意的(css 和截图不含任何用户数据),
-    但必须和 /app 一样回 no-cache —— Cloudflare 已设「尊重现有标题」,
-    源站不表态就等于让别人的缓存策略替我们决定。"""
+    """`/site/...` 是官网资源。公开是刻意的(css 和截图不含任何用户数据)。
+
+    不带水印的那一个地址必须回 no-cache —— Cloudflare 已设「尊重现有标题」,
+    源站不表态就等于让别人的缓存策略替我们决定。带当下水印的那一个才允许长缓存,
+    两条一起写是因为它们是一对：省掉回源的收益,不能拿"把人钉在旧文件上"去换。
+    """
     res = client.get("/site/site.css")
     assert res.status_code == 200
     assert res.headers["cache-control"] == "no-cache"
+    fresh = client.get("/site/site.css", params={"v": asset_token()})
+    assert fresh.headers["cache-control"] == IMMUTABLE, "官网资源拿不到长缓存：首屏还是每趟回源"
     # 整串相等而不是 in:`/` 那半只用了 in,两边合起来才真正钉住"页面与资源的头
     # 是同一组",而这一组字面量在 web_router 里只有一份(site_headers)。
     assert res.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
+    assert fresh.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
 
 
 def test_unknown_paths_still_get_the_framework_json_404():

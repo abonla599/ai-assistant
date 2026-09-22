@@ -15,7 +15,7 @@ client = TestClient(app)
 # 与 web_router._REF 认的那一批扩展名对应。两边各写一次是有意的：这个测试要抓的正是
 # "目录里冒出一个新类型，而盖章的规则不知道"。
 STAMPED = (".css", ".js", ".png", ".jpg", ".jpeg", ".svg", ".webmanifest")
-# 不盖章的本地文件：HTML 自己是水印的出处（永远 no-cache），APK 是动态代取的，
+# 不盖章的本地文件：HTML 是被盖章那一批的出处（它自己只许缓存 30 秒），APK 是动态代取的，
 # .md 是随包带出去的第三方许可说明（`static/NOTICE.md`），没有任何页面引用它。
 UNSTAMPED_OK = (".html", ".apk", ".md")
 
@@ -95,25 +95,48 @@ def test_versioned_assets_are_immutable_while_bare_and_stale_ones_revalidate():
             f"{path} 对旧水印也回 long cache：页面与资源会各停在一版"
 
 
-def test_the_pages_themselves_are_never_long_cached():
-    """HTML 不缓存：它是"当前是哪一版"的唯一出处。
+def test_a_page_may_be_stale_for_at_most_the_agreed_window():
+    """HTML 可以晚一步，但只能晚 30 秒——这个数字是拿"旧页面配新脚本"换来的。
 
-    缓存了 HTML，就可能拿旧水印去引用资源——长缓存反而会把人留在上一版整套界面上。
+    2026-09-22 定的那条边界：整页 HTML 是"重复打开"这条路上剩下的最后那一趟回源，
+    给它正 max-age 才能省掉；代价是最坏情况下人拿到旧骨架跑新代码，症状是缺元素、
+    点了没反应。窗口由页面自己兜住（下一条锁钉它在不在），而窗口大小按整串头钉：
+    谁把 PAGE_CACHE 调大或者干脆改成 immutable，这里红，而不是等到线上偶发一次空白。
     """
     for page in PAGES:
-        res = client.get(page)
-        assert res.headers["cache-control"] == "no-cache", f"{page} 的 HTML 被允许缓存了"
-        assert res.headers["cache-control"] != web_router.IMMUTABLE
+        head = client.get(page).headers["cache-control"]
+        m = re.fullmatch(r"public, max-age=(\d+)", head)
+        assert m, f"{page} 的 HTML 缓存头不是说得出价钱的那一种: {head!r}"
+        assert 0 < int(m.group(1)) <= 30, f"{page} 允许晚 {m.group(1)} 秒，超出谈定的窗口"
+    # sw.js 反过来：它是"现在线上是哪一版"的那一个问处，缓存住就等于永远问不到新版。
+    assert client.get("/app/sw.js").headers["cache-control"] == "no-cache", \
+        "sw.js 被允许缓存：版本自愈那条路就断了"
 
 
 def test_a_second_visit_to_the_page_answers_304_with_no_body():
-    """HTML 每次导航都要问，但问价必须便宜：整页三十多 KB 全量重传比改动之前还慢。"""
+    """过了那 30 秒还是要问一次，问价必须便宜：整页三十多 KB 全量重传比改动之前还慢。"""
     first = client.get("/app/")
     assert first.headers.get("etag"), "没有 ETag，条件请求无从谈起"
     second = client.get("/app/", headers={"If-None-Match": first.headers["etag"]})
     assert second.status_code == 304, f"带着 ETag 仍旧全量重发：{second.status_code}"
     assert not second.content, "304 却带了正文"
-    assert second.headers["cache-control"] == "no-cache"
+    assert second.headers["cache-control"] == web_router.PAGE_CACHE, \
+        "304 上没带缓存头：客户端与边缘只能按自己的启发式猜这一页能留多久"
+
+
+def test_the_page_declares_which_build_it_is():
+    """页面必须自报构建号，而且要和服务端当下那一版、和资源 URL 上的水印是同一个值。
+
+    这是"HTML 允许晚 30 秒"的那根保险销：app.js 拿 `window.__ASSETS__` 去问 sw.js
+    现在是多少，对不上就自己跳一次。占位没被替换、这一行被删掉、或者填进去的是别的
+    数——保险就悄悄没了，而症状只是"改版后偶尔有人点不动"。
+    """
+    token = web_router.asset_token()
+    page = client.get("/app/").text
+    assert f'window.__ASSETS__ = "{token}"' in page, \
+        "页面没有自报构建号（占位没替换或那一句被删了）"
+    assert "__ASSET_TOKEN__" not in page, "HTML 里的占位漏替换：填号的那条路只覆盖了 sw.js"
+    assert f'src="app.js?v={token}"' in page, "构建号与资源水印不是同一个出处"
 
 
 def test_the_watermark_moves_with_the_files_and_both_copies_agree(monkeypatch):

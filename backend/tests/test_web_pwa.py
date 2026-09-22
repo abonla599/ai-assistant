@@ -38,7 +38,7 @@ def test_static_assets_reachable():
     assert not missing, f"缺失静态资源: {missing}"
 
 
-def test_static_assets_must_be_revalidated_not_reused():
+def test_static_assets_declare_their_own_freshness():
     """不发 Cache-Control 的静态资源，等于把改版交给别人的缓存去决定。
 
     2026-09-17 实测：重建并重启后，公网 /app/style.css 仍是 80 分钟前那份旧的
@@ -46,15 +46,21 @@ def test_static_assets_must_be_revalidated_not_reused():
     源站自己没表态，浏览器与边缘就各自按启发式缓存——朋友那边看到的现象是
     "改了没生效"，而这正是本项目最容易被误判成代码坏了的一类形状。
 
-    no-cache 不是"不缓存"：每次使用前必须回源问一次，而 ETag 就是那一次问价，
-    答案通常是 304。ETag 一旦丢了，省下的请求就会变成整份重传，所以两个一起钉。
+    留下来的红线是**每个响应都得自己表态，而且带 ETag**；至于表态成哪一种，是两支：
+    不带水印的资源与 sw.js 回 no-cache（每用一次先问一次，问价的 ETag 在那儿），
+    HTML 与带当下水印的资源各归 tests/test_asset_versioning.py 钉（一笔是 30 秒的
+    窗口，一笔是一年的长缓存），那两条锁改坏了会在那里红，不在这里。
     """
-    for path in ("/app/style.css", "/app/app.js", "/app/sw.js", "/app/", "/admin/"):
+    for path in ("/app/style.css", "/app/app.js", "/app/sw.js", "/admin/admin.css"):
         res = client.get(path)
         assert res.status_code == 200, path
         assert res.headers.get("cache-control") == "no-cache", \
             f"{path} 的 cache-control 是 {res.headers.get('cache-control')!r}"
         assert res.headers.get("etag"), f"{path} 没有 ETag：no-cache 会退化成每次全量重传"
+    for page in ("/app/", "/admin/"):
+        head = client.get(page).headers.get("cache-control")
+        assert head and head != "no-cache" and "max-age=" in head, \
+            f"{page} 的 HTML 缓存口径没表态或退回了 no-cache：重复开门又要整趟回源"
 
 
 def test_frontend_uses_relative_api_paths_only():
@@ -3003,3 +3009,31 @@ def test_the_boot_chain_does_not_slip_back_into_one_await_per_request():
     assert hy.count("await") == 1, f"每张图自己 await 一次就是串行：{hy}"
     assert "setStatus" not in _function_body(js, "restore"), \
         "restore 又在批内就地写状态条：慢一步回来的 loadModels 会把它擦掉"
+
+
+def test_a_stale_page_kicks_itself_once_and_only_once():
+    """HTML 允许晚 30 秒，代价由这段兜：旧骨架配新脚本时自己跳一次，跳完就停。
+
+    三条一起钉，因为漏哪一条症状都不一样：
+    - 判据不许在"任何一边拿不到"时瞎跳（没登录、或这份 HTML 是上一次部署留下的，
+      压根没有 window.__ASSETS__）——那会让人反复回到登录页；
+    - 问的那一个文件必须是刻意不缓存的 `sw.js`，问 `/app/` 等于问缓存要答案；
+    - 已经为"服务端那一版"跳过一次就不许再跳，否则对不上就一直跳，比原来的空白页更糟。
+    """
+    js = _js()
+    stale = _function_body(js, "staleBuild")
+    assert "Boolean(local)" in stale and "Boolean(server)" in stale, \
+        "判据不再要求两边都有值：拿不到版本信息的时候它会瞎跳"
+    assert "!==" in stale, "两边相等也算旧：那每次开页面都要重载一次"
+
+    check = _function_body(js, "checkBuild")
+    assert 'fetch("sw.js' in check, "不问 sw.js 了：改问一个会被缓存的东西，等于问缓存要答案"
+    assert 'cache: "no-store"' in check, "没关缓存：这一问可能又拿回旧的那一份"
+    assert "res.text()" in check, "响应不按文本读：正则取不到水印，对账静默失效"
+    assert "const V = " in check, "读的不是 sw.js 里那一个水印：它换了写法就悄悄不匹配了"
+    assert "jumped === live" in check, "没有止损点：对不上就一直重载"
+    assert "location.replace" in check, "跳不动了：旧页面还是留在屏幕上"
+
+    boot = _function_body(js, "boot")
+    assert "checkBuild(window.__ASSETS__)" in boot, \
+        "boot 不再对账：改版后那 30 秒的旧页面没人管了"

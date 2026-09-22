@@ -499,6 +499,10 @@
     </div>
   </div>
 
+  <!-- 这一页是哪一版：`__ASSET_TOKEN__` 由服务端在出门前填（app/web/web_router.py 的
+       rewritten_html）。HTML 允许缓存 30 秒，所以"旧骨架跑新代码"有一个 30 秒的窗口，
+       症状是缺元素、点了没反应；app.js 拿这个值对一次账，不对就自己重载。 -->
+  <script>window.__ASSETS__ = "__ASSET_TOKEN__";</script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
   <!-- highlight.js 不在关键路径上：由 markdown.js 在首次遇到代码块时懒加载，

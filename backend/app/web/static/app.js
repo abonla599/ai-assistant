@@ -2337,6 +2337,30 @@ async function loadServerData() {
   if (!pref.sessionId && currentProvider()) await ensureSession();
 }
 
+/* HTML 允许缓存 30 秒（backend/app/web/web_router.py 的 PAGE_CACHE），于是"旧页面配
+   新脚本"有一个窗口，症状是缺元素、点了没反应。判断单独成函数，是为了让它在 node 里
+   真跑得起来（tests/test_web_pwa.py 的 _BOOT_JS_HARNESS 同一套路）。
+   缺任何一边都不跳：没登录时拿不到服务端那一版，而这次部署之前留下的旧 HTML 压根没有
+   window.__ASSETS__——那种情况下瞎跳只会把人反复踢回登录页。 */
+function staleBuild(local, server) {
+  return Boolean(local) && Boolean(server) && local !== server;
+}
+
+/* "现在线上是哪一版"问 sw.js：它是全站唯一一个刻意不缓存的文件，内容里就带着当下的
+   水印。排在 boot 最后发，不挡首屏、也不进任何一条等待链。跳过去的那一个地址带上
+   ?b=<水印>，等于换一个没人缓存过的 URL，同时给"下一趟还是旧的"留一个止损点。 */
+function checkBuild(local) {
+  fetch("sw.js?build-check=" + Date.now(), { cache: "no-store" })
+    .then((res) => res.text())
+    .then((text) => {
+      const live = (text.match(/const V = "([^"]+)"/) || [])[1];
+      const jumped = new URLSearchParams(location.search).get("b");
+      if (!staleBuild(local, live) || jumped === live) return;
+      location.replace(location.pathname + "?b=" + encodeURIComponent(live));
+    })
+    .catch(() => { /* 问不到就不动：这一趟不值得让界面变红 */ });
+}
+
 async function boot() {
   migrateLegacyIdentity();   // 必须排第一：pref 现在从清单读，没迁就等于把有令牌的人当陌生人
   applyTheme();
@@ -2380,6 +2404,7 @@ async function boot() {
      报的，不是令牌的属性）。没有桥时 maybeAskUpdate 第一句就 return，浏览器里连一次
      fetch 都不会发出去。 */
   maybeAskUpdate();
+  checkBuild(window.__ASSETS__);
 }
 
 document.addEventListener("DOMContentLoaded", boot);
