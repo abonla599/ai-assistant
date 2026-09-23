@@ -59,9 +59,14 @@ def _loop() -> None:
 
 def _ensure_probe_running() -> None:
     global _thread
+    # 查活与创建必须在同一把锁里。旧写法锁内读 alive、锁外赋值并 start：
+    # 两个首调线程可以同时看到"没活线程"，各自 new 一个并覆盖 _thread——
+    # 被覆盖的那个还活着、没人再持有引用，探测从此永久双开，每 15 分钟
+    # 对源站多敲一次而没有任何报错。start 放锁内不成问题：新线程第一时间
+    # 要的锁此刻由我们自己拿着，它只会排一次队。
     with _lock:
-        alive = _thread is not None and _thread.is_alive()
-    if not alive:
+        if _thread is not None and _thread.is_alive():
+            return
         _thread = threading.Thread(target=_loop, daemon=True, name="search-source-probe")
         _thread.start()
 
