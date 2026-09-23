@@ -363,6 +363,36 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .attach-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* 快速切换模型：发送键旁的小芯片 + 弹单。芯片是胶囊形，模型名过长省略号截断
+   （和参考截图里 "Qwen3.8-Fla…" 一样的观感）；弹单纵向列可用模型，当前项打 ✓。 */
+.model-chip {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  max-width: 46vw; margin-left: auto;
+  border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
+  border-radius: 999px; padding: 5px 10px; font-size: 13px; cursor: pointer;
+  transition: border-color .18s ease, background .18s ease;
+}
+.model-chip:hover, .model-chip.open { border-color: var(--accent); background: var(--accent-soft); }
+.model-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-chip .chip-caret { font-size: 12px; opacity: .7; }
+.model-menu {
+  display: flex; flex-direction: column; gap: 2px;
+  max-width: 780px; margin: 0 auto 8px;
+  padding: 6px; border: 1px solid var(--line); border-radius: 16px;
+  background: var(--glass-strong); box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(1.5);
+  -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  animation: pop .14s ease-out;
+}
+.model-menu button {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 0; background: transparent; color: var(--text);
+  border-radius: 10px; padding: 10px 12px; font-size: 14px; cursor: pointer; text-align: left;
+}
+.model-menu button:hover { background: var(--bg-hover); }
+.model-menu button.current { color: var(--accent); font-weight: 600; }
+.model-menu .mm-sub { font-size: 12px; opacity: .65; flex: none; }
 .attach-tile {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);

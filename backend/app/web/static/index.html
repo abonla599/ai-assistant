@@ -85,6 +85,10 @@
           <div class="input-foot">
             <button type="button" class="icon-btn plus-btn" id="attachBtn" aria-label="添加附件" title="添加附件">＋</button>
             <span class="hint" id="statusHint"></span>
+            <!-- 快速切换模型芯片：点开就是可用模型清单，选一个立刻生效并同步
+                 服务端「我的默认」。hidden 是默认值——模型清单要等 /v1/models
+                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。 -->
+            <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
             <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
@@ -103,6 +107,10 @@
             </button>
           </div>
         </div>
+
+        <!-- 模型快切弹单：条目由 app.js 的 renderModelMenu 从 state.providers
+             现渲染。和附件菜单同款"让位层"：相机、附件打开时它自动收起。 -->
+        <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="选择模型"></div>
 
         <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
              accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->

@@ -1231,6 +1231,43 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
 
 
 
+def test_quick_model_switch_chip_is_wired_end_to_end():
+    """发送框旁的快速切换模型芯片：HTML 有位置、默认收起、点击走 Layers、
+    选择即写服务端「我的默认」——四段缺一半，功能就是假的。
+
+    这条锁钉的是跨文件契约（HTML 结构 × app.js 渲染 × API 封装），单看任何
+    一个文件都自洽，拼起来才成立，正是最容易在重构中被悄悄拆散的形状。
+    """
+    html = _html()
+    js = _js()
+    api = _js("api.js")
+
+    # 1) 芯片在输入脚、发送键之前，且默认 hidden（清单没回来前不许闪空芯片）
+    foot = html[html.index('class="input-foot"'):html.index("</form>")]
+    assert 'id="modelChip"' in foot, "芯片没放进输入脚"
+    assert foot.index('id="modelChip"') < foot.index('id="sendBtn"'), \
+        "芯片排到了发送键后面（与参考设计相反）"
+    chip_tag = re.search(r'<button[^>]*id="modelChip"[^>]*>', html).group(0)
+    assert "hidden" in re.search(r'class="([^"]*)"', chip_tag).group(1), \
+        "芯片默认可见：冷启动会闪一个没有名字的胶囊"
+    assert 'id="modelMenu"' in html, "弹单容器没进 HTML"
+
+    # 2) 渲染与切换：芯片随 renderModelSelect 一起刷，选择走服务端偏好
+    sel_body = _function_body(js, "renderModelSelect")
+    assert "renderModelChip()" in sel_body, "设置页下拉/清单刷新没带着芯片一起更新"
+    chip_body = _function_body(js, "renderModelChip")
+    assert "usable" in chip_body and "currentProvider()" in chip_body, \
+        "芯片没有按可用清单与当前口径渲染"
+    switch_body = _function_body(js, "switchModel")
+    assert "setMyDefaultProvider" in switch_body and "pref.provider" in switch_body, \
+        "切换没同步服务端「我的默认」或没落本机"
+    assert 'Layers.open("modelMenu"' in _function_body(js, "setModelMenu"), \
+        "弹单没走让位层栈（返回键会对不上界面）"
+
+    # 3) API 封装存在（前端调的名字必须真在 api.js 里）
+    assert "setMyDefaultProvider" in api
+
+
 def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
     """管理员专属控件靠一条属性（data-admin-only）+ JS 里一处统一收口，而不是散落的 if。
 
