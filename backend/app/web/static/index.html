@@ -184,8 +184,10 @@
             <div class="set-row">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h9l3 3v13H6V4Z"/><path d="M9 4v5h6"/></svg></span>
               <span class="set-lbl">上下文长度</span>
-              <span class="set-val"><b id="ctxVal">10</b> 条
-                <input type="range" id="ctxRange" min="2" max="40" step="2" value="10" aria-label="携带上下文条数"></span></div>
+              <!-- 2026-09-23：刻度从"条"换成 token（缩写 k）。条数让人以为
+                   上下文与内容无关，而模型真正吃得下的是 token——设置直接说 token。 -->
+              <span class="set-val"><b id="ctxVal">8</b>k
+                <input type="range" id="ctxRange" min="2" max="60" step="2" value="8" aria-label="上下文 token 预算（k）"></span></div>
             <button class="set-row" id="exportBtn">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></span>
               <span class="set-lbl">导出本次对话</span><span class="set-go">›</span></button>
