@@ -20,22 +20,33 @@ def _route_logs_to_file() -> None:
 
     这个 exe 是以隐藏窗口启动的，日志原本落在一条没人看的管道上，而开机自启那条
     快捷方式也不带重定向。那次"模型全挂、界面只说 Connection error."因此全程没有
-    服务端证据，只能靠界面文案反推。超过 1MB 先滚一份 .1，避免无人清理时越长越大。
+    服务端证据，只能靠界面文案反推。
+
+    两件事在这里一起办（2026-09-22 安全审查派单）：
+    - 轮转：超过 1MB 往后滚一份，最多留 3 份历史，无人清理时磁盘占用有上界；
+    - 脱敏：整个流被 RedactingStream 包住，服务商名/模型 id/上游 host 在
+      write 时就换掉，落盘即无明文——auth.log 那种"探测输出重定向留原件"的
+      泄露不再可能经由这条管道发生。
     """
     global _LOG_SINK
+    from app.core.logsanitizer import RedactingStream
     from app.core.paths import data_file
 
     path = data_file("BACKEND_LOG_PATH", "backend.log")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
-            os.replace(path, path + ".1")
-        _LOG_SINK = open(path, "a", buffering=1, encoding="utf-8")
+            for i in range(3, 1, -1):           # .2→.3, .1→.2，然后当前份升 .1
+                src = f"{path}.{i - 1}"
+                if os.path.exists(src):
+                    os.replace(src, f"{path}.{i}")
+            os.replace(path, f"{path}.1")
+        _LOG_SINK = RedactingStream(open(path, "a", buffering=1, encoding="utf-8"))
     except OSError as e:
         print(f"日志文件打不开，本次只往控制台输出：{e}")
         return
     sys.stdout = sys.stderr = _LOG_SINK
-    print(f"[启动] 日志落在 {path}")
+    print(f"[启动] 日志落在 {path}（已启用落盘脱敏与多代轮转）")
 
 
 if __name__ == "__main__":

@@ -22,14 +22,17 @@ class ReActAgent:
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = None,
         max_turns: int = 10,
         verbose: bool = True
     ):
         """
         初始化ReAct智能体
         Args:
-            model: 使用的LLM模型
+            model: provider id（或旧式模型名）；留空 = 用setDefault的那份配置。
+                这里原先默认写死 "deepseek-chat"：`get_llm_response` 会把它当
+                legacy_model 去 resolve，本机没配这个名字时确实会退回默认，
+                但"碰巧被上游兜住"不等于这里没写死一个服务商名。
             max_turns: 最大思考-行动轮次
             verbose: 是否打印详细日志
         """
@@ -42,7 +45,8 @@ class ReActAgent:
         self,
         task: str,
         context: Optional[List[Dict[str, str]]] = None,
-        max_duration: int = 120
+        max_duration: int = 120,
+        user_id: str = None
     ) -> str:
         """
         执行任务的主方法
@@ -50,6 +54,8 @@ class ReActAgent:
             task: 任务描述
             context: 可选的上下文消息列表
             max_duration: 最大执行时间（秒），默认120秒
+            user_id: 这次运行属于谁。needs_user 类工具（读日程/读记忆）由执行器
+                用这个值覆盖模型给的参数；不传的话这些工具只能落在 default_user 上
         Returns:
             最终答案字符串
         """
@@ -116,9 +122,13 @@ class ReActAgent:
             
             if tool_calls:
                 # --- 3. 执行工具调用（Action） ---
-                for tool_call in tool_calls:
+                # 带序号枚举：一轮里若解析出多个调用，原先的 id 全是
+                # f"call_{turn}"，assistant.tool_calls 与 tool.tool_call_id
+                # 两两撞车——这条消息历史再发给任何 OpenAI 兼容上游都是非法形状。
+                for call_idx, tool_call in enumerate(tool_calls):
                     tool_name = tool_call["name"]
                     tool_args = tool_call.get("arguments", {})
+                    call_id = f"call_{turn}_{call_idx}"
                     
                     if self.verbose:
                         print(f"[ReActAgent] 🔧 调用工具: {tool_name}")
@@ -126,7 +136,7 @@ class ReActAgent:
                     
                     # 执行工具
                     try:
-                        tool_result = execute_tool(tool_name, tool_args)
+                        tool_result = execute_tool(tool_name, tool_args, user_id=user_id)
                         if self.verbose:
                             print(f"[ReActAgent] ✅ 工具结果: {str(tool_result)[:200]}...")
                     except Exception as e:
@@ -140,7 +150,7 @@ class ReActAgent:
                         "role": "assistant",
                         "content": None,
                         "tool_calls": [{
-                            "id": f"call_{turn}",
+                            "id": call_id,
                             "type": "function",
                             "function": {
                                 "name": tool_name,
@@ -152,7 +162,7 @@ class ReActAgent:
                     # 添加工具返回结果
                     messages.append({
                         "role": "tool",
-                        "tool_call_id": f"call_{turn}",
+                        "tool_call_id": call_id,
                         "content": str(tool_result)
                     })
             else:

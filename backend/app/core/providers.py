@@ -193,6 +193,7 @@ class ProviderStore:
                         p["api_key"] = self._keys.get(p["id"], "")
                     if migrated:
                         self._flush()
+                    self._register_log_terms()
                     return
             except (ValueError, OSError) as e:
                 backup = self.path + ".corrupt"
@@ -207,6 +208,18 @@ class ProviderStore:
             self._flush()
             print(f"ℹ️ 已从 .env 初始化 {len(self._items)} 个模型服务配置")
 
+    def _register_log_terms(self):
+        # 服务商名/模型 id/上游 host 一旦进过配置，就不许再明文进日志：登记进
+        # logsanitizer，之后所有落盘输出统一打码。判据见 app/core/logsanitizer.py。
+        from urllib.parse import urlparse
+        from app.core import logsanitizer
+        for p in self._items:
+            logsanitizer.register(p.get("model", ""))
+            logsanitizer.register(p.get("label", ""))
+            host = urlparse(p.get("base_url", "") or "").hostname
+            if host:
+                logsanitizer.register(host)
+
     def _flush(self):
         # 调用方都持着 self._lock（_load 在构造期单线程）。写记录时把 api_key 整个剔掉，
         # 留空字段比删字段更糟：下一个读这份文件的人会以为值在这儿。
@@ -215,6 +228,7 @@ class ProviderStore:
                                        for p in self._items])
         self._keys = {p["id"]: p.get("api_key", "") for p in self._items if p.get("api_key")}
         _write_json_atomic(self.keys_path, self._keys)
+        self._register_log_terms()
 
 
     # ---- 查询 ----
