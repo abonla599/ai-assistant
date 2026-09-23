@@ -72,6 +72,11 @@ class SessionStore:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._sessions, f, ensure_ascii=False, indent=2)
+            # os.replace 只保证原子替换，不保证落盘：写完还在页缓存里，断电/蓝屏
+            # 就丢，而 watchdog 会自动拉起，风险更实在。先 flush 到 OS、再 fsync
+            # 到磁盘，然后才 replace。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
     @staticmethod

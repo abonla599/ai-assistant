@@ -186,7 +186,18 @@ class ChatPipeline:
                     msgs.append(msg.model_dump())
                     for tool_call in msg.tool_calls:
                         name = tool_call.function.name
-                        args = json.loads(tool_call.function.arguments)
+                        # 模型吐出残缺 JSON 参数很常见，这不该炸掉整轮对话：解析
+                        # 错误按"工具结果"回填，让模型自己重试或换路——原来这行在
+                        # 内层 try 之外，一次坏参数 = /v1/chat 502，本轮全丢。
+                        try:
+                            args = json.loads(tool_call.function.arguments)
+                        except (ValueError, TypeError) as e:
+                            msgs.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": f"工具参数解析失败（不是合法 JSON）: {e}",
+                            })
+                            continue
                         print(f"[Pipeline] 调用工具: {name}({args})")
                         try:
                             result = execute_tool(name, args, user_id=self.user_id)

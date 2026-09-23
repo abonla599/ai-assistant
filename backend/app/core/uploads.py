@@ -31,6 +31,10 @@ from app.session.session_store import SessionStore
 MAX_TEXT_BYTES = 1 * 1024 * 1024          # 文本/代码 1MB
 MAX_IMAGE_BYTES = 10 * 1024 * 1024        # 图片 10MB
 MAX_DOC_BYTES = 10 * 1024 * 1024          # 文档类按原始体积计，解析后转文本再截断
+# 字节流进内存前的硬上限：save() 里按 kind 分档的校验发生在**整blob已读进内存**
+# 之后，谁都能用一个任意文件名把进程顶掉内存。读满 max(三档)+1 字节就拒收，
+# 上限以内的文件仍按 save() 原有的分档口径逐类判定，行为不变。
+MAX_UPLOAD_BYTES = max(MAX_TEXT_BYTES, MAX_IMAGE_BYTES, MAX_DOC_BYTES)
 MAX_INJECT_CHARS = 20000                  # 注入模型的文本上限，防止长文件撑爆上下文
 
 TEXT_EXTS = {".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
@@ -242,6 +246,9 @@ class UploadStore:
         tmp = self.index_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._index, f, ensure_ascii=False, indent=2)
+            # replace 原子不等于落盘：fsync 之后 replace，断电才丢不了索引。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.index_path)
 
     def save(self, filename: str, blob: bytes, claimed_mime: str = "",

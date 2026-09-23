@@ -54,7 +54,19 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> str:
         return ToolResponse(False, error=f"未知工具: {tool_name}", hint="使用 help 工具查看可用工具列表").to_string()
     info = tools_registry[tool_name]
     func = info["function"]
-    kwargs = dict(arguments)
+    # 模型偶尔会给出数组/字符串当参数。原写法 dict(arguments) 在这一支会直接炸
+    # 出 TypeError（还在 try 之外）；这里按同样的口径给出结构化的"参数错误"。
+    if not isinstance(arguments, dict):
+        return ToolResponse(False, error="参数错误: arguments 必须是对象",
+                            hint="请检查工具参数是否正确").to_string()
+    # 只放行 schema 里声明过的参数。函数签名上的形参（比如 execute_code 的
+    # max_retries）模型一律不许给——否则传个 max_retries=100 就能串行拉起
+    # 上百个容器。schema 是模型能碰的唯一契约。
+    schema_props = (info.get("parameters") or {}).get("properties") or {}
+    kwargs = {k: v for k, v in arguments.items() if k in schema_props}
+    dropped = [k for k in arguments if k not in schema_props]
+    if dropped:
+        print(f"[Tools] {tool_name} 收到 schema 外的参数 {dropped}，已丢弃")
     if info.get("needs_user"):
         if not (user_id or "").strip():
             return ToolResponse(False, error="缺少身份：这条工具只查得到某个具体人的数据",

@@ -389,18 +389,24 @@ class _LockProbe:
 
 
 def test_username_dedup_check_happens_inside_the_lock(tmp_path, monkeypatch):
-    """查重与写入之间让出锁，两个人就能同时通过"这名字没人用"，后一个覆盖前一个。"""
+    """查重与写入之间让出锁，两个人就能同时通过"这名字没人用"，后一个覆盖前一个。
+
+    2026-09-23 修"锁内 bcrypt 冻事件循环"时把慢哈希挪到了锁外，于是这条用例的
+    探针点（hash_password）不再处于临界区。契约本身没变，变的是探针该钉在哪：
+    换成 _new_user_id——它原先就夹在"查重"与"落库"中间同一拍执行，观测强度
+    与旧探针一致：谁把这一段挪出临界区，这里就红。
+    """
     store = AuthStore(path=str(tmp_path / "users.json"))
     probe = _LockProbe()
     store._lock = probe
     held = []
-    real_hash = auth_module.hash_password
+    real_new_id = auth_module.AuthStore._new_user_id
 
-    def spy_hash(pw):
+    def spy_new_id(self_):
         held.append(probe.held)
-        return real_hash(pw)
+        return real_new_id(self_)
 
-    monkeypatch.setattr(auth_module, "hash_password", spy_hash)
+    monkeypatch.setattr(auth_module.AuthStore, "_new_user_id", spy_new_id)
     store.register(username="甲", password=PW)
     assert held and all(held), "注册必须在临界区内既查重又落库"
 

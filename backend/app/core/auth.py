@@ -257,6 +257,10 @@ class AuthStore:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._users, f, ensure_ascii=False, indent=2)
+            # replace 原子不等于落盘：身份库丢一次重写就是全员锁死，必须
+            # flush + fsync 之后再 replace。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
     # ---------- 用户 ----------
@@ -326,37 +330,42 @@ class AuthStore:
         历史数据与测试都靠"一条不给"这条走路。但只要给，就必须给满三条：半套
         凭据比没有更糟——界面会以为能自助，走到第二步才发现答不上来。
         """
-        with self._lock:
-            cleaned = self._normalize_username(username)
-            pw = self._check_password_shape(password)
-            keys = None
-            if security_answers is not None:
-                keys = _check_answer_shapes(security_answers)
+        # 形状校验与慢哈希全部挪到锁外：这把锁与鉴权中间件的 resolve/has_role
+        # 共用，bcrypt 一枚要几百毫秒，锁内计算等于把整个事件循环（连同所有
+        # SSE 流）冻住那么久。哈希结果与"用户名是否已存在"无关，提前算不泄漏
+        # 任何新信道——失败分支只会更慢，不会更快。
+        cleaned = self._normalize_username(username)
+        pw = self._check_password_shape(password)
+        keys = None
+        if security_answers is not None:
+            keys = _check_answer_shapes(security_answers)
+        pw_hash = hash_password(pw)
+        # 答案与密码同一个慢哈希：它往往是个能猜的地名，熵比密码还低。
+        answer_hashes = [hash_password(k) for k in keys] if keys is not None else None
 
-            lc = cleaned.casefold()
+        lc = cleaned.casefold()
+        with self._lock:
             if any(u.get("username_lc") == lc for u in self._users.values()):
                 raise AuthError("该用户名已存在", taken=True)
 
-            user_id = self._new_user_id()
             record = {
-                "user_id": user_id,
+                "user_id": self._new_user_id(),
                 "username": cleaned,
                 "username_lc": lc,
-                "pw_hash": hash_password(pw),
+                "pw_hash": pw_hash,
                 "tokens": [],
                 "role": "user",
                 "disabled": False,
                 "created_at": _now(),
                 "last_used_at": _now(),
             }
-            if keys is not None:
-                # 答案与密码同一个慢哈希：它往往是个能猜的地名，熵比密码还低。
+            if answer_hashes is not None:
                 # 问题本身不进库——它是全站那三句常量。
-                record["answer_hashes"] = [hash_password(k) for k in keys]
-            self._users[user_id] = record
+                record["answer_hashes"] = answer_hashes
+            self._users[record["user_id"]] = record
             token = self._issue_token(record)
             self._flush()
-        return Principal(user_id=user_id, username=cleaned, role="user"), token
+        return Principal(user_id=record["user_id"], username=cleaned, role="user"), token
 
     def login(self, username: str, password: str):
         """校验用户名与密码，成功则追加一枚会话令牌。
@@ -372,11 +381,19 @@ class AuthStore:
             # 旧模型留下的账号没有 pw_hash，也要走同一份假摘要：否则"有这个人但
             # 没密码"会比"有这个人且密码错"快一截，时序又漏了信息。
             stored = (record or {}).get("pw_hash") or _DUMMY_PW_HASH
-            if not _check_password(password, stored):
-                raise AuthError(_LOGIN_FAIL)
-            if record.get("disabled"):
+        # bcrypt 挪出锁（与 register 同一条理由）：锁内只留两个字符串读取，慢哈希
+        # 在锁外跑，鉴权中间件不再被登录请求冻在事件循环上。
+        ok = _check_password(password, stored)
+        if not ok:
+            raise AuthError(_LOGIN_FAIL)
+        with self._lock:
+            # 出锁的这段时间里状态可能变了：发令牌前重读，鉴权不建立在过期快照上。
+            record = next((u for u in self._users.values()
+                           if u.get("username_lc") == want), None)
+            if record is None or record.get("disabled"):
                 # 停用与密码错也说同一句话：告诉调用方"这个账号被停用了"等于
-                # 让任何人确认账号存在、并知道该去找谁求情。
+                # 让任何人确认账号存在、并知道该去找谁求情。查无此人同样走这句，
+                # 而且三支都已经在锁外付过一次 bcrypt 的耗时。
                 raise AuthError(_LOGIN_FAIL)
             token = self._issue_token(record)
             record["last_used_at"] = _now()
@@ -405,27 +422,42 @@ class AuthStore:
         with self._lock:
             record = next((u for u in self._users.values()
                            if u.get("username_lc") == want), None)
+            user_id_at_read = (record or {}).get("user_id")
             # 查无此人与没留答案都补齐成 ANSWER_COUNT 枚 dummy：比对的条数与耗时
             # 都不随人变，否则"这一次回得快一点"本身就是一份用户名名单。
-            digests = ((record or {}).get("answer_hashes") or []) \
+            digests = list((record or {}).get("answer_hashes") or []) \
                 + [_DUMMY_PW_HASH] * ANSWER_COUNT
-            # 显式循环，不是 any/all 生成式：三条 bool 必须先全算完再判。早退一处，
-            # "第几题猜对了"就漏进耗时里，三题变成三份互相独立的预算。
-            results = []
-            for index, key in enumerate(keys):
-                results.append(_check_password(key, digests[index]))
-            # 查无此人与没留答案也归到同一句 RESET_FAIL——挪到循环之前判断，就是给
-            # 它们开一条"秒回"的快路径。all() 之后仍要判这两条：dummy 摘要理论上
-            # 会被 "timing-equalizer" 这个答案撞中，只靠 all() 不够硬。
-            if not all(results) or record is None or not record.get("answer_hashes"):
+        # bcrypt 全部在锁外算（与 register/login 同一条理由）。显式循环，不是
+        # any/all 生成式：三条 bool 必须先全算完再判。早退一处，"第几题猜对了"
+        # 就漏进耗时里，三题变成三份互相独立的预算。
+        results = []
+        for index, key in enumerate(keys):
+            results.append(_check_password(key, digests[index]))
+        # 新密码/新答案的慢哈希也提前算好——成功才哈希的原写法会把 bcrypt 留在
+        # 锁内；失败分支多付一次哈希只会更慢，不产生新的可区分信道。
+        new_pw_hash = hash_password(pw)
+        new_answer_hashes = ([hash_password(k) for k in replacement]
+                             if replacement is not None else None)
+        # 查无此人与没留答案也归到同一句 RESET_FAIL——挪到循环之前判断，就是给
+        # 它们开一条"秒回"的快路径。all() 之后仍要判这两条：dummy 摘要理论上
+        # 会被 "timing-equalizer" 这个答案撞中，只靠 all() 不够硬。
+        if not all(results):
+            raise AuthError(RESET_FAIL, charge=True)
+        with self._lock:
+            # 出锁期间账号可能被删除或以同名重建：重读并要求还是同一个人，
+            # 不把答案校验的通过结果落到一条换过的记录上。
+            record = next((u for u in self._users.values()
+                           if u.get("username_lc") == want), None)
+            if (record is None or not record.get("answer_hashes")
+                    or record.get("user_id") != user_id_at_read):
                 raise AuthError(RESET_FAIL, charge=True)
             if record.get("disabled"):
                 # 停用与答案错也说同一句话：告诉调用方"这个账号被停用了"等于让
                 # 任何人确认账号存在、并知道该去找谁求情。
                 raise AuthError(RESET_FAIL, charge=True)
-            record["pw_hash"] = hash_password(pw)
-            if replacement is not None:
-                record["answer_hashes"] = [hash_password(k) for k in replacement]
+            record["pw_hash"] = new_pw_hash
+            if new_answer_hashes is not None:
+                record["answer_hashes"] = new_answer_hashes
             record["tokens"] = []
             record["last_used_at"] = _now()
             self._flush()

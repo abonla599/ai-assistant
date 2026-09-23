@@ -127,6 +127,9 @@ def _write_unlocked() -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        # replace 原子不等于落盘：fsync 之后 replace，重启恢复才有真材实料。
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 

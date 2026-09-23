@@ -45,6 +45,10 @@ def _write_all(path: str, rows: list) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(rows, f, ensure_ascii=False, indent=2)
+            # 原子替换不等于落盘：不 fsync 的话断电就丢最后一批反馈，replace
+            # 却已经"成功"了。flush 到 OS、fsync 到磁盘，再 replace。
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         # 替换失败时临时文件会留在数据目录里，下次看见还以为是份数据
