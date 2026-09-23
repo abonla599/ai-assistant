@@ -91,12 +91,17 @@ const CHECKS = [
 ];
 
 function render() {
+  // r.line 里混着上游响应的原文（finish 字段、错误响应体片段），而本页的
+  // base/model 是故意允许任意填写的：不转义直接拼进 innerHTML，一个恶意
+  // 供应商就能在本域（ai.fenever.xyz）内执行脚本，够到页面上内存里的 key。
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   $("results").innerHTML = CHECKS.map(([k, name, note]) => {
     const r = state.rows.find((x) => x.k === k);
     const cls = !r ? "wait" : (r.ok ? "ok" : "no");
     const mark = !r ? "○" : (r.ok ? "✔" : "✘");
     return `<div class="t ${cls}">${mark} <strong>${k}. ${name}</strong>` +
-           `<div class="n">${r ? r.line : note}</div></div>`;
+           `<div class="n">${r ? esc(r.line) : note}</div></div>`;
   }).join("");
   const head = "直连探测报告 " + state.at + "\n" +
                "UA: " + state.ua + (state.webview ? "（识别为安卓 WebView）" : "") + "\n" +

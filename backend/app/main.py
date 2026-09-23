@@ -310,7 +310,8 @@ def release_latest(have: str = None):
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)
-from app.core.uploads import store as upload_store, build_user_content, UploadError
+from app.core.uploads import (store as upload_store, build_user_content,
+                              UploadError, MAX_UPLOAD_BYTES)
 
 
 def _fail_reason(e: BaseException) -> str:
@@ -779,7 +780,14 @@ def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
 @app.post("/v1/uploads")
 def upload_attachment(file: UploadFile = File(...),
                             principal: Principal = CurrentPrincipal):
-    blob = file.file.read()
+    # 先读满硬上限+1 字节再判，而不是裸 read() 全量进内存：save() 的分档体积校验
+    # 在拿到完整 blob 之后才跑，挡不住"先把你内存打爆"。read(n) 对 SpooledTemporaryFile
+    # 只多要一字节用于判超限，正常文件行为与原来逐字节一致。
+    blob = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过单次上传上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
     try:
         record = upload_store.save(file.filename or "unnamed", blob,
                                    file.content_type or "", owner=principal.user_id)
