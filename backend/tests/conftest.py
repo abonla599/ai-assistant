@@ -150,6 +150,11 @@ def _isolated_throttle():
 
     for ledger, _window in _LEDGERS:
         ledger.clear()
+    # APK 代取那本不在 _LEDGERS 里（它在 web_router，窗口/上限都不同），但它同样是
+    # 跨用例的进程内状态：不清的话，任何多点几次下载的用例会把 127.0.0.1 这一个
+    # 来源攒到 429，饿死后面真点按钮的用例。加新闸门时这里跟着长。
+    from app.web import web_router
+    web_router._APK_DOWNLOADS.clear()
     yield
 
 
