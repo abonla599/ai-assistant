@@ -79,6 +79,18 @@ _RESETS = defaultdict(list)
 # 别把这段再读成"那本会被成功清、这本不会"。
 _RESET_FAILS = defaultdict(list)
 
+# 账号维度的找回失败账（审查 #6，2026-09-23）：_RESET_FAILS 按来源 IP 记账，
+# 而三题是全站固定的低熵常量（手机号后四位只有 10^4 种）——换得起 IP 的人
+# （NAT 后、秒拨代理）对**同一个账号**可以无限猜。这本按"被猜的账号"计，
+# 窗口与上限沿用 FAILURE_WINDOW_SECONDS / MAX_FAILURES_PER_WINDOW。
+# 两条口径说清楚：
+# ① 查无此人的失败同样记进它名下那个键——与存储层"同一句话、同一格预算"对齐，
+#    于是"这个用户名锁不锁"对任何账号都一样，429 不泄露"这号存在吗"。
+# ② 代价如实认： Anyone 用 10 次错答案就能把真号主的自助找回挡 10 分钟
+#    （找回锁不碰登录，管理员也能人工解）。低熵三题下"能被猜"比"能被锁"更先
+#    发生，所以这笔交换是划算的。
+_RESET_FAILS_BY_ACCOUNT = defaultdict(list)
+
 # 每本账配自己的窗口：_prune 是内存闸门，拿十分钟那把尺子去过 24 小时那两本，就是
 # 在来源数超过 4096 时把整桶有效记录提前丢掉——配额被悄悄放宽，是一条 fail-open。
 # 这份元组同时是"账本有哪几本"的唯一清单：新加一本忘了加进来，就是只胀不收。
@@ -98,6 +110,7 @@ _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_REGISTERS, REGISTER_WINDOW_SECONDS),
             (_RESETS, RESET_WINDOW_SECONDS),
             (_RESET_FAILS, FAILURE_WINDOW_SECONDS),
+            (_RESET_FAILS_BY_ACCOUNT, FAILURE_WINDOW_SECONDS),
             (_CHATS, CHAT_WINDOW_SECONDS))
 
 
@@ -161,6 +174,25 @@ def _note_failure(ip: str) -> None:
 
 def _note_reset_failure(ip: str) -> None:
     _RESET_FAILS[ip].append(_now())
+
+
+def _reset_account_key(username: str) -> str:
+    """账号键与库里 username_lc 同一套归一（strip + casefold），截断到 64 字符：
+    键来自免凭据的裸输入，不给它一个尺寸上限，光靠往字典里塞超长键就能把内存吃掉。
+    """
+    return (username or "").strip().casefold()[:64]
+
+
+def _reset_account_throttled(username: str) -> bool:
+    moment = _now()
+    _prune(moment)
+    return (len(_recent(_RESET_FAILS_BY_ACCOUNT, _reset_account_key(username),
+                        FAILURE_WINDOW_SECONDS, moment))
+            >= MAX_FAILURES_PER_WINDOW)
+
+
+def _note_reset_failure_account(username: str) -> None:
+    _RESET_FAILS_BY_ACCOUNT[_reset_account_key(username)].append(_now())
 
 
 def _registrations_full(ip: str) -> bool:
@@ -325,18 +357,20 @@ def reset(req: ResetRequest, request: Request):
     一句抄来的话开一条免凭据信道。答案与新密码**一次提交**——分开验答案就等于给
     外人一个 oracle。
 
-    这个端点只看**两本**账，顺序是先猜错、后猜中：_RESET_FAILS 挡"一直在猜"，
-    _RESETS 挡"已经猜中过几次"。第三本 _FAILS（登录与注册共用的失败账）它既不看不写，
+    这个端点看**三本**账，顺序是先猜错、后猜中：_RESET_FAILS（按 IP）挡
+    "同一来源一直在猜"，_RESET_FAILS_BY_ACCOUNT（按被猜的账号）挡"换个来源接着猜
+    同一个人"——三题低熵，IP 维度的预算对秒拨/共享 NAT 不构成上限（2026-09-23 审查 #6）；
+    _RESETS 挡"已经猜中过几次"。第四本 _FAILS（登录与注册共用的失败账）它既不看不写，
     猜错的格子也刻意不记到那本上：猜口令与猜三题是两种不同的猜测面，共用一格预算时前者
     会把后者顶满，而 429 落在哪本账上得能从 Retry-After 里读出来（为什么单独一册，见
-    _RESET_FAILS 上面那一段）。
+    _RESET_FAILS 上面那一段；三本找回账的 Retry-After 同为十分钟，不互相泄露信息）。
     反过来同样不通融：改密成功只往 _RESETS 记一格，**不清**任何失败账——三题的文本和
     常见答案组合本来就是公开的，猜中一次恰恰说明来路不明的那一面还没排除。
     （这一段以前还写着"因为 _FAILS 会在登录或注册成功时被清空"：终审 F3 把那两处
     `_FAILS.pop(ip)` 删了，现在两本账任何成功都不还。）
     """
     ip = _client_ip(request)
-    if _reset_throttled(ip):
+    if _reset_throttled(ip) or _reset_account_throttled(req.username):
         raise _too_many(FAILURE_WINDOW_SECONDS)
     if _resets_full(ip):
         raise _too_many(RESET_WINDOW_SECONDS)
@@ -349,7 +383,10 @@ def reset(req: ResetRequest, request: Request):
             # 判的是存储层带上来的显式标记，不是 e.reason 等于哪句文案——文案是会说、
             # 会换的，预算不该挂在它上面（锁：
             # test_the_reset_billing_follows_the_flag_not_the_wording）。
+            # 计费同时记两本：来源一本、被猜的账号一本（查无此人记在它名下那个键上，
+            # 锁不锁对任何用户名一律，429 就不泄露"这号存在吗"）。
             _note_reset_failure(ip)
+            _note_reset_failure_account(req.username)
             raise HTTPException(status_code=401, detail=e.reason)
         # 新密码或轮换答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
         # 改好的，不计费
