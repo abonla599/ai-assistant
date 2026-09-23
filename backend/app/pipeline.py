@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 from app.core.providers import store, build_client
 from app.core import usage   # 账本：与流式那一条同一个口径，别各记一套
 from app.core import schedule   # "今天"的口径：见 _today_line
+from app.core.buildinfo import build_version   # 本部署是哪个版本：见 _env_line
 # 复用 memory_router 已选定的后端单例：本模块此前自行 new 了第二个 MemoryManager，
 # 导致同进程两个 ChromaDB 客户端开同一个库，且测试时会绕过假存储写进真实记忆库。
 from app.memory.memory_router import memory_manager
@@ -34,6 +35,20 @@ def _today_line() -> str:
     """
     day = schedule.today()
     return f"今天是 {day} {schedule.weekday_of(day)}。"
+
+
+def _env_line() -> str:
+    """告诉模型它运行在什么环境里、这套部署是哪个版本。
+
+    为什么要有：与 _today_line 同一类洞——模型此前收不到任何关于"自己是谁、住在
+    哪"的事实，被问到「这个软件版本号多少」「你知道自己在哪个应用里吗」只能凭
+    训练语料猜或答不知道。版本号唯一来源是构建戳 version.txt（app.core.buildinfo），
+    这里绝不自造第二个事实来源；取不到就如实说"未登记"，宁缺毋假。
+    """
+    ver = build_version()
+    shown = ver if ver else "未登记（构建时未带版本戳）"
+    return (f"你运行在「AI 助手」应用内，对话由它的后端服务转发；当前服务端版本：{shown}。"
+            "被问到这个应用本身、它运行在哪个软件里或它的版本号时，以此为准。")
 
 
 class ChatPipeline:
@@ -105,6 +120,9 @@ class ChatPipeline:
         # 少这一句的代价线上付过一次：没有"今天"当锚点，"2027 年简章"这种问题模型
         # 既换算不出年份，也无从判断该不该去搜。
         self._append_system(messages, _today_line())
+        # 环境锚点紧跟日期：它和记忆/偏好一样是"附加说明"，不许挤掉日期那句的
+        # 首位（test_today_context 锁的就是首段必须是"今天是 …"）。
+        self._append_system(messages, _env_line())
 
         try:
             if self.memory is not None:
