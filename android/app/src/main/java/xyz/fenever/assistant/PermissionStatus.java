@@ -1,5 +1,6 @@
 package xyz.fenever.assistant;
 
+import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -20,13 +21,30 @@ final class PermissionStatus {
     private PermissionStatus() {}
 
     /**
-     * Android 13+ 要运行时授权；13 以下它是清单里的普通权限。不分版本判断反而两版都对：
-     * 33 以下 {@code POST_NOTIFICATIONS} 压根不是运行时权限，而清单里声明过的权限
-     * {@code checkSelfPermission} 直接回 GRANTED。
+     * 「到点这一响，通知到底发得出去吗」——两问合一，只在这里问一次。
+     *
+     * <p>第一问是运行时权限：Android 13+ 要授权；13 以下它是清单里的普通权限，不分版本
+     * 判断反而两版都对——33 以下 {@code POST_NOTIFICATIONS} 压根不是运行时权限，而清单里
+     * 声明过的权限 {@code checkSelfPermission} 直接回 GRANTED。
+     *
+     * <p>但「权限给了」不等于「通知发得出去」：用户可以在系统设置里把本应用的通知总开关
+     * 关掉，这在 13+ 上不一定反映到 {@code checkSelfPermission}（那是安装期就有的开关，
+     * 运行时权限只回答"该不该问都不问就拦下"），13 以下更是压根查不到这一层。
+     * {@code areNotificationsEnabled()} 是唯一一个跨所有版本都问对的接口——它同时覆盖
+     * 「权限没给」和「总开关关了」两种情况。第二问从这里开始必须有，不然 Android 12
+     * 及以下的设备上，总开关关了这里照样回"已授权"，到点 {@code notify()} 被系统吞掉，
+     * {@code markFired} 却照样记一笔"发出"——正是这一版要消灭的那个反方向说谎。
      */
     static boolean notificationsGranted(Context context) {
-        return context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                == PackageManager.PERMISSION_GRANTED;
+        if (context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return true;                 // 23 没有 areNotificationsEnabled() 这个问法
+        }
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        return manager != null && manager.areNotificationsEnabled();
     }
 
     /**

@@ -176,12 +176,12 @@ public class ReminderStoreTest {
     }
 
     /**
-     * 对象不在表里了也能标——这是 {@code once} 的真实时序。
+     * 对象已经不在表里了，也要能安全地标记——这是一条防御性要求，不是对真实调用时序的
+     * 描述（{@code ReminderReceiver} 实际是"先记账再推进"，见 {@code markFired} 的注释；
+     * 这里故意反着调用，模拟的是"万一顺序变了，或者手里这个引用本来就是旧的"）。
      *
-     * <p>接收器先 {@code notify} 再 {@code advance}，而 {@code advance} 对 {@code once}
-     * 就是删除。所以"记一笔 firedAt"发生在对象已经被摘出列表之后：只改手里这个对象、
-     * 不重新入表（那会让删掉的提醒复活），也正因为这样，这一次标记落不落盘都不影响
-     * 正确性，但它不许抛、更不许把整条通知流程带崩。
+     * <p>不管对象在不在表里，标记只改手里这个对象、绝不重新入表（那会让删掉的提醒复活）；
+     * 落不落盘在这个场景下不影响正确性，但它不许抛、更不许把整条通知流程带崩。
      */
     @Test public void markingARemovedReminderResurrectsNothing() {
         MemIo io = new MemIo();

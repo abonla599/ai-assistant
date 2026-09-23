@@ -255,18 +255,45 @@ def test_bridge_advertises_the_two_permissions_the_status_row_depends_on():
 
 
 def test_a_silent_drop_and_a_fired_reminder_both_leave_a_trace():
-    """到点这一支必须留下证据：发出去了记 firedAt，发不出去记 missed。
+    """到点这一支必须留下证据、且两支都照常推进排期：发出去了记 firedAt，发不出去记 missed。
 
     以前通知没授权时 ReminderReceiver 直接 return、一笔不记，于是"设过的提醒从来没响过"
     在屏幕上读不出来——用户只能在手机上翻系统设置猜。这一条锁的是"两支都记账"这个形状，
     特别是**没有**只剩一句 return 的那一支。
+
+    <p>另一头，没授权那一支以前只记一笔 missed 就 return，不 advance 也不重排——看着像
+    "既然没响成就不该改用户的排期"，实际是把一次性的闹钟消费掉之后再也不排第二轮：
+    daily/weekly 从此变成列表里看得见、重启不管（BootReceiver 只重排 at > now）、授权恢复
+    也不会再响的孤儿，once 更会被别的提醒的每一次广播重复计一笔 missed。现在两支共用同一套
+    骨架，唯一区别就是有没有 notify()——这一条把"没有 notify 的那一支也必须 advance +
+    重排"钉死。
     """
     recv = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ReminderReceiver.java")
     at = recv.index("notificationsGranted")
     block = recv[at:recv.index("\n        }", at)]
     assert "markMissed" in block, f"没授权那一支没记 missed（它又变回静默 return 了）：{block}"
+    assert "advance(r, now)" in block, f"没授权那一支没推进排期，daily/weekly 会变成永久孤儿：{block}"
+    assert "ReminderScheduler.schedule" in block, f"没授权那一支没给 daily/weekly 重排：{block}"
+    assert "notify(manager" not in block, "没授权那一支不该发通知，这是两支唯一的区别"
     assert "markFired" in recv, "发出去的那一支没记 firedAt"
     assert "notify(manager" in recv, "发通知那一支整条不见了：上面两条断言在空转"
+
+
+def test_notification_permission_check_also_covers_the_master_switch():
+    """notificationsGranted 必须同时问"运行时权限"和"通知总开关"，只问前者是半句谎。
+
+    checkSelfPermission 在 Android 13 以下恒回 GRANTED（那条权限压根不是运行时权限），
+    13 以上也只回答"该不该拦"，不回答"用户后来在系统设置里有没有把本应用的通知关掉"。
+    areNotificationsEnabled() 是唯一跨版本都问对的那一个——漏了它，23–32 上总开关关了
+    这一层还是查不出来，到点 notify() 被系统吞掉，markFired 却照样记"发出"，屏幕上
+    "上次发出 xx:xx"就是一次反着说谎。
+    """
+    src = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "PermissionStatus.java")
+    at = src.index("static boolean notificationsGranted")
+    block = src[at:src.index("\n    }", at)]
+    assert "checkSelfPermission" in block, "运行时权限那一问不能丢：Android 13+ 弹框问的就是它"
+    assert "areNotificationsEnabled" in block, \
+        "只问 checkSelfPermission：13 以下恒真、总开关关了也查不出，这是半个判定"
 
 
 def test_the_bridge_exposes_exactly_the_methods_the_page_calls():
