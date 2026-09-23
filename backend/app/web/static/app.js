@@ -696,6 +696,63 @@ function renderModelSelect() {
     sel.appendChild(opt);
   });
   sel.value = pref.provider;
+  renderModelChip();
+}
+
+/* ---------------- 发送框旁的快速切换模型 ----------------
+ * 芯片显示"当前会用哪个"（currentProvider 口径，与发送时真正用的一致），
+ * 点开是纵向弹单：只列 usable 的，标出「共享/我的模型」，当前项打 ✓。
+ * 选择即生效：本机 pref.provider 立刻换，服务端「我的默认」同步写一份
+ * （存失败不反悔——localStorage 仍是这台设备的答案，与设置页下拉同一口径）。 */
+function renderModelChip() {
+  const usable = state.providers.filter((p) => p.usable);
+  const chip = $("modelChip");
+  if (!usable.length) {
+    hideModelMenu();
+    chip.classList.add("hidden");
+    return;
+  }
+  chip.classList.remove("hidden");
+  const cur = currentProvider();
+  $("modelChipName").textContent = cur ? cur.name : "选择模型";
+  const menu = $("modelMenu");
+  menu.innerHTML = "";
+  usable.forEach((p) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    const isCur = !!cur && p.id === cur.id;
+    if (isCur) b.classList.add("current");
+    const name = document.createElement("span");
+    name.textContent = (isCur ? "✓ " : "") + p.name;
+    const sub = document.createElement("span");
+    sub.className = "mm-sub";
+    sub.textContent = p.shared ? "共享" : "我的模型";
+    b.append(name, sub);
+    b.onclick = () => switchModel(p.id);
+    menu.appendChild(b);
+  });
+}
+
+function switchModel(id) {
+  setModelMenu(false);
+  if (id === pref.provider) return;
+  pref.provider = id;
+  API.setMyDefaultProvider(id).catch(() => {});
+  setStatus("");
+  renderModelSelect();   // 芯片与设置页下拉一起跟上，别留一份旧渲染
+}
+
+function setModelMenu(open) {
+  if (!open) { Layers.close("modelMenu"); return; }
+  $("modelMenu").classList.remove("hidden");
+  $("modelChip").classList.add("open");
+  Layers.open("modelMenu", hideModelMenu);
+}
+
+function hideModelMenu() {
+  $("modelMenu").classList.add("hidden");
+  $("modelChip").classList.remove("open");
 }
 
 function serverDefaultProvider() {
@@ -2259,6 +2316,7 @@ function bind() {
     // 本机立刻生效，服务端那份让"我的默认"跟着人走而不是跟着设备走。
     // 存失败不反悔本次选择：localStorage 仍是这台设备的答案，下次开机再补写。
     API.setMyDefaultProvider(e.target.value).catch(() => {});
+    renderModelChip();   // 发送框旁的芯片跟着换，别留旧名字
     setStatus("");
   };
   $("exportBtn").onclick = exportCurrent;
@@ -2291,6 +2349,18 @@ function bind() {
   document.addEventListener("click", (e) => {
     const menu = $("attachMenu");
     if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
+  });
+  // 模型快切芯片：与附件菜单同款纪律——stopPropagation 防"开完立刻被外面点击关掉"，
+  // 点弹单外任意处收起。
+  $("modelChip").onclick = (e) => {
+    e.stopPropagation();
+    setModelMenu($("modelMenu").classList.contains("hidden"));
+  };
+  document.addEventListener("click", (e) => {
+    const menu = $("modelMenu");
+    if (!menu.classList.contains("hidden") && !menu.contains(e.target) && e.target !== $("modelChip")) {
+      setModelMenu(false);
+    }
   });
   $("imageInput").onchange = (e) => pickFiles(e.target);
   $("fileInput").onchange = (e) => pickFiles(e.target);
