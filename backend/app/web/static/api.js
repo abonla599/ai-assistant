@@ -189,6 +189,10 @@ const API = (() => {
         body: { username, answers, new_password } }),
     me: () => request("/v1/auth/me"),
     logout: (token) => logout(token),
+    // 定义在上面的 adopt()：注册/登录拿到明文后的第一步就是把它收编成 Cookie，
+    // 漏了这一行，app.js 里那三处 API.adopt 会在手机上炸成"API.adopt is not a
+    // function"（2026-09-23 v0.19 首发注册实测）。锁见 test_web_pwa。
+    adopt,
 
     models: () => request("/v1/models"),
     upload,

@@ -746,6 +746,26 @@ def test_the_identity_list_is_the_only_source_of_credentials():
     assert "delete x.token" in up, "升级没把老清单里的明文洗掉"
 
 
+def test_every_api_method_the_pages_call_is_actually_exported():
+    """页面脚本里出现过的每个 API.<name>，必须真的在 api.js 的导出对象里。
+
+    断的那侧（调用）一直有锁，导出这侧没人看——adopt 就是"定义写了、导出漏了"：
+    文件照常加载、别的按钮照常好用，只有注册/登录的成功路径在手机上炸出
+    "API.adopt is not a function"（2026-09-23 v0.19 首发实测）。这正是本仓最怕的
+    "线看起来接完了其实没接"那一类，所以断的是两侧集合的差，不是某个名字。
+    """
+    api_src = _js("api.js")
+    block = re.search(r"return \{(.*?)\n  \};", api_src, re.S)
+    assert block, "api.js 的导出对象形状变了，这条锁要跟着改"
+    exported = set(re.findall(r"^\s*([A-Za-z][A-Za-z0-9]*)\s*[:(,]", block.group(1), re.M))
+    used = set(re.findall(r"\bAPI\.([A-Za-z][A-Za-z0-9]*)",
+                          _js("app.js", "shell.js", "layers.js", "markdown.js")))
+    missing = used - exported
+    assert not missing, (
+        f"这些 API 方法被页面调用却没被导出，手机上是运行期 'not a function'：{sorted(missing)}")
+
+
+
 def test_the_current_identity_always_resolves_to_someone():
     """currentId 缺失或指向已经不在清单里的人时必须有兜底，且添加即设为当前。
 
