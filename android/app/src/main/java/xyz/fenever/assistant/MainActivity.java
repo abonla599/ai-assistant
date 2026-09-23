@@ -3,6 +3,7 @@ package xyz.fenever.assistant;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
+import android.app.ProgressDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -28,6 +29,7 @@ import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -39,6 +41,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import xyz.fenever.assistant.core.ApkDigest;
 import xyz.fenever.assistant.core.ReleasePlan;
 import xyz.fenever.assistant.core.ReminderStore;
 import xyz.fenever.assistant.core.ShellEvents;
@@ -77,14 +80,16 @@ public class MainActivity extends Activity {
     private final Map<Long, String> pendingDownloads = new HashMap<>();
 
     /**
-     * 「检查更新」这一条自己占的三格状态。
+     * 「检查更新」这一条自己占的状态。
      *
-     * <p>安装包的下载 id 必须与网页附件那张表【分开】：混在一起的话，一次 APK 下完会去弹
-     * "已保存到「下载」"，而真正该做的（起系统安装页）没人做——正好是"效果没了但不报错"。
+     * <p>安装包【不再】走 DownloadManager：2026-09-23 实测那条通道会被部分 ROM 转给
+     * 第三方下载服务（通知栏变"迅雷正在加速/未命名"），递回来的半截残包只会报安装失败。
+     * 现在下载整条活在壳自己手里（startInAppDownload），所以要的是"进度框 + 一个
+     * 下载中标志"，而不是当年那张 enqueue id 表。网页附件的 pendingDownloads 照旧。
      */
     private boolean updateCheckRunning;
-    private long pendingApkId = -1L;
-    private String pendingApkVersion;
+    private boolean updateDownloadRunning;
+    private ProgressDialog updateProgress;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -264,9 +269,9 @@ public class MainActivity extends Activity {
      * 只有【用户自己点过】那颗按钮才去问一次发布服务器。
      *
      * <p>这条判据是整个功能的边界：不点就没有新包，所以 onCreate / onResume / BootReceiver /
-     * 组件刷新里都不许出现 {@link #startUpdateCheck()}。代价也如实写着——它拿的是
-     * GitHub 未鉴权接口（按来源 IP 60 次/小时），自动化的话每天烧掉一格，
-     * 而"重启电脑＝给所有手机热修复"这条性质本来就不归它管（界面永远是从服务器现加载的）。
+     * 组件刷新里都不许出现 {@link #startUpdateCheck()}。2026-09-23 起检查走自家服务器
+     * （它再带 10 分钟缓存去问 GitHub），自动化的代价从"烧掉手机的 GitHub 配额"变成
+     * "替服务器挡枪"——边界没变，判据也没变：动手的必须是人点的那一下。
      */
     private void maybeCheckUpdate(Intent intent) {
         if (intent == null) return;
@@ -288,12 +293,14 @@ public class MainActivity extends Activity {
         startUpdateCheck();
     }
 
-    // ---------- 检查更新：拉发布页 → 确认 → 下载 → 交给系统安装 ----------
+    // ---------- 检查更新：问自家服务器 → 确认 → 壳内下载（带进度）→ 校验 → 交给系统安装 ----------
 
     private static final int UPDATE_CONNECT_MS = 8000;
     private static final int UPDATE_READ_MS = 12000;
     /** 一条 release JSON 十几 KB 封顶；读满这个数还不停手就说明回来的不是它。 */
     private static final int UPDATE_MAX_BYTES = 256 * 1024;
+    /** 与后端 releases.APK_MAX_BYTES 同一个数：壳这边同样不信"对方说多大就多大"。 */
+    private static final int UPDATE_APK_MAX_BYTES = 16 * 1024 * 1024;
 
     /** 后台线程里跑，回主线程弹框——网络绝不能在 UI 线程上碰（首屏时间与 524 那次的同一类错）。 */
     private void startUpdateCheck() {
@@ -311,7 +318,7 @@ public class MainActivity extends Activity {
                     decision = ReleasePlan.decide(BuildConfig.VERSION_NAME, fetchLatestRelease(app));
                 } catch (Exception e) {
                     // 连不上/超时/被网关改了：说清是哪一种，绝不当成"已经是最新版"
-                    decision = ReleasePlan.unusable("连不上发布服务器（"
+                    decision = ReleasePlan.unusable("连不上更新服务（"
                             + e.getClass().getSimpleName() + "）");
                 }
                 updateCheckRunning = false;
@@ -323,19 +330,25 @@ public class MainActivity extends Activity {
         }, "update-check").start();
     }
 
+    /**
+     * 问一次"最新是哪一版"。地址钉在 {@code BuildConfig.UPDATE_INFO_URL}——与 APP_URL
+     * 同源（三个钉死地址的主机名一致性由 backend 的 test_android_shell.py 数着）。
+     * 回来的仍是 GitHub 形状的发布 JSON（顶层多一个服务端注入的 {@code apk_sha256}），
+     * 判断全部交给 ReleasePlan，这一层一个字都不解读。
+     */
     private String fetchLatestRelease(Context app) throws Exception {
         HttpURLConnection conn = null;
         try {
-            conn = (HttpURLConnection) new URL(ReleasePlan.LATEST_URL).openConnection();
+            conn = (HttpURLConnection) new URL(BuildConfig.UPDATE_INFO_URL).openConnection();
             conn.setConnectTimeout(UPDATE_CONNECT_MS);
             conn.setReadTimeout(UPDATE_READ_MS);
             conn.setInstanceFollowRedirects(true);
             conn.setRequestMethod("GET");
-            // GitHub 的 API 对没有 User-Agent 的请求直接回 403，这不是可选装饰
             conn.setRequestProperty("User-Agent", "ai-assistant-shell/" + BuildConfig.VERSION_NAME);
-            conn.setRequestProperty("Accept", "application/vnd.github+json");
             int status = conn.getResponseCode();
             if (status != HttpURLConnection.HTTP_OK) {
+                // 后端问不到 GitHub 时回 502 带理由；这里不解析那句理由——非 200 一律是
+                // "问不到"，三态的分辨在 ReleasePlan.unusable，绝不滑成"已是最新"。
                 throw new java.io.IOException("HTTP " + status);
             }
             InputStream in = conn.getInputStream();
@@ -390,71 +403,194 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("发现新版本 v" + decision.version)
                 .setMessage(text)
-                .setPositiveButton("下载", (dialog, which) -> startApkDownload(decision))
+                .setPositiveButton("下载", (dialog, which) -> startInAppDownload(decision))
                 .setNegativeButton("以后再说", null)
                 .show();
     }
 
-    private void startApkDownload(ReleasePlan.Decision decision) {
-        String fileName = ReleasePlan.assetName(decision.version);
+    /**
+     * 壳内下载：进度在对话框里走，字节由壳自己收，不经任何下载器/浏览器中转。
+     *
+     * <p>为什么整段重写而不是给 DownloadManager 换参数：那条通道的落点与中转都在系统
+     * （以及部分 ROM 私加的下发代理）手里，壳连"回来的还是不是我点的那份"都说了不算——
+     * 2026-09-23 的残包事故就是这么来的。这里的三件套缺一不可：
+     * ① 地址钉死在 BuildConfig（不用 JSON 里任何 url，透传字段仅作校验对象）；
+     * ② 体积边收边核，超过上限立刻断；
+     * ③ 落盘后算 SHA-256 与发布校验值对账，【对不上就没有任何安装页会被拉起】。
+     */
+    private void startInAppDownload(final ReleasePlan.Decision decision) {
+        if (decision.sha256 == null) {
+            // 后端透传里没带可信校验值（老 Release 或正文被改坏）。宁可这一步停下，
+            // 也不做"先下下来再说"——没有对账对象的下载，恰好就是上次事故的原样。
+            new AlertDialog.Builder(this)
+                    .setTitle("暂不能下载 v" + decision.version)
+                    .setMessage("这一版的发布信息里没带安装包的校验值，壳拒绝下载来源不可核对的包。\n"
+                            + "可以去发布页手动下载，或过段时间再试。")
+                    .setPositiveButton("好", null)
+                    .show();
+            return;
+        }
+        if (updateDownloadRunning) {
+            toast("已经在下载了，稍等一下");
+            return;
+        }
+        final File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) {
+            toast("这台设备现在给不出下载目录（存储未就绪？）");
+            return;
+        }
+        final String fileName = ReleasePlan.assetName(decision.version);
+        final File target = new File(dir, fileName);
+        final File temp = new File(dir, fileName + ".part");
+        if (target.isFile() && !target.delete()) {
+            toast("上一次的文件删不掉，先重启手机再试一次");
+            return;
+        }
+        if (temp.isFile()) {
+            temp.delete();      // 半截的 .part 只是浪费磁盘，删不掉也继续（真撞上下面会失败报错）
+        }
+        updateDownloadRunning = true;
+        final ProgressDialog progress = new ProgressDialog(this);
+        updateProgress = progress;
+        progress.setTitle("下载 v" + decision.version);
+        progress.setMessage("连接中…");
+        progress.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+        progress.setMax(100);
+        progress.setProgress(0);
+        progress.setCancelable(false);
+        progress.show();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String failure = runApkDownload(decision, temp, target, progress);
+                updateDownloadRunning = false;
+                finishUpdateDownload(decision.version, failure);
+            }
+        }, "apk-download").start();
+    }
+
+    /** 后台线程里跑。返回 null = 文件已就位（target 可安装）；否则是人能看懂的一句失败原因。 */
+    private String runApkDownload(ReleasePlan.Decision decision,
+                                  final File temp, final File target,
+                                  final ProgressDialog progress) {
+        HttpURLConnection conn = null;
         try {
-            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-            if (manager == null) {
-                toast("这台设备不支持下载");
-                return;
+            conn = (HttpURLConnection) new URL(BuildConfig.UPDATE_APK_URL).openConnection();
+            conn.setConnectTimeout(UPDATE_CONNECT_MS);
+            conn.setReadTimeout(UPDATE_READ_MS);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "ai-assistant-shell/" + BuildConfig.VERSION_NAME);
+            int status = conn.getResponseCode();
+            if (status != HttpURLConnection.HTTP_OK) {
+                // 后端取不到包时会 302 回发布页——跟着跳完拿到的就不是 200 的 APK 字节流，
+                // 停在这里比"收下 HTML 再去校验"诚实，也更早给出对得上的失败文案。
+                throw new java.io.IOException("服务回 HTTP " + status);
             }
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(decision.url));
-            request.setMimeType(APK_MIME);
-            // 落在本应用自己的外部目录，不落公共「下载」：
-            // ① DownloadManager.Request.allowOverwrite 是 @hide 的，公开 API 里没有"覆盖"这个开关，
-            //    而同一版重下（上一次没装完）撞已存在文件就会失败；
-            // ② Android 10+ 的分区存储下，公共目录里的同名文件我们未必删得动，自己目录里的删得动；
-            // ③ 安装包不是给用户留着看的资料，卸掉应用就该跟着走。
-            File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-            if (dir != null) {
-                File stale = new File(dir, fileName);
-                if (stale.isFile()) {
-                    stale.delete();          // 删不掉也继续：真撞上了下面那句会给出失败提示
+            long declared = conn.getContentLength();
+            if (declared > UPDATE_APK_MAX_BYTES) {
+                throw new java.io.IOException("声明的包体积异常");
+            }
+            InputStream in = conn.getInputStream();
+            FileOutputStream out = new FileOutputStream(temp);
+            try {
+                byte[] buf = new byte[8192];
+                int read;
+                long done = 0;
+                int lastPercent = -1;
+                while ((read = in.read(buf)) > 0) {
+                    done += read;
+                    if (done > UPDATE_APK_MAX_BYTES) {
+                        throw new java.io.IOException("下载超出体积上限");
+                    }
+                    out.write(buf, 0, read);
+                    if (declared > 0) {
+                        final int percent = (int) Math.min(100, done * 100 / declared);
+                        if (percent != lastPercent) {
+                            lastPercent = percent;
+                            final long sent = done;
+                            final long total = declared;
+                            runOnUiThread(new Runnable() {
+                                @Override public void run() {
+                                    if (progress.isShowing()) {
+                                        progress.setProgress(percent);
+                                        progress.setMessage(fmtKb(sent) + " / " + fmtKb(total));
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
+            } finally {
+                in.close();
+                out.close();
             }
-            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
-            request.setNotificationVisibility(
-                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            pendingApkId = manager.enqueue(request);
-            pendingApkVersion = decision.version;
-            toast("开始下载 v" + decision.version);
+            if (declared > 0 && temp.length() != declared) {
+                temp.delete();
+                return "下载中断：收下的字节比声明的少";
+            }
+            String actual = ApkDigest.sha256Hex(temp);
+            if (!decision.sha256.equals(actual)) {
+                temp.delete();  // 残包/被换过的包留在盘上只会喂给下一次误装
+                return "校验值不一致，这个包不是发布的那一份";
+            }
+            if (!temp.renameTo(target)) {
+                return "文件写好了却没归位（存储状态异常）";
+            }
+            return null;
         } catch (Exception e) {
-            toast("下载失败：" + e.getMessage());
+            temp.delete();
+            return "下载失败：" + e.getMessage();
+        } finally {
+            if (conn != null) conn.disconnect();
         }
     }
 
+    /** 回主线程收尾：失败要说清是哪一种；成功才起安装页。两条都要关进度框。 */
+    private void finishUpdateDownload(final String version, final String failure) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (updateProgress != null) {
+                    try {
+                        updateProgress.dismiss();
+                    } catch (Exception ignored) {
+                        // Activity 已经没了的话这里会抛——收尾的收尾不该再抛出去
+                    }
+                    updateProgress = null;
+                }
+                if (isFinishing() || isDestroyed()) return;
+                if (failure != null) {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("更新 v" + version + "没装上")
+                            .setMessage(failure + "。没有拉起安装页，手机上不留没核过验的包。")
+                            .setPositiveButton("好", null)
+                            .show();
+                    return;
+                }
+                launchInstaller(ReleasePlan.assetName(version), version);
+            }
+        });
+    }
+
     /**
-     * 下载完成后把安装包交给系统安装页。
+     * 把校验过的安装包交给系统安装页。
      *
-     * <p>URI 用 {@code getUriForDownloadedFile} 而不是自己拼 file://：Android 7 起
-     * 跨进程给 file:// 会抛 FileUriExposedException，而 content:// 由 DownloadManager 自己
-     * 授权，省掉一个 FileProvider（它在 androidx 里，会破零依赖）。
+     * <p>URI 走自己手写的 ApkFileProvider（content://）而不是 file://：Android 7 起跨进程
+     * 给 file:// 会抛 FileUriExposedException，而现成 FileProvider 在 androidx 里、会破
+     * 零依赖纪律。读权限只随这一条 Intent 临时授予，装完即随进程回收。
      */
-    private void launchInstaller(DownloadManager manager, long id) {
-        String label = pendingApkVersion != null ? "v" + pendingApkVersion : "新版本";
-        Uri apkUri = null;
-        try {
-            apkUri = manager.getUriForDownloadedFile(id);
-        } catch (Exception ignored) {
-            // 拿不到就往下走那句"找不到文件"，别在这里抛出去把接收器带崩
-        }
-        if (apkUri == null) {
+    private void launchInstaller(String fileName, String version) {
+        File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null || !new File(dir, fileName).isFile()) {
             toast("下载完成了，但找不到那个文件");
             return;
         }
         Intent install = new Intent(Intent.ACTION_VIEW);
-        install.setDataAndType(apkUri, APK_MIME);
+        install.setDataAndType(ApkFileProvider.uriForFile(this, fileName), APK_MIME);
         install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
             startActivity(install);
         } catch (Exception e) {
             // 这台手机还没允许本应用"安装未知应用"，系统不会替你打开那个开关
-            offerUnknownSourcesSettings(label);
+            offerUnknownSourcesSettings("v" + version);
         }
     }
 
@@ -557,23 +693,9 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
                 // 查不到状态时按失败处理，宁可多提醒也别静默
             }
-            if (id == pendingApkId) {
-                // 安装包这一条不能落到下面那句"已保存到「下载」"里：那样等于下载完了却没人去起安装页
-                pendingApkId = -1L;
-                String version = pendingApkVersion;
-                pendingApkVersion = null;
-                if (status != DownloadManager.STATUS_SUCCESSFUL) {
-                    toast("下载失败：v" + (version != null ? version : "新版本"));
-                    return;
-                }
-                DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-                if (manager != null) {
-                    launchInstaller(manager, id);
-                } else {
-                    toast("下载完成了，但这台设备取不到那个文件");
-                }
-                return;
-            }
+            // 这里不再认"安装包"那一支：v0.19 起 APK 由壳自己下载（startInAppDownload），
+            // 系统 DownloadManager 只服务网页附件。要是哪天有人再把安装包塞回这条通道，
+            // 它会被当成"已保存到「下载」"而没人起安装页——正是"效果没了但不报错"。
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
                 toast("已保存到「下载」：" + label);
             } else if (status == DownloadManager.STATUS_FAILED) {
@@ -644,6 +766,14 @@ public class MainActivity extends Activity {
             name = name.substring(0, 128);
         }
         return name;
+    }
+
+    /** 进度条上那一行"xx KB / yy KB"的写法；超过 1 MB 换 MB，一位小数。 */
+    private static String fmtKb(long bytes) {
+        long kb = Math.max(0, (bytes + 512) / 1024);
+        return kb >= 1024
+                ? String.format(java.util.Locale.US, "%.1f MB", kb / 1024.0)
+                : kb + " KB";
     }
 
     private void toast(final String message) {
@@ -799,6 +929,16 @@ public class MainActivity extends Activity {
         if (pendingCameraRequest != null) {
             pendingCameraRequest.deny();
             pendingCameraRequest = null;
+        }
+        if (updateProgress != null) {
+            // 进度框挂在的就是这个窗口，Activity 走了它必须先进坟场；
+            // 下载线程自己会因 write/校验继续跑完或失败，收尾处还有一次 isFinishing 判空。
+            try {
+                updateProgress.dismiss();
+            } catch (Exception ignored) {
+                // 已经在 dismiss 路径上再抛的（窗口已死），没有可救的
+            }
+            updateProgress = null;
         }
         try {
             unregisterReceiver(downloadReceiver);

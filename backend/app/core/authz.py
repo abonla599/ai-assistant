@@ -27,7 +27,11 @@ PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset
                           # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
                           # 出站请求带 10 分钟缓存（app/core/releases.py）：一小时内最多
                           # 6 次，与来多少请求无关。
-                          "/v1/release/latest"})
+                          "/v1/release/latest",
+                          # 壳「检查更新」的透传端点：与上面那条共用同一份快照与同一套
+                          # 缓存代价，公开的是本来就公开的发布元数据。它替代的是
+                          # "壳自己直连 api.github.com"——那条通道要过各家 ROM 的下载器。
+                          "/v1/update/info"})
 
 # 会话 Cookie（方案 C：凭据不进 JS）。名字刻意短且不带语义泄露；值就是存储层
 # 签发的那枚令牌原文，服务端不新建第二套凭据体系。

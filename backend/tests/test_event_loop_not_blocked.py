@@ -51,6 +51,9 @@ NETWORK_BOUND_ENDPOINTS = [
     # 官网代取 APK：一次点击要朝 GitHub 搬一百来 KB（超时上限 20s），
     # 写成 async 就是拿整台服务换这一个下载。
     "/site/android.apk",
+    # 壳「检查更新」的透传端点：与 /v1/release/latest 共用同一份快照，
+    # 缓存过期那次请求同样会朝 GitHub 走一趟（上限 5s）。
+    "/v1/update/info",
 ]
 
 # 上游卡住的模拟时长，与 /health 的容忍上限。上限比"循环被占住"的任何形状低一个

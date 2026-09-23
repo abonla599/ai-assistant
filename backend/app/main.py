@@ -321,6 +321,28 @@ def release_latest(have: str = None):
     from app.core import releases
     return releases.probe(have)
 
+
+# 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
+@app.get("/v1/update/info")
+def update_info():
+    """壳「检查更新」的数据源：原样的 GitHub 发布 JSON + 顶层 `apk_sha256`。
+
+    为什么壳不自己问 GitHub 的发布接口：手机到 GitHub 的链路要过运营商、代理与各家
+    ROM 的下载器，正是 2026-09-23 那次"迅雷劫持 → 残包 → 安装失败"的案发通道；
+    而手机到这台服务器是天天在用的链路。一台机器出网、全员共享缓存，代价与
+    `/v1/release/latest` 完全同构（判据在 tests/test_release_probe.py）。
+
+    与那条卡片端点的分工：卡片要的是"要不要提一句"（拉不到就**不弹**，ok:false）；
+    这条要的是"人主动点了检查"，拉不到必须说出来——所以拉不到时是 502 带理由，
+    而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款。
+    """
+    from fastapi.responses import JSONResponse
+    from app.core import releases
+    manifest, reason = releases.latest_release_manifest()
+    if manifest is None:
+        return JSONResponse(status_code=502, content={"detail": f"问不到发布信息：{reason}"})
+    return manifest
+
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)

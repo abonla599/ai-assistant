@@ -10,14 +10,21 @@ android {
         applicationId "xyz.fenever.assistant"
         minSdk 23
         targetSdk 34
-        versionCode 18
-        versionName "0.18"
+        versionCode 19
+        versionName "0.19"
 
         // 壳里只钉地址，不写任何口令：公开仓库的 Actions 产物任何人都能下载，
         // 把 ACCESS_TOKEN 编进来等于把助手的付费调用额度公开送人。
         // 口令仍由用户在本机填一次（设置 → 模型服务，管理员那一页），存 WebView 的
         // localStorage；普通人走的是注册/登录，用不到它。
         buildConfigField "String", "APP_URL", "\"https://ai.fenever.xyz/app/\""
+        // 「检查更新」的两个落脚点，与 APP_URL 同源（判据在 backend 的
+        // test_android_shell.py：三个值的主机名必须一致）。以前壳直连
+        // api.github.com 问版本、把下载地址丢给系统 DownloadManager——2026-09-23
+        // 实测被 ROM 的第三方下载通道劫持成"未命名"残包，人拿着半截文件去装，
+        // 报"安装失败"。现在问与取都只经过这台服务器，壳自己下、自己校验。
+        buildConfigField "String", "UPDATE_INFO_URL", "\"https://ai.fenever.xyz/v1/update/info\""
+        buildConfigField "String", "UPDATE_APK_URL", "\"https://ai.fenever.xyz/site/android.apk\""
     }
 
     signingConfigs {

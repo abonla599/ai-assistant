@@ -130,7 +130,44 @@ def _fetch():
         "asset_name": (asset or {}).get("name") or "",
         "asset_url": (asset or {}).get("browser_download_url") or "",
         "size": int((asset or {}).get("size") or 0),
+        # 原样的那条发布 JSON。壳的「检查更新」走 /v1/update/info 透传它——判断逻辑
+        # （三态、资产名、URL 白名单）整个活在壳里且被 JVM 台架钉着，服务端只做
+        # "一台机器出网 + 缓存"这一段，不另起一份判断的第二真相。
+        "raw": body,
     }, ""
+
+
+# 发版工作流写在 Release 正文末尾的那一行：`APK-SHA256: <64 位小写十六进制>`。
+# 摘要在构建机上、签完包之后算——所以它验的是"装进手机的那串字节就是发布的那一串"，
+# 服务端与下载通道都只是过手的人。锚定整行、大小写敏感：正文里的散文不许凑巧长成
+# 一条校验值。
+APK_SHA256_RE = re.compile(r"^APK-SHA256: ([0-9a-f]{64})$", re.M)
+
+
+def apk_sha256(body_text) -> str:
+    """从 Release 正文里取那行校验值；没有（旧版发布、手改正文）就是空串。"""
+    if not isinstance(body_text, str):
+        return ""
+    m = APK_SHA256_RE.search(body_text)
+    return m.group(1) if m else ""
+
+
+def latest_release_manifest():
+    """壳「检查更新」要的那份 JSON：原样透传 + 顶层多一枚 `apk_sha256`。
+
+    返回 (dict, reason)。拉不到时 (None, 理由)——调用方必须把这句理由原样带给人，
+    而不是回一份"看起来没有更新"的空 JSON：那条三态纪律（读不出来 ≠ 已是最新）
+    从壳里一路管到服务端这一层。
+    """
+    snapshot, reason = _snapshot()
+    if not snapshot:
+        return None, reason or "还没有一次成功过的发布页读取"
+    raw = snapshot.get("raw")
+    if not isinstance(raw, dict):
+        return None, "发布快照里没有原样 JSON（内部状态坏了）"
+    manifest = dict(raw)
+    manifest["apk_sha256"] = apk_sha256(raw.get("body"))
+    return manifest, ""
 
 
 def _snapshot() -> tuple:

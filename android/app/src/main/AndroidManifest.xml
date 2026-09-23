@@ -16,8 +16,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 「检查更新」下完 APK 要把它交给系统安装页。声明这条【不等于】能装：
          Android 8+ 还要用户在「设置 → 安装未知应用」里对本应用点一次允许，
-         没给的话 startActivity 会失败，MainActivity 那里退成一个带「去设置」的对话框。
-         没有别的路：不装 FileProvider（在 androidx 里）就只能让系统安装页来接。 -->
+         没给的话 startActivity 会失败，MainActivity 那里退成一个带「去设置」的对话框。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -72,6 +71,17 @@
                 <data android:mimeType="application/pdf" />
             </intent-filter>
         </activity>
+
+        <!-- 壳自己下载的更新包要交给系统安装页：跨进程给 file:// 从 Android 7 起直接抛
+             FileUriExposedException，只能走 content://。现成的 FileProvider 在 androidx 里，
+             会破壳的零第三方依赖纪律，所以这一层是手写的 ApkFileProvider（只读、单段路径、
+             canonical 后仍不许逃出外部私有目录）。exported=false：除了我们随安装 Intent
+             主动 grant 的那一次，谁也解析不到这个 authority。 -->
+        <provider
+            android:name=".ApkFileProvider"
+            android:authorities="${applicationId}.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <!-- 闹钟到点。PendingIntent 是显式指向它的，所以 Android 8 的隐式广播限制碰不到它；
              exported=false 就够——它只被自己的 PendingIntent 唤起，不给别的 App 开门。 -->
