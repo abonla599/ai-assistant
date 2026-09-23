@@ -33,7 +33,13 @@ class Orchestrator:
         task = None
 
         # --- 1. 尝试恢复任务或创建新任务 ---
-        if task_id and task_id in task_store:
+        # 归属校验下沉在这里而不是端点里（审查 #13）：这一句拿 uuid 恢复任务时是
+        # 以**原属主**的身份往下跑的（executor 用 task.user_id 注入 needs_user 工具），
+        # 所以"是不是你的"必须由真正要跑它的人来判，不能指望每个调用方记得判。
+        # 不是自己的就当不存在——不报错、不解释：一句"这任务不是你的"就把任务表
+        # 变成了 uuid 探测器。落到新建分支后 Task 会因空 user_id 拒收，fail-closed。
+        if task_id and task_id in task_store and \
+                task_store[task_id].user_id == (user_id or "").strip():
             task = task_store[task_id]
 
             # ⭐ 检查是否已被取消
