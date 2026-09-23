@@ -712,22 +712,38 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
 
 
 def test_the_identity_list_is_the_only_source_of_credentials():
-    """本机身份清单是凭据的唯一出处：老键与 pref 之外的读取一律不许存在。
+    """方案 C：凭据根本不进 JS——清单只记"谁"，会话住在 httpOnly Cookie 里。
 
-    `api.js` 原先绕过 pref 直接读 localStorage 的 accessToken。多身份之后那就是
-    第二个事实来源——清单切到 B 而请求头还是 A，正是本项目为跨用户泄露付过一次
-    账的那个形状（见 [[ai-assistant-memory-cross-user-leak]]）。
+    这条锁原先钉的是"清单是凭据的唯一出处"（api.js 绕过 pref 读老键 = 第二个事实
+    来源，见 [[ai-assistant-memory-cross-user-leak]]）。Cookie 化之后问题的形状变了：
+    清单里根本不许有凭据，api.js 也不许再拼 Authorization——"界面是 B 请求头是 A"
+    那种漂移在浏览器自动附带 Cookie 的世界里，唯一的防法就是让 JS 从头到尾没有
+    明文可拼。这里钉的是明文不许回流：
+    - api.js 不读任何令牌来源（pref.token、老键），显式声明凭 Cookie 走；
+    - 明文的唯一消费口是 adopt，且必须发生在写进清单**之前**；
+    - 老键 accessToken 只剩迁移那一处的宿命：读一次、无条件扫清；
+    - 升级函数把清单里残留的 token 字段删干净。
     """
     js, api = _js(), _js("api.js")
     assert 'localStorage.getItem("accessToken")' not in api, \
-        "api.js 还在绕过 pref 读令牌：清单和它一旦漂移，界面是 B 而请求头是 A"
-    assert "pref.token" in api, "api.js 改从 pref 取凭据"
-    # 老键只能出现在迁移那一处
+        "api.js 又去读老键了：那是 JS 可见明文的入口"
+    assert "pref.token" not in api, "api.js 又从清单取凭据：明文回到了 JS 手里"
+    assert "credentials: \"same-origin\"" in api, "api.js 没显式声明请求靠同源 Cookie 走"
+    assert "X-CSRF" in api, "api.js 不安全方法没带 CSRF 声明头"
+    assert "function adopt(" in api, "凭据收编口没了：登录回来的明文无处安放"
+    # 老键只能出现在迁移那一处（读一次 + 清单一处删名）
     assert js.count('"accessToken"') <= 2, "accessToken 这个键名出现在两处以上：迁移没做完"
     assert "function migrateLegacyIdentity()" in js, "没有一次性的老键迁移"
     body = _function_body(js, "migrateLegacyIdentity")
     for gone in ("accessToken", "userId", "sessionId"):
         assert gone in body, f"迁移没处理老键 {gone}"
+    assert "token: res.token" not in js, "清单条目又要把明文写回去了"
+    ab = _function_body(js, "afterAuth")
+    assert "API.adopt(res.token)" in ab, "登录成功没把明文收编成 Cookie"
+    assert ab.index("API.adopt") < ab.index("addIdentity"), \
+        "明文先落了清单才收编：中间躺着的那段时间就是泄露窗口"
+    up = _function_body(js, "upgradeIdentitiesToCookie")
+    assert "delete x.token" in up, "升级没把老清单里的明文洗掉"
 
 
 def test_the_current_identity_always_resolves_to_someone():
@@ -743,17 +759,22 @@ def test_the_current_identity_always_resolves_to_someone():
 
 
 def test_switching_clears_the_view_before_it_refills_it():
-    """切换必须按 换指针 → 清屏 → 重取 的顺序，且清屏要覆盖那 7 样。
+    """方案 C 的切换 = 预填登录面；"换指针→清屏→重取"的旧静默换人已死。
 
-    顺序反了会出现"用 A 的视图去渲染 B 的数据"；漏一项就是屏幕上还挂着上一个人的
-    对话——用户据此判断「账号之间记忆共享」，哪怕服务端根本没共享。
+    旧锁钉的是切换三步的顺序——那是清单握着明文、能静默换 Cookie 年代的契约。
+    现在 JS 没有其他人的凭据，会话还是 A 的时候把 currentId 指向 B，B 的偏好
+    （lastSessionId/provider）就会被写进一次 A 的操作里——跨用户写就是当年那笔
+    账的形状。所以这里反过来钉：switchTo 不许碰指针、不许自取身份，只许把
+    登录表单递到人面前；真换人之后的清屏仍由 afterAuth 负责。
     """
     js = _js()
     sw = _function_body(js, "switchTo")
-    assert sw.index("setCurrent(") < sw.index("resetViewForIdentity()") < sw.index("await loadWho()"), \
-        "切换的顺序不对：必须换指针、清屏、再重取"
+    assert "setCurrent(" not in sw, "switchTo 还抢跑换指针：会话是 A 的，偏好却写进 B 的清单"
+    assert "loadWho()" not in sw, "switchTo 还想静默自取身份：它手里已经没有能换会话的东西"
+    assert 'showAuth("login")' in sw, "切换没把人引到登录表单"
+    assert '$("authUser").value' in sw, "切换没预填他的名字"
     assert "controller.abort()" in sw, "切走时没掐断正在输出的回答"
-    # 注册/登录成功也是换人：从设置里添加第二个账户时，屏幕上正挂着第一个人的对话。
+    # 注册/登录成功才是真换人：从设置里添加第二个账户时，屏幕上正挂着第一个人的对话。
     # 只靠 restore() 那句"没有指针就清空"兜是运气，这里要它显式清。
     assert "resetViewForIdentity()" in _function_body(js, "afterAuth"), \
         "afterAuth 换人不清屏"
@@ -1286,15 +1307,16 @@ def test_memory_stats_is_queried_only_for_admins():
 def test_a_stale_token_does_not_read_like_a_first_run():
     """401 有两种，糊成一句就把人支使去填一个已经填对的框。
 
-    本机压根没存过令牌 = 首启，该引导他注册；存过却被拒 = 管理员撤销或轮换过，
-    再说"请填写口令"就是让人反复重试同一个废令牌。
+    本机压根没记过任何人 = 首启，该引导他注册；记着人却被服务端拒 = 管理员撤销
+    或轮换过会话，再让他"重试刚才的口令"就是把人往废会话上反复按。
+    （方案 C 起分叉判据是"清单里有没有人"，不是"有没有令牌"——JS 没有令牌可看。）
     """
     js = _js()
     body = _function_body(js, "needsAuth")
     assert "需要访问口令" not in js, "旧的合并文案还在，两种 401 仍是一句话"
     assert re.search(r"err\.status\s*[!=]==\s*401", body), "needsAuth 只该管 401：403 是身份够了、角色不够"
     assert "403" not in body
-    assert re.search(r'pref\.token', body), "未按本机是否已有令牌分叉"
+    assert re.search(r'currentEntry\(', body), "未按本机记不记得人分叉（方案 C：JS 没有令牌可看）"
     assert "失效" in body and "注册" in body, "两条分支的措辞都得在场"
 
 
@@ -1303,7 +1325,7 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
 
     第二下拿回的是"该用户名已存在"（`auth.py` 里那句实话，措辞换过一次：从前写作"用户名
     已被占用"）或一次多余的 401：界面于是把一个已经成功的
-    人标成红色失败，两次调用还一起抢 pref.token 的写入与
+    人标成红色失败，两次调用还一起抢会话落地（adopt→addIdentity）与
     loadWho→loadServerData→renderMessages 的顺序。约定跟 send() 守 state.streaming
     一模一样——进门先挡、解锁放在 finally（失败也必须解，否则一次网络抖动就把唯一
     的入口按死到刷新页面为止），并且凭据一落地就把它清出输入框。
@@ -1428,7 +1450,7 @@ def test_a_background_401_while_the_layer_is_up_keeps_what_you_typed():
     assert 'if ($("authModal").classList.contains("hidden")) showAuth(' in code, \
         ("needsAuth 在弹层已经开着的时候还重走 showAuth：那条路经过 setAuthMode → "
          "clearAuthCredentials，人正在敲的密码会被一条不相干的后台 401 抹掉")
-    assert re.search(r"^  setStatus\(pref\.token", code, re.M), \
+    assert re.search(r"^  setStatus\(currentEntry\(", code, re.M), \
         ("setStatus 不在 needsAuth 的顶层：它被嵌进了某个 if 里，于是「弹层已经开着」那一种 "
          "401 连状态条那一句都不再更新——这里要的是只重弹不重说话")
     assert code.index("setStatus(") < code.index("showAuth("), \

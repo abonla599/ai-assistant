@@ -4,19 +4,24 @@
 "use strict";
 
 const API = (() => {
-  /** 令牌只存本机，不写入代码或仓库。
-   * 它的语义在邀请码注册之后变了：不再是"共用一把访问口令"，而是服务端签发给
-   * 这个人的个人令牌（管理员可单独撤销）。手工填口令那条路仍然通——那是
-   * 本机直跑服务的管理员入口。
+  /* 方案 C：页面不再持有任何凭据明文。
+   * 会话身份来自服务端签发的 httpOnly Cookie（authz.SESSION_COOKIE），浏览器对
+   * 同源请求自动附带——下面每个 fetch 都显式写 credentials:"same-origin"，是把
+   * 意图钉死，不让哪个引擎的默认值替我们做主。authHeaders() 保留成空对象是历史
+   * 形状的墓碑：谁再往这里塞 Authorization，就是在重新把令牌喂回 JS 可读的内存。
    *
-   * 一律走 pref.token，不再直接读 localStorage：本机可能同时记着好几个人的令牌
-   * （见 app.js 的身份清单），绕过清单去读那个键就是第二个事实来源——清单已经
-   * 切到 B 而请求头还带着 A，是跨用户泄露的形状。pref 由 app.js 定义，脚本顺序
-   * （api.js 先、app.js 后）保证这里被调用时它已经在了。
+   * 仅剩两处显式带凭据的请求头，都是"凭据在调用处参数里"的一次性语义：
+   * adopt(token)——把刚拿到手的明文收编成 Cookie；logout(token)——替清单里的
+   * 另一个人撤销他那一枚。除此之外任何请求都不该有 Authorization。
+   *
+   * CSRF：不安全方法（POST/PUT/PATCH/DELETE）一律带 X-CSRF:1。后端只在
+   * "没有请求头凭据而凭据出自 Cookie"时才检查它（见 authz.py），带上了对
+   * 头认证客户端无害。
    */
-  function authHeaders() {
-    const token = pref.token;
-    return token ? { Authorization: "Bearer " + token } : {};
+  const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+  function authHeaders() { return {}; }
+  function csrfHeaders(method) {
+    return UNSAFE_METHODS.has(String(method || "").toUpperCase()) ? { "X-CSRF": "1" } : {};
   }
 
   /* 记忆检索的条数上限，与后端 SearchMemoryRequest.top_k 的 le=20 同源
@@ -37,13 +42,30 @@ const API = (() => {
     return err;
   }
 
-  /* 撤销**指定那一枚**令牌（不是当前这枚）。从本机清单里移除一个人时必须带着
-     他那枚令牌来调——先把他切成当前身份再退出，等于为了删除而把他的会话加载到
-     共用设备的屏幕上。所以这里显式构造请求头，不走 authHeaders()。 */
+  /* 撤销**指定那一枚**令牌（不是当前这枚）。从本机清单里移除一个人时可以不
+     带参数——只靠 Cookie 退当前会话。先把他切成当前身份再退出，等于为了删除
+     而把他的会话加载到共用设备的屏幕上，所以历史上的显式 token 形参保留。 */
   async function logout(token) {
     const res = await fetch("/v1/auth/logout", {
       method: "POST",
-      headers: token ? { Authorization: "Bearer " + token } : {},
+      credentials: "same-origin",
+      headers: {
+        ...(token ? { Authorization: "Bearer " + token } : {}),
+        ...csrfHeaders("POST"),
+      },
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  /* 把一枚刚拿到手的令牌明文收编成 httpOnly 会话 Cookie（全页面唯一发
+     Authorization 头的常规路径）。成功后明文就该被丢掉——app.js 里它只作为
+     局部变量活过这一次调用。 */
+  async function adopt(token) {
+    const res = await fetch("/v1/auth/adopt", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Authorization: "Bearer " + token, ...csrfHeaders("POST") },
     });
     if (!res.ok) throw await parseError(res);
     return res.json();
@@ -53,9 +75,11 @@ const API = (() => {
     const res = await fetch(path, {
       method,
       signal,
+      credentials: "same-origin",
       headers: {
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...authHeaders(),
+        ...csrfHeaders(method),
       },
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -70,7 +94,8 @@ const API = (() => {
     const res = await fetch("/v1/chat/stream", {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") },
       body: JSON.stringify({
         model, provider, messages,
         attachments: attachments || [],
@@ -117,12 +142,13 @@ const API = (() => {
     return finished;
   }
 
-  /* 图片预览：浏览器不会为 <img> 带上 Authorization 头，
-   * 因此取回 blob 再造本地 URL，避免开了访问口令后缩略图全 401。
+  /* 图片预览：改用 Cookie 会话后 <img> 那条老问题换了答案——fetch 带
+   * credentials 就能认身份，blob 转本地 URL 的做法保留（它同时挡掉
+   * "URL 里露凭据"的另一类泄露）。
    */
   async function fileBlobUrl(uploadId) {
     const res = await fetch(`/v1/uploads/${encodeURIComponent(uploadId)}/file`,
-      { headers: authHeaders() });
+      { headers: authHeaders(), credentials: "same-origin" });
     if (!res.ok) throw await parseError(res);
     return URL.createObjectURL(await res.blob());
   }
@@ -130,15 +156,19 @@ const API = (() => {
   async function upload(file) {
     const fd = new FormData();
     fd.append("file", file, file.name);
-    const res = await fetch("/v1/uploads", { method: "POST", body: fd, headers: authHeaders() });
+    const res = await fetch("/v1/uploads", {
+      method: "POST", body: fd, credentials: "same-origin",
+      headers: { ...authHeaders(), ...csrfHeaders("POST") },
+    });
     if (!res.ok) throw await parseError(res);   // 不设 Content-Type，交给浏览器带 boundary
     return res.json();
   }
 
   return {
-    /* 身份：注册与登录都只回显一次令牌，之后一切请求都靠它。
+    /* 身份：注册与登录的响应体里仍有一次性的 token（对外契约没动），但它在页面
+     * 里的正确用法是当场交给 adopt() 换成 httpOnly Cookie，然后让明文自生自灭。
      * me() 是前端唯一的"我到底是谁"来源——角色不能靠猜，猜错就把 403 按钮留在页面上。
-     * 密码只出现在这两个请求的 body 里，绝不进任何其它请求头：运行时凭据是令牌。
+     * 密码只出现在注册/登录/改密这几个请求的 body 里，绝不进任何其它请求头。
      *
      * 这里不再有 recovery 封装：找回的三道题是全站固定常量（app.js 里那份
      * RECOVERY_QUESTIONS，test_web_pwa 会拿后端 auth.RECOVERY_QUESTIONS 逐字比一次），

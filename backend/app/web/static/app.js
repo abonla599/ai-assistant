@@ -3,14 +3,19 @@
 
 const $ = (id) => document.getElementById(id);
 
-/* ---------------- 本机身份清单 ----------------
- * 一台机器上可能同时记着几个人的令牌（设置 → 切换账户）。清单是凭据的唯一出处：
- * pref.token / pref.userId / pref.sessionId / pref.provider 都只是"当前那一条"的
- * 派生读取，写只能走 addIdentity / setCurrent / dropIdentity 三个入口。
+/* ---------------- 本机身份清单（方案 C：只记"谁"，不记"凭什么"） ----------------
+ * 一台机器上可能同时记着几个人（设置 → 账户）。清单条目只是显示与偏好用的人名册
+ * （userId/username/role/lastSessionId/providerId），**不含任何凭据明文**：运行时的
+ * 会话身份是服务端签发的 httpOnly Cookie，JS 读不到、也替不了它换人。
+ * 直接后果两条，都是方案 C 明说的代价：
+ * - 换到清单里的另一个人 = 重新登录一次（switchTo 只是把登录表单预填好）；
+ * - 移除一个非当前的人 = 只忘掉这台机器上他的名字，服务端他那枚令牌无从代撤销。
+ * pref.sessionId / pref.provider 都只是"当前那一条"的派生读取，写只能走
+ * addIdentity / setCurrent / dropIdentity 三个入口。
  *
- * 刻意不给老代码留一份 accessToken 镜像：那会出现"界面写着 B、请求头带着 A"，
- * 而本项目已经为跨用户泄露付过一次账。跟机器走的偏好（theme/temperature/
- * contextWindow）与按会话走的 persona 都保持原样——会话 id 全局唯一，键名自带归属。
+ * 老版本（Bearer 头时代）留在 localStorage 里的明文由 upgradeIdentitiesToCookie
+ * 一次性洗掉：当前那位的那一枚会先被 adopt 成 Cookie（升级不掉线），其余的连同
+ * 键名一起蒸发。
  */
 const IDENTITY_CAP = 5;
 const ID_KEY = "identities", CURRENT_KEY = "currentId";
@@ -19,7 +24,9 @@ function readIdentities() {
   let raw;
   try { raw = JSON.parse(localStorage.getItem(ID_KEY) || "[]"); }
   catch (e) { return []; }          // 手改坏的 JSON 不该把 app 锁死：当没记过人
-  return Array.isArray(raw) ? raw.filter((x) => x && x.userId && x.token) : [];
+  // 判据不再要 x.token：方案 C 的条目本来就不存凭据。老清单里残留的明文由
+  // upgradeIdentitiesToCookie 在启动时统一洗掉。
+  return Array.isArray(raw) ? raw.filter((x) => x && x.userId) : [];
 }
 
 function saveIdentities(list) { localStorage.setItem(ID_KEY, JSON.stringify(list)); }
@@ -48,37 +55,42 @@ function patchCurrent(fields) {
 function setCurrent(userId) { localStorage.setItem(CURRENT_KEY, userId); }
 
 function addIdentity(res) {
+  // res 里可能有 token（登录/注册响应体），这里**一个字都不落**：清单只记"谁"。
+  // adopt 已在 afterAuth 里把那枚明文换成了 httpOnly Cookie，明文到此为止。
   const list = readIdentities().filter((x) => x.userId !== res.user_id);
   list.push({ userId: res.user_id, username: res.username || "", role: res.role || "user",
-              token: res.token, lastSessionId: "", providerId: "",
+              lastSessionId: "", providerId: "",
               addedAt: new Date().toISOString() });
   setCurrent(res.user_id);
   while (list.length > IDENTITY_CAP) {
     const oldest = list.slice().sort((a, b) =>
       (a.addedAt || "").localeCompare(b.addedAt || ""))[0];
     list.splice(list.indexOf(oldest), 1);
-    // 顶掉别人时的撤销是尽力而为：它不该挡住一次刚刚成功的登录。
-    // 用户主动"移除"走 dropIdentity，那条必须撤销成功才算删掉。
-    if (oldest.token) API.logout(oldest.token).catch(() => {});
+    // 顶号只忘本机：明文早就不在 JS 手里，替他撤销服务端会话这件事做不到了。
+    // 兜底在服务端——每人令牌总数封顶（auth.MAX_SESSION_TOKENS）加管理员撤销。
   }
   saveIdentities(list);
 }
 
-/** 移除 = 先让服务端作废他那一枚，再删本机条目。
- *  顺序反了会出现"看起来删掉了但那枚令牌还能用"，比没删更糟。 */
+/** 移除 = 忘掉这台机器上的人。
+ *  当前这个人多一步真撤销：让服务端作废会话 Cookie 里那枚，再把 Cookie 本身刮掉。
+ *  非当前的人只能忘本机——JS 早就不碰他的凭据明文，服务端那一枚只能靠
+ *  总数封顶与管理员撤销收尾（方案 C 的既成代价，写在文件头那段里）。 */
 async function dropIdentity(userId) {
   const hit = readIdentities().find((x) => x.userId === userId);
   if (!hit) return true;
-  try {
-    await API.logout(hit.token);
-  } catch (e) {
-    /* 401/403 是"服务器本来就不认这枚令牌"（账号被管理员删过、或被轮换过）：
-       撤销要达到的目的已经达成，本机条目照删。其余失败（断网、5xx）留着条目——
-       那种情况下令牌可能还活着，"看起来删掉了但那枚还能用"比没删更糟。
-       判据只看 HTTP 状态：文案会被服务端改，状态码不会。 */
-    if (e.status !== 401 && e.status !== 403) {
-      setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
-      return false;
+  if ((currentEntry() || {}).userId === userId) {
+    try {
+      await API.logout();
+    } catch (e) {
+      /* 401/403 是"服务器本来就不认这枚会话"（账号被管理员删过、或被轮换过）：
+         撤销要达到的目的已经达成，本机条目照删。其余失败（断网、5xx）留着条目——
+         那种情况下会话可能还活着，"看起来删掉了但那枚还能用"比没删更糟。
+         判据只看 HTTP 状态：文案会被服务端改，状态码不会。 */
+      if (e.status !== 401 && e.status !== 403) {
+        setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
+        return false;
+      }
     }
   }
   saveIdentities(readIdentities().filter((x) => x.userId !== userId));
@@ -91,18 +103,50 @@ function touchIdentity(me) {
   if (me) patchCurrent({ username: me.username, role: me.role });
 }
 
-/** 一次性的老键迁移：多身份之前这台机器只记着一个人。 */
+/** 一次性的老键迁移：多身份之前这台机器只记着一个人。
+ *  方案 C 之后它的职责多一条：accessToken 这个键现在是**要洗掉的明文**，
+ *  无论清单迁没迁过，它都不许活过这一次启动。 */
 function migrateLegacyIdentity() {
   const token = localStorage.getItem("accessToken");
-  if (!token || localStorage.getItem(ID_KEY)) return;
-  const entry = { userId: localStorage.getItem("userId") || "manual",
-                  username: "", role: "user", token,
-                  lastSessionId: localStorage.getItem("sessionId") || "",
-                  providerId: localStorage.getItem("provider") || "",
-                  addedAt: new Date().toISOString() };
-  saveIdentities([entry]);
-  setCurrent(entry.userId);
+  if (token && !localStorage.getItem(ID_KEY)) {
+    const entry = { userId: localStorage.getItem("userId") || "manual",
+                    username: "", role: "user",
+                    lastSessionId: localStorage.getItem("sessionId") || "",
+                    providerId: localStorage.getItem("provider") || "",
+                    addedAt: new Date().toISOString() };
+    saveIdentities([entry]);
+    setCurrent(entry.userId);
+  }
   ["accessToken", "userId", "sessionId", "provider"].forEach((k) => localStorage.removeItem(k));
+}
+
+/** 一次性升级到方案 C：把清单与老键里所有凭据明文洗出本机。
+ *
+ *  Bearer 头的年代里清单条目带 token 字段——那是躺在 localStorage 里谁都能读的
+ *  会话凭据。升级路径只有一条正确的：当前那位的那枚先 adopt 成 httpOnly Cookie
+ *  （人不掉线、也不逼他重打密码），其余的连同键名一起删——非当前那位的明文
+ *  本来就不该再被任何请求头带上场，留着只有泄露价值。adopt 失败（口令已被撤销）
+ *  同样删：拿一枚废令牌换一次"看起来在线"是自欺。
+ *  跑完这条之后，全机任何存储里都不再存在凭据明文，这是本函数的唯一判据。
+ */
+async function upgradeIdentitiesToCookie() {
+  migrateLegacyIdentity();
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(ID_KEY) || "[]"); }
+  catch (e) { raw = []; }
+  if (!Array.isArray(raw)) raw = [];
+  const cur = currentEntry();
+  let dirty = false;
+  for (const x of raw) {
+    if (x && typeof x.token === "string" && x.token) {
+      if (cur && x.userId === cur.userId) {
+        try { await API.adopt(x.token); } catch (e) { /* 废令牌：删得理直气壮 */ }
+      }
+      delete x.token;
+      dirty = true;
+    }
+  }
+  if (dirty) saveIdentities(raw.filter((x) => x && x.userId));
 }
 
 const pref = {
@@ -120,9 +164,8 @@ const pref = {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   },
   set theme(v) { localStorage.setItem("theme", v); },
-  /* 令牌与 userId 不再是两个独立的键，它们是清单里当前那一条的两个字段。 */
-  get token() { return (currentEntry() || {}).token || ""; },
-  set token(v) { patchCurrent({ token: v || "" }); },
+  /* 方案 C 起 pref 不再有 token 这一项——运行时凭据是 httpOnly Cookie，
+   * JS 既读不到也不该想读。userId 仍是清单字段，只是"这台机器记着谁"。 */
   get userId() { return (currentEntry() || {}).userId || ""; },
   persona(sessionId) { return localStorage.getItem("persona:" + sessionId) || ""; },
   setPersona(sessionId, text) {
@@ -180,8 +223,8 @@ function outbound() {
 }
 
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
- *  - 本机压根没存过令牌：首启，该注册一个账号；
- *  - 存了却被服务端拒：管理员撤销或轮换过，或这台机器换了人。
+ *  - 本机压根没记过任何人：首启，该注册一个账号；
+ *  - 记着人却被服务端拒：管理员撤销或轮换过会话，或这台机器换了人。
  * 两种都要把首屏凭据层挡在面前——它就在眼前，不必再去「设置」里找入口。
  * 403 不走这里：那是"身份是真的、角色不够"，换凭据没有用。
  *
@@ -192,10 +235,11 @@ function outbound() {
  */
 function needsAuth(err) {
   if (!err || err.status !== 401) return false;
-  setStatus(pref.token
-    ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
+  // 判据从"本机有没有令牌"换成"本机记不记得人"：方案 C 下 JS 没有令牌可看。
+  setStatus(currentEntry()
+    ? "登录已失效：本机会话已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
     : "还没有登录：用用户名和密码登录，或注册一个", true);
-  if ($("authModal").classList.contains("hidden")) showAuth(pref.token ? "login" : "register");
+  if ($("authModal").classList.contains("hidden")) showAuth(currentEntry() ? "login" : "register");
   return true;
 }
 
@@ -214,7 +258,7 @@ window.addEventListener("popstate", (e) => Layers.reconcile(e.state));
  * 找回题的答案。找回密码在同一层里换另一张表单（recoverForm），谁都不该是第二个弹窗。
  * 全程锁住按钮：手机双击会发出第二个 POST，注册那枪在第二下只会拿回"该用户名已存在"
  * （auth.py 里那句实话，界面把它落在用户名那一格下面），把已经成功的人显示成失败，
- * 还会两次一起抢 pref.token 与渲染顺序。
+ * 还会两次一起抢会话落地（adopt→addIdentity）与渲染顺序。
  */
 let authMode = "login";
 let regStep = 1;
@@ -529,11 +573,14 @@ async function submitRecovery() {
 
 function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden"); }
 
-/** 拿到令牌之后的固定动作：落地凭据、重取身份与数据、收起这层。
+/** 拿到令牌之后的固定动作：明文当场收编成 httpOnly Cookie、落地人名册、重取身份
+ *  与数据、收起这层。adopt 是全页面对 res.token 唯一的一次消费——它失败就等
+ *  失败，让异常冒到调用处：没有 Cookie 的"登录成功"是假的，绝不能继续渲染。
  *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
  *  叫用户手动刷新一次页面才算登录成功。 */
 async function afterAuth(res) {
-  addIdentity(res);                 // 落地凭据并把这个人设为当前身份
+  await API.adopt(res.token);       // 凭据落地 = 换 Cookie；明文到此为止
+  addIdentity(res);                 // 只记名字进来并把这个人设为当前身份，不记凭什么
   SHELL.setOwner(res.user_id);      // 告诉壳"现在是谁"：没这一步他看见的提醒是空集
   resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
@@ -1390,17 +1437,18 @@ function openSetPage(name) {
 }
 function closeSetPage() { Layers.close("setPage"); }
 
-/** 账户页的两处回显。令牌输入框在管理员的「模型服务」页里，所以这一页
- *  没打开时也要能把它填上——值统一从 pref 取，不做第二份。 */
+/** 账户页的两处回显。
+ *  方案 C 起这里**不再回填任何令牌**——输入框只进不出：它的值只会被 adopt
+ *  用掉一次，页面没有任何一处能把当前会话的凭据再读出来（读不出来才叫 httpOnly）。 */
 function syncConnPane() {
-  $("tokenInput").value = pref.token;
   $("whoInfo").textContent = state.me
     ? `当前身份：${state.me.username}（${isAdmin() ? "管理员" : "普通用户"}）`
     : "未登录";
 }
 
-/** 账户页：这台机器上认识谁。当前那条打一个标记，其余每人一个「退出」。
- *  退出走 dropIdentity(userId)——它带的是**那个人**的令牌，不需要先切过去。 */
+/** 账户页：这台机器上认识谁。当前那条打一个标记，其余每人一个「删除」。
+ *  删除当前这个人会真撤销他的会话；删除别人只是把他从本机名册忘掉（方案 C 的
+ *  既成代价，见文件头）。切换 = 预填他的名字去登录，不再是一键静默换人。 */
 function renderAccounts() {
   const box = $("accountList");
   box.innerHTML = "";
@@ -1415,7 +1463,7 @@ function renderAccounts() {
       name.textContent = x.username || x.userId;
       const tag = document.createElement("span");
       tag.className = "set-val";
-      tag.textContent = x.userId === here ? "当前" : (x.stale ? "需要重新登录" : "");
+      tag.textContent = x.userId === here ? "当前" : "";
       row.append(name, tag);
       /* 当前这一行两颗按钮都不给：换人不需要按钮（已经是这个人），
          而"删除"落在自己身上只会把正在用的会话打断——误触的代价不对称。 */
@@ -1887,57 +1935,45 @@ function resetViewForIdentity() {
   renderSessions();
 }
 
-/** 换到清单里的另一个人：换指针 → 清屏 → 重取。
- *  顺序反了会出现"用 A 的视图渲染 B 的数据"。正在流式输出的那条回答直接掐断，
- *  不弹提示——它与今天刷新页面丢掉的是同半截，不新增语义。 */
+/** 换到清单里的另一个人 = 以他的身份再登录一次。
+ *  方案 C 下这是唯一诚实的做法：会话 Cookie 只装得下一个人，JS 手里也没有他的
+ *  凭据可以静默换——换指针不换会话，就会出现"界面写着 B、Cookie 带着 A"，
+ *  那正是本项目为跨用户泄露付过一次账的形状。所以这里只把登录表单预填好，
+ *  currentId 等 afterAuth 真登录成功再落。 */
 async function switchTo(userId) {
   if (state.switching) return;
   const hit = readIdentities().find((x) => x.userId === userId);
   if (!hit) return;
   state.switching = true;
-  document.querySelectorAll("#accountList .set-row").forEach((r) => { r.style.pointerEvents = "none"; });
   try {
     if (state.controller) state.controller.abort();
     state.controller = null;
     state.streaming = false;
-    setCurrent(userId);
-    SHELL.setOwner(userId);         // 换指针的同时换壳那边的 owner：否则切号后还能看见上一个人的提醒
-    resetViewForIdentity();
     closeSettings();
-    showAuthPending();
-    await loadWho();
-    if (!state.me) {
-      // 他那枚令牌已经不被认了：标出来，让人自己决定重登还是留着。刻意不悄悄退回
-      // 原来那个人——那会让人以为自己是 B。
-      markIdentityStale(userId);
-      showAuth("login");
-      return;
-    }
-    await loadServerData();
-    hideAuth();
-    renderMessages();
-  } catch (e) {
-    if (!needsAuth(e)) setStatus("切换失败：" + e.message, true);
-    hideAuth();
+    showAuth("login");
+    $("authUser").value = hit.username || "";
+    setStatus("换到 " + (hit.username || hit.userId) + " 需要再输一次他的密码（会话凭据不在本机明文里）");
   } finally {
     state.switching = false;
   }
 }
 
-function markIdentityStale(userId) { patchCurrent({ stale: true }); }
-
-/** 退出这台机器：作废当前这一枚，并把这个人从清单里去掉。
- *  只删本机不撤销就是个假动作——那枚令牌在服务端还活着。 */
+/** 退出这台机器：作废当前这一枚会话，并把这个人从清单里去掉。
+ *  只删本机不撤销就是个假动作——Cookie 里那枚在服务端还活着。
+ *  退完之后清单里剩下的人也没有一个是"在线"的：会话只装过刚退掉那位。
+ *  所以不自动指向别人——currentId 决定偏好写进谁的清单，指到一个没登录的人
+ *  身上就是埋雷；只把登录面预填成最新那位的名字，由人自己决定登谁。 */
 async function logoutCurrent() {
   const hit = currentEntry();
   if (!hit) { showAuth("login"); return; }
   if (!await dropIdentity(hit.userId)) return;
-  // 退回谁必须和 currentEntry 的兜底同一条规则：清单的插入顺序里可能躺着已被删除的
-  // 账号，取 [0] 会把人换成一枚死令牌，表现为"登录已失效"但界面还写着原来那个人。
+  resetViewForIdentity();
+  // 挑"最新一条"与 currentEntry 的兜底同一条规则：清单的插入顺序里可能躺着已被
+  // 删除的账号，不排序会预填一个根本不存在的人的名字。
   const rest = readIdentities().slice()
     .sort((a, b) => (b.addedAt || "").localeCompare(a.addedAt || ""));
-  if (rest.length) { setCurrent(rest[0].userId); await switchTo(rest[0].userId); }
-  else { resetViewForIdentity(); showAuth("register"); }
+  if (rest.length) { showAuth("login"); $("authUser").value = rest[0].username || ""; }
+  else showAuth("register");
 }
 
 function emptyItem(text) {
@@ -2272,14 +2308,22 @@ function bind() {
     pref.setPersona(pref.sessionId, ""); syncPersonaChip(); setStatus("角色设定已清除");
   };
 
-  $("saveTokenBtn").onclick = () => {
+  $("saveTokenBtn").onclick = async () => {
     const token = $("tokenInput").value.trim();
     if (!token) { setStatus("令牌那一格还是空的", true); return; }
-    // 必须建一条清单条目：pref.token 只改"当前那一条"，一台谁都没记过的机器上
-    // 没有当前条目，直接写就是静默无效。user_id 这里只能先占一个——重启后
-    // loadWho 认出他是谁，touchIdentity 再把名字与角色补上。
-    addIdentity({ user_id: "manual", username: "", role: "user", token });
-    location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
+    $("saveTokenBtn").disabled = true;
+    try {
+      // 手工录入的凭据走 adopt：明文只活过这一次请求头，换回的是 httpOnly Cookie
+      // 与服务端报回的真实身份。旧写法拿 "manual" 占位再等 loadWho 补名字，
+      // 现在不必——adopt 的响应体就是 /v1/auth/me 同形的答案。
+      const me = await API.adopt(token);
+      $("tokenInput").value = "";          // 用完就清出输入框，不留第二眼
+      addIdentity({ user_id: me.user_id, username: me.username, role: me.role });
+      location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
+    } catch (e) {
+      $("saveTokenBtn").disabled = false;
+      setStatus("这枚凭据没被认：" + e.message, true);
+    }
   };
   $("openRegister").onclick = () => { closeSettings(); showAuth("register"); };
   $("authEye").onclick = toggleAuthPass;
@@ -2440,7 +2484,9 @@ function checkBuild(local) {
 }
 
 async function boot() {
-  migrateLegacyIdentity();   // 必须排第一：pref 现在从清单读，没迁就等于把有令牌的人当陌生人
+  // 必须排第一：升级（老键/清单里的明文洗成 Cookie）没做完就往下读，等于把
+  // 一个还在线的人当陌生人，或者让旧明文多活一个页面生命周期。
+  await upgradeIdentitiesToCookie();
   applyTheme();
   bind();
   setupKeyboardAware();
@@ -2451,8 +2497,8 @@ async function boot() {
   $("ctxVal").textContent = pref.contextWindow;
   $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
-  /* 第一屏只能是中性层：本机有没有令牌是同步就知道的事，但"这枚令牌还有效吗"
-     必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
+  /* 第一屏只能是中性层：方案 C 起本机连"有没有凭据"都看不见（httpOnly 的本意），
+     "还有效吗"更必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
      先看到空聊天外壳加一个空白模型框，等 401 回来才弹层——手机上那个
      「1 → 3 → 2」的闪序就是它。现在不问完不露任何东西。 */
   showAuthPending();
@@ -2470,7 +2516,7 @@ async function boot() {
   // "服务没起来"伪装成"你没登录"——所以那一路露出外壳和上面那句话。
   if (state.me) hideAuth();          /* 令牌有效，含冷启动先盖了中性层那一路 */
   else if (unreachable) hideAuth();
-  else showAuth(pref.token ? "login" : "register");   /* 有令牌却被拒才换登录面；没令牌的仍停在注册 */
+  else showAuth(currentEntry() ? "login" : "register");   /* 记着人却被拒才换登录面；谁的会话都没有的仍停在注册 */
   renderMessages();
   syncPersonaChip();
 

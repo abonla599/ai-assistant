@@ -6,16 +6,21 @@
  * 2) 用户名与任务目标都是别人写下的字符串，一律走 textContent / createElementNS
  *    建树，绝不拼 innerHTML——拼进 HTML 等于让某个人的用户名在这台管理员的
  *    浏览器里执行。
- * 3) 换发回来的令牌明文只存在于内存和这一次弹窗里，不写 localStorage、不打控制台。
+ * 3) 方案 C 起这个页面不持有任何凭据：粘贴的口令只活过一次 adopt 请求头，会话
+ *    是 httpOnly Cookie；换发回来的他人令牌明文只存在于那一次弹窗里，
+ *    不写 localStorage、不打控制台。
  * 4) 界面上每句话都说后端真做了的事。删除与换发到底动了哪三份数据，读的是
  *    app/core/auth.py 里 delete_user / rotate_token 的实现，不是想象。
  */
 (() => {
   "use strict";
 
-  const KEY = "accessToken";                 // 与 /app 同一个键：同源，登录态共享
+  const KEY = "accessToken";   // 老时代的明文键：这个页面如今只负责把它扫出去
   const $ = (id) => document.getElementById(id);
-  let token = localStorage.getItem(KEY) || "";
+  // 方案 C：JS 不再持有任何凭据——会话住在 httpOnly Cookie 里，页面连"本机有没有
+  // 会话"都看不见，登录态只能问一次 /v1/auth/me 才算数。这里顺手清掉旧版本写进
+  // localStorage 的明文：同源下它躺在同一个抽屉里，清一次少一分被别的脚本读走的机会。
+  try { localStorage.removeItem(KEY); } catch (e) { /* 无痕模式读不到也犯不着炸 */ }
 
   /* ---------- 建树 ---------- */
 
@@ -104,17 +109,23 @@
 
   /* ---------- 请求 ---------- */
 
+  const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
   async function req(path, opts) {
+    const method = (opts && opts.method) || "GET";
     const headers = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = "Bearer " + token;
+    // 方案 C：会话凭据是 httpOnly Cookie，浏览器自动附带；JS 手里没有任何
+    // 明文可拼 Authorization。不安全方法必须声明 CSRF 头（后端只对
+    // "凭据出自 Cookie"的请求检查它）。
+    if (UNSAFE.has(method)) headers["X-CSRF"] = "1";
     const res = await fetch(path, {
-      method: (opts && opts.method) || "GET",
+      method,
+      credentials: "same-origin",
       headers,
       body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
     });
     let data = null;
     try { data = await res.json(); } catch (e) { /* 空响应体 */ }
-    if (res.status === 401) { showGate("口令不对或已失效"); throw new Error("401"); }
+    if (res.status === 401) { showGate("会话无效或已过期，粘贴口令重新登录"); throw new Error("401"); }
     if (!res.ok) {
       const detail = data && data.detail ? data.detail : ("HTTP " + res.status);
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -502,12 +513,14 @@
   /* ---------- 装配 ---------- */
 
   async function boot() {
-    if (!token) return showGate("");
+    // 没有本地明文可查了，"我是谁"必须现场问：Cookie 里若有会话，me 就直接放行，
+    // 连口令都不用再粘（与 /app 同源共享同一枚 Cookie）。
     let me;
     try {
       me = await req("/v1/auth/me");
     } catch (e) {
-      return;                                   // showGate 已在 401 分支里做过
+      if (e.message !== "401") showGate("后端没连上：" + e.message);
+      return;                                   // 401 那一路 req 已经把 gate 摆好了
     }
     if (me.role !== "admin") return showGate("这把口令有效，但它不是管理员。");
     $("gate").classList.add("hidden");
@@ -524,18 +537,34 @@
   $("btnLogin").addEventListener("click", async () => {
     const v = $("pass").value.trim();
     if (!v) return showGate("口令不能为空");
-    token = v;
-    localStorage.setItem(KEY, token);
-    try { await boot(); }
-    catch (e) { if (e.message !== "401") showGate(e.message); }
+    $("pass").value = "";                       // 明文不留在输入框里等第二眼
+    // 全页唯一一次手搓 Authorization：口令只在这一个请求头里出现，换回来的是
+    // 服务端签发的 httpOnly 会话 Cookie。之后此页对凭据一无所知——这正是目的。
+    try {
+      const res = await fetch("/v1/auth/adopt", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Authorization: "Bearer " + v, "X-CSRF": "1" },
+      });
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* 空响应体 */ }
+      if (res.status === 401) return showGate("口令不对或已失效");
+      if (!res.ok) {
+        const d = data && data.detail ? data.detail : ("HTTP " + res.status);
+        return showGate("没能收编会话：" + d);
+      }
+      await boot();
+    } catch (e) { showGate("后端没连上：" + e.message); }
   });
   $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnLogin").click(); });
 
-  $("btnLogout").addEventListener("click", () => {
-    localStorage.removeItem(KEY);
-    token = "";
+  $("btnLogout").addEventListener("click", async () => {
+    // 真撤销：作废服务端这一枚并刮掉 Cookie。旧版"只清本机"的写法在方案 C 下
+    // 反而是最坏的——Cookie 不归 JS 清，不叫 logout 它就一直在线。
+    try { await req("/v1/auth/logout", { method: "POST" }); }
+    catch (e) { /* 401/断网：撤销至少没成功，但面板照收——没人守着半开的门 */ }
     $("panel").classList.add("hidden");
-    showGate("已退出本机保存的口令（对方的令牌不受影响）。");
+    showGate("已退出：这一台设备的会话已作废，其他设备不受影响。");
   });
 
   $("btnReload").addEventListener("click", (e) => busy(e.currentTarget, boot));
