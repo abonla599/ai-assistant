@@ -752,6 +752,9 @@ class ProviderRequest(BaseModel):
     api_key: str = ""
     model: str
     supports_vision: bool = False
+    # 上下文上限（K token）。留 None → 存储层归一为缺省 64；界面据此给
+    # 「上下文长度」滑杆封顶。钳制/非法值判据只写在 providers._validate 一处。
+    max_context_k: Optional[int] = None
     is_default: bool = False
 
 def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:

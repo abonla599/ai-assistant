@@ -115,10 +115,32 @@ def looks_placeholder(key: str) -> bool:
     return any(h in lowered for h in PLACEHOLDER_HINTS)
 
 
+# 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。
+# 定成 64 而不是更大：它是"界面敢让你把预算拉到多远"的闸门，虚高的代价是
+# 越界报错（上游 4xx），偏低的代价只是少带几轮历史——选边明显。
+DEFAULT_MAX_CONTEXT_K = 64
+MAX_CONTEXT_K_CEIL = 10000
+
+def normalize_max_context_k(value) -> int:
+    """把任意输入洗成 1..10000 的整数 K；None/空/非法 → 缺省 64。
+
+    写路径（_validate）与读路径（catalog/_public 对老记录的兜底）共用这一个口径，
+    别各写一份——两处数字对不上时，界面封顶和实际预算会静默分叉。
+    """
+    if value is None or value == "":
+        return DEFAULT_MAX_CONTEXT_K
+    try:
+        k = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONTEXT_K
+    return max(1, min(MAX_CONTEXT_K_CEIL, k))
+
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改
 PRESETS = {
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
-                 "model": "deepseek-flash", "supports_vision": True},
+                 "model": "deepseek-flash", "supports_vision": True,
+                 # 官方 v4 系（flash/pro）窗口 1M token（2026-09 用户核实）
+                 "max_context_k": 1000},
     "dashscope": {"label": "阿里云百炼 Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus", "supports_vision": False},
     "dashscope-vl": {"label": "阿里云百炼 Qwen 视觉", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max", "supports_vision": True},
     "openai": {"label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "supports_vision": True},
@@ -143,6 +165,7 @@ def _seed_from_env() -> list:
         "base_url": (os.getenv("DEEPSEEK_BASE_URL") or PRESETS["deepseek"]["base_url"]).strip(),
         "api_key": key,
         "model": "deepseek-flash",
+        "max_context_k": PRESETS["deepseek"]["max_context_k"],
         "supports_vision": True,
         "is_default": True,
     }]
@@ -482,6 +505,7 @@ class ProviderStore:
             "api_key": str(record.get("api_key") or "").strip(),
             "model": model,
             "supports_vision": bool(record.get("supports_vision")),
+            "max_context_k": normalize_max_context_k(record.get("max_context_k")),
             "is_default": bool(record.get("is_default")),
             "paid_by": paid_by,
             "owner": owner,
@@ -506,6 +530,9 @@ class ProviderStore:
                 "name": p["label"],
                 "model": p["model"],
                 "supports_vision": p["supports_vision"],
+                # 老记录可能在字段加入之前就躺在盘上：读路径同样过一次归一，
+                # 界面封顶永远拿到一个真数字，而不是 undefined。
+                "max_context_k": normalize_max_context_k(p.get("max_context_k")),
                 "default": bool(p.get("is_default")),
                 "shared": not self._is_private(p),
                 "usable": usable,
@@ -518,6 +545,7 @@ class ProviderStore:
         return {
             "id": p["id"], "label": p["label"], "base_url": p["base_url"],
             "model": p["model"], "supports_vision": p["supports_vision"],
+            "max_context_k": normalize_max_context_k(p.get("max_context_k")),
             "is_default": bool(p.get("is_default")),
             "shared": not ProviderStore._is_private(p),
             "api_key_masked": mask_key(p.get("api_key", "")),
