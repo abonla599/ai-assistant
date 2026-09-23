@@ -40,6 +40,9 @@ def _write_json_atomic(path: str, payload) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        # replace 原子不等于落盘：flush + fsync 之后才 replace，断电不丢配置。
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -284,6 +287,12 @@ class ProviderStore:
                 # 未填新密钥时保留原密钥，避免编辑界面回显掩码后被写回
                 if looks_placeholder(cleaned["api_key"]):
                     cleaned["api_key"] = self._items[existing].get("api_key", "")
+                # 同理保留计费归属：前端 PUT 的请求模型（ProviderRequest）没有
+                # paid_by 字段，_validate 一律兜底成 operator。不接回来的话，
+                # "用户自带 key" 那条账每改一次配置就被静默翻成"管理员垫钱"，
+                # 账本从此是假账。只有调用方明确传了 paid_by 才允许改。
+                if not str(record.get("paid_by") or "").strip():
+                    cleaned["paid_by"] = self._items[existing].get("paid_by") or "operator"
                 self._items[existing] = cleaned
                 if cleaned["is_default"]:
                     self._clear_default_except(cleaned["id"])
