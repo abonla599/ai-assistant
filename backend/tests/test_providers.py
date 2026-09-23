@@ -468,3 +468,76 @@ def test_a_vendor_that_echoes_the_header_back_leaves_no_key_in_the_ping_detail(t
     assert STORED_KEY not in result["detail"], f"密钥从探活结果里漏出去了：{result['detail']}"
     assert "401" in result["detail"], "脱敏不该把「上游回了 401」这条线索一起抹掉"
     assert STORED_KEY in store.resolve(saved["id"])["api_key"], "脱敏只许改出口，不许改配置本身"
+
+
+# ---------- owner 维度：私有 provider 的存储层不变式 ----------
+
+def _priv(**over):
+    base = {"label": "私有", "model": "m", "base_url": "https://p.invalid/v1",
+            "api_key": "sk-private-store-key-1", "owner": "u_a"}  # secret-scan:allow 测试假密钥
+    base.update(over)
+    return base
+
+
+def test_private_record_never_wins_site_default(tmp_path):
+    store = _fresh_store(tmp_path)
+    shared = store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                           "api_key": "sk-shared-0001112223"})  # secret-scan:allow 测试假密钥
+    priv = store.upsert(_priv(is_default=True))
+    assert priv["is_default"] is False, "私有条目不许自称站级默认"
+    assert store.default()["id"] == shared["id"]
+
+
+def test_first_record_auto_default_skips_private(tmp_path):
+    """库里第一条恰好是用户私有：也不能自动顶成站级默认。"""
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    assert priv["is_default"] is False
+    assert store.default() is None
+
+
+def test_upsert_update_inherits_owner_and_cannot_turn_public(tmp_path):
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    again = store.upsert({**priv, "label": "改名", "owner": ""})
+    assert again["owner"] == "u_a", "更新路径不许把私有条目'改姓'成共享"
+
+
+def test_set_default_rejects_private(tmp_path):
+    store = _fresh_store(tmp_path)
+    store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                  "api_key": "sk-shared-0001112223"})  # secret-scan:allow
+    priv = store.upsert(_priv())
+    assert store.set_default(priv["id"]) is False
+
+
+def test_resolve_user_id_keeps_own_and_shared_and_falls_back_for_others(tmp_path):
+    store = _fresh_store(tmp_path)
+    shared = store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                           "api_key": "sk-shared-0001112223"})  # secret-scan:allow
+    priv_a = store.upsert(_priv())
+    assert store.resolve(priv_a["id"], user_id="u_a")["id"] == priv_a["id"]
+    assert store.resolve(shared["id"], user_id="u_b")["id"] == shared["id"]
+    # B 用 A 的私有 id：与不存在同一路径，回落（B 视角的）默认
+    assert store.resolve(priv_a["id"], user_id="u_b")["id"] == shared["id"]
+    # 内部调用（不带 user_id、拿已验过归属的具体 id）仍可解析私有
+    assert store.resolve(priv_a["id"])["id"] == priv_a["id"]
+
+
+def test_prefs_persist_and_sweep_on_delete(tmp_path):
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    store.set_pref("u_a", priv["id"])
+    assert store.default_for("u_a")["id"] == priv["id"]
+    # 换一个实例（模拟重启）：偏好还在原文件里
+    again = ProviderStore_reopen(tmp_path)
+    assert again.get_pref("u_a") == priv["id"]
+    assert again.default_for("u_b") == again.default()
+    again.delete(priv["id"])
+    assert again.get_pref("u_a") is None
+    assert again.default_for("u_a") == again.default()
+
+
+def ProviderStore_reopen(tmp_path):
+    from app.core.providers import ProviderStore
+    return ProviderStore(path=str(tmp_path / "providers.json"))

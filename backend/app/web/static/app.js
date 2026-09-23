@@ -187,6 +187,8 @@ const state = {
   filter: "",
   memoryQuery: "",
   editingProvider: null,
+  editingScope: null,     // "admin"=改共享条目（管理员面）| "mine"=我的模型 | null=表单没开
+  myDefault: null,        // /v1/me/providers 报的"我的默认"，服务端持久化那份
   me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
 };
 
@@ -636,9 +638,6 @@ function applyRole() {
      都不值这一行的信息量 */
   $("userAvatar").textContent = name ? name[0] : "·";
   syncSetIdentity();
-  // 正停在管理员专属的二级页时角色没了：退回一级列表，别对着一个必然 403 的表单站着。
-  if (!admin && !$("setPages").classList.contains("hidden")
-      && document.querySelector('.set-page[data-page="providers"]:not(.hidden)')) showSetList();
 }
 
 /* ---------------- 模型服务 ---------------- */
@@ -653,12 +652,13 @@ async function loadModels() {
 
   const usable = state.providers.filter((p) => p.usable);
   if (!usable.length) {
-    // 「模型服务」是管理员面：把普通用户推进那个页签，他只会对着 403 站着。
+    // 没有可用模型时两条路都通：管理员配全站共享，普通用户也能在同一个页面
+    // 用自带 key 添加"我的模型"。所以不再把普通用户挡在页外，只给指路的一句话。
     if (isAdmin()) {
       setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
       openSettings("providers");
     } else {
-      setStatus("服务端还没有可用的模型，请联系管理员配置模型服务", true);
+      setStatus("还没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加，或联系管理员配置", true);
     }
   } else {
     setStatus("");      // 有模型可用了：那句"没有服务"到此为止
@@ -714,10 +714,15 @@ function currentProvider() {
 }
 
 async function loadProviders() {
-  const data = await API.providers();
-  const list = $("providerList");
-  list.innerHTML = "";
-  (data.providers || []).forEach((p) => list.appendChild(providerRow(p)));
+  const data = await API.myProviders();
+  const admin = isAdmin();
+  const shared = $("sharedProvList");
+  shared.innerHTML = "";
+  (data.shared || []).forEach((p) => shared.appendChild(providerRow(p, admin ? "admin" : "shared")));
+  const mine = $("myProvList");
+  mine.innerHTML = "";
+  (data.mine || []).forEach((p) => mine.appendChild(providerRow(p, "mine")));
+  state.myDefault = data.default || null;
   $("presetRow").innerHTML = "";
   Object.entries(data.presets || {}).forEach(([key, preset]) => {
     const b = document.createElement("button");
@@ -728,14 +733,22 @@ async function loadProviders() {
   });
 }
 
-function providerRow(p) {
+/* 一行的可操作性由 scope 决定，而不是由"看起来像谁的"决定：
+   shared = 别人的/站级的共享条目，普通用户只读；
+   admin  = 同一条共享条目，管理员拿 /v1/providers 那面全权管理；
+   mine   = 这个人自己的私有条目，走 /v1/me/providers。
+   ★「我的默认」人人可点（含共享条目）——它写的是这个人的偏好，不动别人的配置。 */
+function providerRow(p, scope) {
   const el = document.createElement("div");
   el.className = "prov";
 
   const pm = document.createElement("div");
   pm.className = "pm";
   const b = document.createElement("b");
-  b.textContent = p.label + (p.is_default ? "（默认）" : "");
+  let suffix = "";
+  if (p.is_default && scope !== "mine") suffix += "（全站默认）";
+  if (state.myDefault === p.id) suffix += "（我的默认）";
+  b.textContent = p.label + suffix;
   const s = document.createElement("span");
   s.textContent = `${p.model} · ${p.base_url} · ${p.api_key_masked || "未填密钥"}`;
   pm.append(b, s);
@@ -755,33 +768,51 @@ function providerRow(p) {
     btn.onclick = fn;
     return btn;
   };
-  ops.append(
-    mk("✎", "编辑", () => openProviderForm(p)),
-    mk("★", "设为默认", async () => {
+  const reload = () => Promise.all([loadProviders(), loadModels()]);
+  if (scope !== "shared") {
+    ops.append(
+      mk("✎", "编辑", () => openProviderForm(p, scope)),
+      mk("⚡", "测试连通", async () => {
+        const box = $("provTestResult");
+        box.textContent = "测试中…";
+        try {
+          const r = scope === "admin" ? await API.testProvider(p.id) : await API.testMyProvider(p.id);
+          box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
+        } catch (e) { box.textContent = "❌ " + e.message; }
+      })
+    );
+  }
+  if (p.has_key) {
+    ops.append(mk("★", "设为我的默认", async () => {
+      try { await API.setMyDefaultProvider(p.id); }
+      catch (e) { /* 服务端存不住也要本机先生效：localStorage 是那台设备的答案 */ }
+      pref.provider = p.id;
+      await reload();
+      renderModelSelect();
+    }));
+  }
+  if (scope === "admin") {
+    ops.append(mk("◎", "设为全站默认", async () => {
       await API.setDefaultProvider(p.id);
-      await Promise.all([loadProviders(), loadModels()]);
-    }),
-    mk("⚡", "测试连通", async () => {
-      const box = $("provTestResult");
-      box.textContent = "测试中…";
-      try {
-        const r = await API.testProvider(p.id);
-        box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
-      } catch (e) { box.textContent = "❌ " + e.message; }
-    }),
-    mk("×", "删除", async () => {
+      await reload();
+    }));
+  }
+  if (scope !== "shared") {
+    ops.append(mk("×", "删除", async () => {
       if (!confirm(`删除「${p.label}」？`)) return;
-      await API.deleteProvider(p.id);
-      await Promise.all([loadProviders(), loadModels()]);
-    })
-  );
+      if (scope === "admin") await API.deleteProvider(p.id);
+      else await API.deleteMyProvider(p.id);
+      await reload();
+    }));
+  }
 
   el.append(pm, tag, ops);
   return el;
 }
 
-function openProviderForm(p) {
+function openProviderForm(p, scope) {
   state.editingProvider = p.id;
+  state.editingScope = scope;
   $("provId").value = p.id;
   $("provLabel").value = p.label;
   $("provBase").value = p.base_url;
@@ -793,6 +824,17 @@ function openProviderForm(p) {
   $("provForm").classList.remove("hidden");
 }
 
+function openBlankProviderForm(scope) {
+  state.editingProvider = null;
+  state.editingScope = scope;
+  $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
+  $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
+  $("provKey").placeholder = "填入 API Key";
+  $("provTestResult").textContent = "";
+  $("provForm").classList.remove("hidden");
+  $("provLabel").focus();
+}
+
 function fillFormFromPreset(preset) {
   if (!state.editingProvider) $("provLabel").value = preset.label;
   $("provBase").value = preset.base_url;
@@ -802,6 +844,7 @@ function fillFormFromPreset(preset) {
 
 function closeProviderForm() {
   state.editingProvider = null;
+  state.editingScope = null;
   $("provForm").classList.add("hidden");
 }
 
@@ -817,13 +860,24 @@ function providerDraftFromForm() {
   };
 }
 
+/* 新条目默认落"我的模型"：表单从哪个按钮打开，保存就走哪一面。
+   编辑共享条目只有管理员能进入表单（行上的 ✎ 只画给 admin），所以
+   scope=admin 的编辑必然对得上 /v1/providers 的管理员要求。 */
+function providerScopeIsMine() {
+  return (state.editingScope || "mine") !== "admin";
+}
+
 async function saveProvider(ev) {
   ev.preventDefault();
   const draft = providerDraftFromForm();
   const box = $("provTestResult");
+  const mine = providerScopeIsMine();
   try {
     if (state.editingProvider) {
-      await API.updateProvider(state.editingProvider, draft);
+      if (mine) await API.updateMyProvider(state.editingProvider, draft);
+      else await API.updateProvider(state.editingProvider, draft);
+    } else if (mine) {
+      await API.addMyProvider(draft);
     } else {
       await API.addProvider(draft);
     }
@@ -839,7 +893,9 @@ async function testProviderDraft() {
   const box = $("provTestResult");
   box.textContent = "测试中…";
   try {
-    const r = await API.testProviderDraft(providerDraftFromForm());
+    const r = providerScopeIsMine()
+      ? await API.testMyProviderDraft(providerDraftFromForm())
+      : await API.testProviderDraft(providerDraftFromForm());
     box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
   } catch (e) {
     box.textContent = "❌ " + e.message;
@@ -1265,7 +1321,7 @@ async function send(text) {
       setStatus("当前没有可用模型，请在「设置 → 模型服务」中配置", true);
       openSettings("providers");
     } else {
-      setStatus("当前没有可用模型，请联系管理员配置模型服务", true);
+      setStatus("当前没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加模型，或联系管理员配置", true);
     }
     return;
   }
@@ -1414,13 +1470,6 @@ function showSetList() {
 }
 
 function openSetPage(name) {
-  // 模型服务这一面对普通用户全是 403：入口平时已被 applyRole 收走，这里是第二道，
-  // 免得别处（快捷键、角色切换后的旧状态）把他推进一个只会报错的表单。
-  if (name === "providers" && !isAdmin()) {
-    setStatus("模型服务只能由管理员配置，请联系管理员", true);
-    showSetList();
-    return;
-  }
   const page = document.querySelector(`.set-page[data-page="${name}"]`);
   if (!page) { showSetList(); return; }
   $("setPageTitle").textContent = SET_PAGES[name];
@@ -2207,6 +2256,9 @@ function bind() {
       return;
     }
     pref.provider = e.target.value;
+    // 本机立刻生效，服务端那份让"我的默认"跟着人走而不是跟着设备走。
+    // 存失败不反悔本次选择：localStorage 仍是这台设备的答案，下次开机再补写。
+    API.setMyDefaultProvider(e.target.value).catch(() => {});
     setStatus("");
   };
   $("exportBtn").onclick = exportCurrent;
@@ -2269,15 +2321,8 @@ function bind() {
   $("rowPassword").onclick = () => { closeSettings(); showAuth(); showAuthView("recover"); };
   $("rowLogout").onclick = logoutCurrent;
 
-  $("addProviderBtn").onclick = () => {
-    state.editingProvider = null;
-    $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
-    $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
-    $("provKey").placeholder = "填入 API Key";
-    $("provTestResult").textContent = "";
-    $("provForm").classList.remove("hidden");
-    $("provLabel").focus();
-  };
+  $("addProviderBtn").onclick = () => openBlankProviderForm("mine");
+  $("addSharedBtn").onclick = () => openBlankProviderForm("admin");
   $("provForm").onsubmit = saveProvider;
   $("provTestBtn").onclick = testProviderDraft;
   $("provCancelBtn").onclick = closeProviderForm;

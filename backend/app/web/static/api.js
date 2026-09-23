@@ -198,8 +198,8 @@ const API = (() => {
     upload,
     fileBlobUrl,
 
-    /* 模型服务配置：整个这一面都是管理员端点（能改所有人的上游）。
-     * 普通用户拿 403，所以 app.js 按角色把入口收起来，不发这一枪。
+    /* 模型服务配置（管理员面）：改的是**所有人**的上游，后端要求管理员。
+     * 普通用户拿 403；他们的自助面在下面 /v1/me/providers 那一组。
      */
     providers: () => request("/v1/providers"),
     addProvider: (rec) => request("/v1/providers", { method: "POST", body: rec }),
@@ -208,6 +208,18 @@ const API = (() => {
     setDefaultProvider: (id) => request(`/v1/providers/${encodeURIComponent(id)}/default`, { method: "POST" }),
     testProvider: (id) => request(`/v1/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),
     testProviderDraft: (rec) => request("/v1/providers/test", { method: "POST", body: rec }),
+
+    /* 个人模型服务面：所有登录用户可用，作用域由服务端按身份圈定——
+     * 这里不传也不需要传任何 user_id；别人的私有条目在这里等于不存在。
+     * 「我的默认」持久化在服务端，换设备不再回到站级默认。
+     */
+    myProviders: () => request("/v1/me/providers"),
+    addMyProvider: (rec) => request("/v1/me/providers", { method: "POST", body: rec }),
+    updateMyProvider: (id, rec) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "PUT", body: rec }),
+    deleteMyProvider: (id) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "DELETE" }),
+    setMyDefaultProvider: (id) => request("/v1/me/providers/default", { method: "POST", body: { provider_id: id } }),
+    testMyProvider: (id) => request(`/v1/me/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),
+    testMyProviderDraft: (rec) => request("/v1/me/providers/test", { method: "POST", body: rec }),
 
     createSession: (model) => request("/v1/sessions?model=" + encodeURIComponent(model), { method: "POST" }),
     listSessions: () => request("/v1/sessions"),
