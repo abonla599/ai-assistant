@@ -155,6 +155,11 @@ def _isolated_throttle():
     # 来源攒到 429，饿死后面真点按钮的用例。加新闸门时这里跟着长。
     from app.web import web_router
     web_router._APK_DOWNLOADS.clear()
+    # 工具频控账本同一性质（tools/executor 的滑动窗口，进程内、10 分钟不自动松）：
+    # 任何多用了几次 execute_code 的用例会把 "anon" 攒到闸门阈值，后面断言"代码跑
+    # 出来了"的用例会拿到一句"调用过于频繁"。
+    from app.tools import executor as _tools_executor
+    _tools_executor._FREQ_LEDGER.clear()
     yield
 
 
