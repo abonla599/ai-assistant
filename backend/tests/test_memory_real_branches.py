@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -186,10 +187,15 @@ def _no_cloud_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def _fake_openai(bucket, vectors=None):
+def _fake_openai(bucket, vectors=None, ctor_bucket=None):
     class FakeOpenAI:
         def __init__(self, **kwargs):
-            pass
+            if ctor_bucket is not None:
+                ctor_bucket.update(kwargs)
+
+        def with_options(self, **kwargs):
+            bucket["_with_options"] = kwargs
+            return self
 
         @property
         def embeddings(self):
@@ -197,7 +203,7 @@ def _fake_openai(bucket, vectors=None):
 
             class _E:
                 def create(self, **kwargs):
-                    bucket.update(kwargs)
+                    bucket.update({k: v for k, v in kwargs.items() if k != "_with_options"})
                     vec = (vectors or {}).get(kwargs.get("model"), [0.1, 0.2, 0.3, 0.4])
                     return SimpleNamespace(
                         data=[SimpleNamespace(embedding=list(vec))])
@@ -221,6 +227,33 @@ def test_embed_boot_cloud_path(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "secret-embed-9k" not in out, "启动日志里躺着明文嵌入模型名（派单②的验收点）"
+
+
+def test_embed_cloud_client_fails_fast_but_probe_stays_lenient(tmp_path, monkeypatch):
+    """云端嵌入客户端必须自带短超时且不重试——上游嵌入服务挂起不返回那晚（2026-09-23），
+    SDK 默认 600s×3 让每条聊天卡 122~152 秒，手机端表现为"对话框没有回应"。
+
+    同时启动探发要留宽限：探失败会当场降级后端，不能被一次偶发慢响应误判。
+    """
+    monkeypatch.setenv("api_key", "sk-not-a-real-key")
+    monkeypatch.setenv("EMBEDDINGS_BASE_URL", "https://embed.invalid/v1")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "secret-embed-9k")
+    probe, ctor = {}, {}
+    monkeypatch.setattr(mm, "OpenAI", _fake_openai(probe, ctor_bucket=ctor))
+
+    mm.MemoryManager(persist_dir=str(tmp_path / "chroma"))
+
+    timeout = ctor.get("timeout")
+    assert isinstance(timeout, httpx.Timeout), \
+        f"嵌入客户端没配显式超时（拿到 {timeout!r}），上游挂起时聊天会陪着卡死"
+    assert timeout.read is not None and timeout.read <= 30, \
+        f"聊天嵌入超时过长：{timeout.read}s"
+    assert ctor.get("max_retries") == 0, \
+        f"嵌入客户端仍在重试（max_retries={ctor.get('max_retries')}），最坏延迟=超时×(重试+1)"
+
+    probe_timeout = probe.get("_with_options", {}).get("timeout")
+    assert isinstance(probe_timeout, httpx.Timeout) and probe_timeout.read > timeout.read, \
+        "启动探发没走更宽的超时：上游一次慢响应就会把整个后端误降级"
 
 
 def test_embed_boot_local_path(_no_cloud_env, tmp_path, monkeypatch):

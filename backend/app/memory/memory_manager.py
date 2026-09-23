@@ -16,6 +16,13 @@ load_project_env()
 # 禁用 chromadb 遥测，避免 CI 中报错干扰
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
+# 聊天链路上的嵌入请求超时：一次嵌入正常在几秒内返回，10 秒拿不到就按失败处理，
+# 让聊天最多为记忆多等 10 秒，而不是陪着挂起的上游干等两分钟（见 __init__ 注释）。
+EMBED_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+# 启动探发的超时单独放宽：探失败会当场把后端降级成本地/伪嵌入（甚至因维度冲突
+# 起不来），不该被上游一次偶发慢响应误判。
+EMBED_PROBE_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+
 
 def _default_persist_dir() -> str:
     """记忆库位置的唯一事实来源，避免依赖进程工作目录。
@@ -69,15 +76,25 @@ class MemoryManager:
                         # 嵌入接口一旦因信任锚不对而握手失败，下面会静默降级成
                         # 伪嵌入：不报错，但语义检索再也读不到记忆。所以这里必须
                         # 与聊天用同一个信任锚，见 app/core/tls.py
+                        # max_retries=0 + 显式短超时是聊天延迟的唯一防线：SDK 默认
+                        # 600 秒 × 3 次重试，上游嵌入接口"挂起不返回"时每条聊天会被
+                        # 拖到两分钟以上（2026-09-23 实测：连续三条 122~152 秒，
+                        # 探针 15 秒无响应）。记忆本就是尽力而为（inject_context 与
+                        # save_interaction 都包在 try/except 里），快速失败降级成
+                        # "本次不带记忆"远好于整条聊天卡死。
                         self.client = OpenAI(
                             api_key=api_key,
                             base_url=base_url,
-                            http_client=httpx.Client(verify=system_ssl_context())
+                            http_client=httpx.Client(verify=system_ssl_context()),
+                            timeout=EMBED_TIMEOUT,
+                            max_retries=0,
                         )
                         self.embed_model = embed_model
                         # 启动时就打一发：地址写错、key 作废、模型名不存在，这些都要在
                         # 这里露出来，而不是等到第一次写记忆时才发现库是空的。
-                        self.client.embeddings.create(model=embed_model, input=["test"])
+                        # 探发单独用宽超时（with_options），聊天请求仍走 EMBED_TIMEOUT 快断。
+                        self.client.with_options(timeout=EMBED_PROBE_TIMEOUT) \
+                            .embeddings.create(model=embed_model, input=["test"])
                         # 嵌入模型名同样是"哪家在做推理"的一部分：只进打码后的日志。
                         print(f"✅ 使用云端嵌入模型 {logsanitizer.redact(embed_model)}")
                     except Exception as e:
