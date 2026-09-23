@@ -156,8 +156,8 @@ const pref = {
   set sessionId(v) { patchCurrent({ lastSessionId: v || "" }); },
   get temperature() { return Number(localStorage.getItem("temperature") || 0.7); },
   set temperature(v) { localStorage.setItem("temperature", String(v)); },
-  get contextWindow() { return Number(localStorage.getItem("contextWindow") || 10); },
-  set contextWindow(v) { localStorage.setItem("contextWindow", String(v)); },
+  get contextTokensK() { return Number(localStorage.getItem("contextTokensK") || 8); },
+  set contextTokensK(v) { localStorage.setItem("contextTokensK", String(v)); },
   get theme() {
     const saved = localStorage.getItem("theme");
     if (saved) return saved;
@@ -212,14 +212,46 @@ function fmtSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-function truncate(list) {
-  const n = Math.max(2, pref.contextWindow);
-  return list.slice(-n).map((m) => ({ role: m.role, content: m.content }));
+/* token 估算：中日韩一个字≈一个 token，其余约四个字符一个。
+   是估算不是分词器——目的只有一个：让"上下文长度"用模型的真实刻度说话，
+   而不是"一句很长的话"和"一个空洞"都算一条。 */
+function estimateTokens(text) {
+  const s = String(text || "");
+  const cjk = (s.match(/[\u2e80-\u9fff\uf900-\ufaff\uff01-\uff60]/g) || []).length;
+  return cjk + Math.ceil((s.length - cjk) / 4);
+}
+
+/* 按 token 预算从最近一条往回收：最后一条永远带上（它就是本轮要回答的话），
+   往前遇到塞不下的就到此为止——不回头丢中间，那会把对话剪成读不懂的碎片。 */
+function truncateWithin(list, budgetTokens) {
+  const out = [];
+  let used = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(list[i].content) + 4;   // +4：role/包装的固定开销
+    if (out.length && used + cost > budgetTokens) break;
+    out.unshift({ role: list[i].role, content: list[i].content });
+    used += cost;
+  }
+  return out;
+}
+
+/* 老键存的是"条数"（2..40 条）。条和 token 不是一个刻度，就地按一条≈0.5k 换算
+   写进新键；换算只发生一次，之后读数只走 contextTokensK。 */
+function migrateContextPref() {
+  if (localStorage.getItem("contextTokensK") !== null) return;
+  const old = Number(localStorage.getItem("contextWindow") || 0);
+  if (old > 0) {
+    localStorage.setItem("contextTokensK",
+      String(Math.min(60, Math.max(2, Math.round(old / 2)))));
+  }
 }
 
 function outbound() {
-  const msgs = truncate(state.messages.filter((m) => m.content && !m.transient));
   const persona = pref.persona(pref.sessionId);
+  const reserve = persona ? estimateTokens(persona) + 4 : 0;
+  const msgs = truncateWithin(
+    state.messages.filter((m) => m.content && !m.transient),
+    Math.max(500, pref.contextTokensK * 1000 - reserve));
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
 }
@@ -2398,8 +2430,8 @@ function bind() {
   $("provCancelBtn").onclick = closeProviderForm;
 
   $("ctxRange").oninput = (e) => {
-    pref.contextWindow = e.target.value;
-    $("ctxVal").textContent = pref.contextWindow;
+    pref.contextTokensK = e.target.value;
+    $("ctxVal").textContent = pref.contextTokensK;
   };
 
   $("memoryAddForm").onsubmit = async (e) => {
@@ -2608,8 +2640,9 @@ async function boot() {
   // 壳的事件入口只注册这一次。没有桥时这个数组永远没人推，注册本身无害。
   SHELL.onEvent(onShellEvent);
   updateSendEnabled();
-  $("ctxRange").value = pref.contextWindow;
-  $("ctxVal").textContent = pref.contextWindow;
+  migrateContextPref();
+  $("ctxRange").value = pref.contextTokensK;
+  $("ctxVal").textContent = pref.contextTokensK;
   $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
   /* 第一屏只能是中性层：方案 C 起本机连"有没有凭据"都看不见（httpOnly 的本意），

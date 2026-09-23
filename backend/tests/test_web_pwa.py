@@ -703,7 +703,7 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
         assert end > 0
         return html[start:end + len(close)]
 
-    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文条数"), ("exportBtn", "导出对话")):
+    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文预算"), ("exportBtn", "导出对话")):
         assert "data-admin-only" not in row_of(el_id), \
             f"{el_id} 那一行标了 data-admin-only：普通用户没有{what}的能力，而且不会报错"
     prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
@@ -1266,6 +1266,85 @@ def test_quick_model_switch_chip_is_wired_end_to_end():
 
     # 3) API 封装存在（前端调的名字必须真在 api.js 里）
     assert "setMyDefaultProvider" in api
+
+
+_CTX_TOKEN_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const w = (n) => "词".repeat(n);
+const msgs = [
+  { role: "user", content: w(100) },
+  { role: "assistant", content: w(100) },
+  { role: "user", content: w(100) },
+];
+const huge = [
+  { role: "user", content: "开场" },
+  { role: "user", content: "最后一条特别长：" + w(900) },
+];
+const out = {
+  cjk4: ctx.estimateTokens("你好世界"),
+  ascii8: ctx.estimateTokens("abcdabcd"),
+  empty: ctx.estimateTokens(""),
+  full250: ctx.truncateWithin(msgs, 250).map((m) => m.role),
+  tight120: ctx.truncateWithin(msgs, 120).map((m) => m.role),
+  lastAlwaysKept: ctx.truncateWithin(huge, 100).map((m) => m.role),
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_context_length_is_displayed_and_budgeted_in_tokens():
+    """「上下文长度」从"条"换成 token 预算（缩写 k）——用户点名要的刻度。
+
+    显示是 k、读数走新键、截断按预算、老设备有迁移：四段是一条跨文件契约，
+    任何一段掉回"条"，用户看到的预算就是假的。
+    """
+    html = _html()
+    js = _js()
+
+    m = re.search(r'<b id="ctxVal">\d+</b>k', html)
+    assert m, "上下文长度没有按 k 缩写显示（形如 8k）"
+    row = html[m.start():html.index("</div>", m.start())]
+    assert "条" not in row, "k 之外还挂着「条」：两套刻度同时出现在一行里"
+    assert "携带上下文条数" not in html
+    range_tag = re.search(r'<input[^>]*id="ctxRange"[^>]*>', html).group(0)
+    assert 'aria-label="上下文 token 预算（k）"' in range_tag
+    assert 'min="2"' in range_tag and 'max="60"' in range_tag, "滑杆还停在旧条数量程"
+
+    assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
+    ob = _function_body(js, "outbound")
+    assert "contextTokensK" in ob and "truncateWithin(" in ob, "发送历史没按 token 预算截"
+    assert "estimateTokens" in _function_body(js, "truncateWithin")
+    boot = _function_body(js, "boot")
+    assert "migrateContextPref()" in boot, "老设备的条数设置没在开机时换算"
+    assert "contextTokensK" in _function_body(js, "migrateContextPref")
+
+
+def test_token_estimate_and_budget_truncation_behavior():
+    """node 真跑纯函数：估算口径与"最后一条必带、往前放不下就停"是行为契约。
+
+    "中文一字≈1 token、其余≈4字符1个"和截断的停止规则，文本断言读不出对错——
+    口径错半档，用户设的 8k 就是系统性偏大/偏小的预算，必须拿运行时说话。
+    """
+    import json, shutil, subprocess, tempfile
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    src = "\n".join(_fn_text(_js(), n) for n in ("estimateTokens", "truncateWithin"))
+    d = Path(tempfile.mkdtemp(prefix="ctx-token-js-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(_CTX_TOKEN_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["cjk4"] == 4 and out["ascii8"] == 2 and out["empty"] == 0, \
+        f"估算口径变了：{out}"
+    assert out["full250"] == ["assistant", "user"], "预算够两条却收了别的形状"
+    assert out["tight120"] == ["user"], "预算只够最后一条时多收了（会 400）"
+    assert out["lastAlwaysKept"] == ["user"], "超长的那条当前问题必须仍然被携带"
 
 
 def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
