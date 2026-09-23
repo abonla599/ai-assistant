@@ -44,26 +44,45 @@ def test_bundled_vc_runtime_is_not_the_stale_store_python_copy(dll):
     target = DIST_INTERNAL / dll
     if not target.is_file():
         pytest.skip(f"产物里没有 {dll}（运行库收集形状变了，产物锁不猜）")
-    import ctypes
-    from ctypes import wintypes
-
-    size = ctypes.windll.version.GetFileVersionInfoSizeW(str(target), None)
-    assert size, f"{dll} 读不到文件版本"
-    buf = ctypes.create_string_buffer(size)
-    assert ctypes.windll.version.GetFileVersionInfoW(str(target), 0, size, buf)
-    p = wintypes.LPVOID()
-    buflen = wintypes.UINT()
-    # VsFixedFileInfoSignature = '\\VS_VERSION_INFO'
-    assert ctypes.windll.version.VerQueryValueW(
-        buf, "\\VS_VERSION_INFO", ctypes.byref(p), ctypes.byref(buflen))
-    fixed = p.value  # VS_FIXEDFILEINFO*, dword-aligned
-    # ms = [0]dwSignature,[1]dwStrucVersion,[2]dwFileVersionMS,[3]dwFileVersionLS
-    ms, ls = ctypes.cast(fixed, ctypes.POINTER(ctypes.c_uint32))[2], \
-             ctypes.cast(fixed, ctypes.POINTER(ctypes.c_uint32))[3]
-    major, minor = ms >> 16, ms & 0xFFFF
-    build = ls >> 16
-    print(f"{dll}: {major}.{minor}.{build}")
+    version = _file_version(target)
+    major, minor = version[0], version[1]
     assert (major, minor) >= (14, 30), (
-        f"{dll} 打包版本 {major}.{minor}.{build} 还是商店版 Python 的同级老拷贝——"
+        f"{dll} 打包版本 {'.'.join(map(str, version))} 还是商店版 Python 的同级老拷贝——"
         "chroma 的 HNSW query 会在 MSVCP140 里空指针写崩（2026-09-23 聊天 502 根因）"
     )
+
+
+def _file_version(path):
+    """VS_FIXEDFILEINFO 里的文件版本 (major, minor, build, patch)。
+
+    三个 W 函数必须显式给 argtypes：不声明的话 ctypes 把 Python str 按 char* 传进
+    宽字符 API，路径被当成坏 UTF-16 读，VerQueryValue 静默返回 0——本机第一版
+    产物锁就是这么"红"的，别把它修成假绿。
+    """
+    import ctypes
+    from ctypes import (POINTER, WinDLL, byref, create_string_buffer, c_void_p,
+                        wintypes)
+
+    version = WinDLL("version")
+    version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR,
+                                                POINTER(wintypes.DWORD)]
+    version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                            wintypes.DWORD, c_void_p]
+    version.GetFileVersionInfoW.restype = wintypes.BOOL
+    version.VerQueryValueW.argtypes = [c_void_p, wintypes.LPCWSTR,
+                                       POINTER(c_void_p), POINTER(wintypes.UINT)]
+    version.VerQueryValueW.restype = wintypes.BOOL
+
+    zero = wintypes.DWORD(0)
+    size = version.GetFileVersionInfoSizeW(str(path), byref(zero))
+    assert size, f"{path} 读不到文件版本"
+    buf = create_string_buffer(size)
+    assert version.GetFileVersionInfoW(str(path), 0, size, buf), f"{path} 版本块读取失败"
+    p = c_void_p()
+    length = wintypes.UINT()
+    assert version.VerQueryValueW(buf, "\\", byref(p), byref(length)), \
+        f"{path} 没有 VS_FIXEDFILEINFO"
+    fixed = ctypes.cast(p, POINTER(wintypes.DWORD))
+    ms, ls = fixed[2], fixed[3]   # dwFileVersionMS / dwFileVersionLS
+    return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
