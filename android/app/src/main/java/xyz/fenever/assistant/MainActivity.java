@@ -32,7 +32,9 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -187,7 +189,26 @@ public class MainActivity extends Activity {
                             CAMERA_PERMISSION_CODE);
                     return;
                 }
-                runOnUiThread(() -> request.grant(request.getResources()));
+                grantAllowedResources(request);
+            }
+
+            /**
+             * 只把壳真正桥接过的资源类型（摄像头）交回 grant，其余一律 deny。
+             *
+             * 原来两处都是 request.grant(request.getResources())：resources 是网页说
+             * 要什么就有什么，直接透传等于**由被授权方决定授权清单**——页面今天加一句
+             * RESOURCE_AUDIO_CAPTURE（麦克风，清单里连 RECORD_AUDIO 都没声明，用户从未
+             * 在任何地方同意过），明天加一个我们还不知道的新类型，壳都会替它批。
+             */
+            private void grantAllowedResources(PermissionRequest request) {
+                String[] allowed = allowedResources(request);
+                runOnUiThread(() -> {
+                    if (allowed.length > 0) {
+                        request.grant(allowed);
+                    } else {
+                        request.deny();
+                    }
+                });
             }
         });
 
@@ -658,10 +679,28 @@ public class MainActivity extends Activity {
         pendingCameraRequest = null;
         boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
         if (granted) {
-            request.grant(request.getResources());
+            // 同样只回白名单内的资源：网页在这条请求里夹带的其它类型不因"用户点了
+            // 允许摄像头"而被顺带批准。
+            String[] allowed = allowedResources(request);
+            if (allowed.length > 0) {
+                request.grant(allowed);
+            } else {
+                request.deny();
+            }
         } else {
             request.deny();
         }
+    }
+
+    /** 网页请求的资源里，壳只认摄像头这一种（运行时权限也只为它弹过系统框）。 */
+    private static String[] allowedResources(PermissionRequest request) {
+        List<String> allowed = new ArrayList<>();
+        for (String res : request.getResources()) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                allowed.add(res);
+            }
+        }
+        return allowed.toArray(new String[0]);
     }
 
     @Override
