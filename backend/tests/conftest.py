@@ -21,6 +21,10 @@ os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 # enforced 覆盖。
 os.environ["AUTH_MODE"] = "disabled"
 os.environ["ACCESS_TOKEN"] = ""
+# 会话 Cookie 默认 Secure（现网只有 HTTPS）；TestClient 走 http://testserver，
+# 不显式降级则 Cookie 根本回不来，cookie 鉴权在测试里等于没测。生产忘配不会
+# fail-open——降级必须是这里的主动行为（判据见 tests/test_cookie_auth.py）。
+os.environ["AUTH_COOKIE_SECURE"] = "0"
 
 # 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
 # data/users.json —— 那是越出本次改动范围的外部副作用。
@@ -172,7 +176,8 @@ def _cleanup_test_data():
 # 上面那轮 CI 红换来的守卫：一次没还原成功的 monkeypatch 会把
 # AUTH_MODE=enforced + ACCESS_TOKEN=boot-token 留满整场，于是三十条与故障毫不
 # 相干的用例集体 401，红的地方离真凶隔了六个文件。
-_PRISTINE_AUTH_ENV = {k: os.environ.get(k) for k in ("AUTH_MODE", "ACCESS_TOKEN")}
+_PRISTINE_AUTH_ENV = {k: os.environ.get(k)
+                      for k in ("AUTH_MODE", "ACCESS_TOKEN", "AUTH_COOKIE_SECURE")}
 _PREV_TEST = {"nodeid": None}
 
 

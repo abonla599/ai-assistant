@@ -11,12 +11,13 @@
 3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与登录的响应，以及管理员
    轮换的响应。任何端点都不许复述调用方刚提交的密码或令牌。
 """
+import os
 import re
 import time
 from collections import defaultdict
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.core import authz, usage
@@ -265,6 +266,26 @@ def _too_many(retry_after: int) -> HTTPException:
                          headers={"Retry-After": str(retry_after)})
 
 
+def _attach_session(response: Response, token: str) -> None:
+    """把一枚刚被请求头出示过的凭据写进 httpOnly 会话 Cookie。
+
+    全服务端**只有 /v1/auth/adopt 一个调用方**——登录与注册刻意不设 Cookie：
+    ① 那几个公开端点的响应体契约（token 字段）一个字都不动，限流/枚举那套
+       按来源计费的判据也不跟着漂移；
+    ② 更要紧的是挡会话固定：若跨站的 login 响应能直接 Set-Cookie，攻击者就能
+       在自己页面上用**他自己的**账号把受害者浏览器钉在攻击者的会话上。Cookie
+       只从 adopt 出来，而 adopt 要求请求头里那枚凭据——跨站表单发不出
+       Authorization 头，这条缝就是死的。
+
+    secure 默认开（现网只走 cloudflared HTTPS）；本机 http 直连与测试用
+    AUTH_COOKIE_SECURE=0 显式降级——降级必须是主动行为，忘配不会 fail-open。
+    """
+    response.set_cookie(
+        key=authz.SESSION_COOKIE, value=token,
+        httponly=True, samesite="lax", path="/v1",
+        secure=os.getenv("AUTH_COOKIE_SECURE", "1").strip() != "0")
+
+
 class RegisterRequest(BaseModel):
     username: str
     password: str
@@ -402,6 +423,29 @@ def me(principal: Principal = CurrentPrincipal):
             "role": principal.role}
 
 
+@router.post("/v1/auth/adopt")
+def adopt(request: Request, response: Response,
+          principal: Principal = CurrentPrincipal):
+    """把请求头里出示的那枚凭据收编为 httpOnly 会话 Cookie（凭据 → 浏览器会话）。
+
+    前端拿到登录/注册响应体里的 token 后调用它一次，此后浏览器侧一切请求只靠
+    Cookie，token 明文在页面里存都不存；管理页粘贴 bootstrap 口令、手动录令牌
+    走的也是这同一条路。它同时是服务端**唯一**发 Cookie 的地方（见
+    _attach_session 那一段的会话固定论证）。
+
+    只认请求头凭据：一个只剩 Cookie 的会话没有可收编的新东西，再 adopt 一次
+    只是把同一枚 Cookie 原样重写，没有意义还多一个岔路，所以直接 400。
+    这也让本端点对 CSRF 天然免疫——跨站请求带不出 Authorization 头。
+    响应体与 /v1/auth/me 同形：adopt 成功的第一个用处就是当场确认身份。
+    """
+    token = authz._header_credential(request)
+    if not token:
+        raise HTTPException(status_code=400, detail="adopt 需要请求头里出示凭据")
+    _attach_session(response, token)
+    return {"user_id": principal.user_id, "username": principal.username,
+            "role": principal.role}
+
+
 # ---------- 管理端 ----------
 # role 不在任何请求体里：管理员只来自 ACCESS_TOKEN bootstrap，或来自运维手改
 # users.json。给 API 开一个写 role 的口子，等于把整套身份体系作废。
@@ -423,18 +467,23 @@ def _public_user(record: dict) -> dict:
 
 
 @router.post("/v1/auth/logout")
-def logout(request: Request, principal: Principal = CurrentPrincipal):
+def logout(request: Request, response: Response,
+           principal: Principal = CurrentPrincipal):
     """退出这台机器：只作废**调用方这一枚**令牌。
 
     刻意不清这个人的整张令牌表——那是管理员 rotate 的语义（怀疑口令泄露）。
     它还要能替"本机清单里的另一个人"退出：前端直接带上他那一枚来调就行，不必
     先把他切成当前身份、把他的会话加载到屏幕上（共用设备上没这个必要）。
 
-    取凭据复用 authz._credential：它已经管好了方案名大小写与 x-access-token
-    兜底，这里再写一份 split 就是第二个事实来源——两边一漂移就会出现
-    "中间件认得这枚、退出说不认识"，而表现是退出没反应。
+    取凭据复用 authz._credential：它已经管好了方案名大小写、x-access-token
+    兜底、以及"请求头没有就看会话 Cookie"——这里再写一份 split 就是第二个事实
+    来源，两边一漂移就会出现"中间件认得这枚、退出说不认识"，而表现是退出没反应。
     """
     _store().revoke(authz._credential(request))
+    # Cookie 里的会话已随上面那枚作废；把壳也刮掉，浏览器侧不留一条死凭据。
+    # path 必须与 _attach_session 一致，否则删不掉（Cookie 按 域名+path 定位）。
+    response.delete_cookie(key=authz.SESSION_COOKIE, path="/v1",
+                           samesite="lax")
     return {"status": "logged_out"}
 
 
