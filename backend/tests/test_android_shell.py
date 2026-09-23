@@ -365,6 +365,21 @@ def test_the_apk_provider_registration_and_the_installer_share_one_authority():
     assert "ApkFileProvider.uriForFile" in main, "安装页不再通过手写 provider 拿 URI"
 
 
+def test_the_apk_provider_imports_parcelfiledescriptor_from_the_real_package():
+    """ParcelFileDescriptor 在 android.os，不在 android.content——第一次签发 v0.19 就死在这。
+
+    本机没有 Android SDK，这类"类名对、包名错"的 import 只有 CI 编译时才炸；而炸的位置
+    恰好是全链路唯一没有 JVM 台架覆盖的一环（provider 依赖平台类，纯 Java 测试跑不了）。
+    所以在这里钉一行：错包名一旦出现，develop 推送即红，不用等打 tag 才发现。
+    """
+    provider = (SHELL_SRC / "xyz" / "fenever" / "assistant" / "ApkFileProvider.java") \
+        .read_text(encoding="utf-8")
+    assert "import android.os.ParcelFileDescriptor;" in provider, \
+        "ParcelFileDescriptor 的 import 包名又漂了：它在 android.os"
+    assert "import android.content.ParcelFileDescriptor;" not in provider, \
+        "android.content 下没有这个类，编译必炸（v0.19 首发实测）"
+
+
 def test_install_intent_and_its_permission_arrive_together():
     """起安装页与 REQUEST_INSTALL_PACKAGES 必须同批存在。
 
