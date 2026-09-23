@@ -96,3 +96,9 @@ _verify_*.py
 # 并行的工作区（git worktree）：每个都是自己那份检出，绝不该被别的检出跟踪。
 # 不加这条，另一个会话里 `git add -A` 会把整棵 worktree 卷进提交。
 /.worktrees/
+
+# GitHub check-run 的响应 dump，含 client_id / owner 等仓库元数据
+cr.json
+# 协作运行时目录
+.qoder-collab-runtime/
+.qoder-user-skill-runtime/
