@@ -10,14 +10,18 @@
 import os
 import re
 import sys
+import threading
+import time
 import zlib
+from collections import defaultdict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse as StarletteFileResponse
 
 from app.core import releases
+from app.core.auth_router import _client_ip
 
 # APK 的 MIME 只写这一次；浏览器认的是它 + Content-Disposition，两样缺一就变成
 # "下载已完成，但点开后系统问这是什么文件"。
@@ -215,6 +219,37 @@ def _site_dir() -> str:
 SITE_DIR = _site_dir()
 
 
+# ---------- 「安卓版」那颗按钮的闸门（审查 #8，2026-09-23） ----------
+# 免鉴权 + 一次点击最多搬 16MB 过内存、还要替来客朝 GitHub 跑一趟——原先没有任何
+# 并发/频率闸门：一个人写个循环就能把出口带宽和内存按住，全站陪着他卡。
+# 两把闸，各挡一种形状：
+# ① 按来源 IP 限频：一小时 3 次够真人"换了手机再下一次"，脚本则要每 3 次换一枚真 IP；
+#    来源取 auth_router._client_ip 那一个口径（必经 Cloudflare 时才认 CF-Connecting-IP），
+#    不在此处重写第二份取 IP 的逻辑——两边一漂移，闸门就挡错人。
+# ② 单飞行槽位：同一时刻最多一个人真正在代取。槽位被占**不排队**——排队等于把
+#    攻击者的积压搬进线程池，那正是这笔 DoS 的另一半；拿不到槽就退回发布页，
+#    与"取不到"同一个退路，最坏情况不比以前差。
+# 只有真开了代取才扣格子：GitHub 挂了不该把点按钮的真人锁在门外。
+APK_WINDOW_SECONDS = 3600
+APK_MAX_PER_SOURCE = 3
+MAX_TRACKED_APK_SOURCES = 4096
+_APK_DOWNLOADS = defaultdict(list)
+_APK_SLOTS = threading.Semaphore(1)
+
+
+def _apk_throttled(ip: str) -> int:
+    """还让不让这个来源开代取；让则返回 0，否则返回 Retry-After 秒数。"""
+    now = time.monotonic()
+    recent = [t for t in _APK_DOWNLOADS[ip] if now - t < APK_WINDOW_SECONDS]
+    _APK_DOWNLOADS[ip] = recent
+    if len(_APK_DOWNLOADS) > MAX_TRACKED_APK_SOURCES:
+        for key in [k for k, v in _APK_DOWNLOADS.items() if not v]:
+            _APK_DOWNLOADS.pop(key, None)
+    if len(recent) >= APK_MAX_PER_SOURCE:
+        return max(1, int(APK_WINDOW_SECONDS - (now - min(recent))) + 1)
+    return 0
+
+
 def install_site(app: FastAPI) -> None:
     """官网:`GET /` 出 index.html,静态资源挂 `/site`。
 
@@ -231,7 +266,7 @@ def install_site(app: FastAPI) -> None:
     # 这条必须注册在 /site 那个 Mount **之前**：Mount 是按前缀匹配的，排在后面的
     # 精确路由永远轮不到——症状不是报错，是"点了安卓版 404"。
     @app.get("/site/android.apk", include_in_schema=False)
-    def site_android_apk():
+    def site_android_apk(request: Request):
         """官网那颗「安卓版」：服务端替访问者把这一版的 APK 取回来，一次点击直接落盘。
 
         为什么不 302 到 GitHub：那正是这颗按钮原本把人丢去的地方。取不到就退回发布页
@@ -241,12 +276,28 @@ def install_site(app: FastAPI) -> None:
         必须是**同步 def**：这条要朝 GitHub 搬一百来 KB 的字节，写成 async 就是占着
         事件循环干活（判据在 tests/test_event_loop_not_blocked.py 的名单里）。
         reason 一律打进日志：EXE 是隐藏窗口起的，不打印就只剩人猜是哪一层坏了。
+
+        2026-09-23（审查 #8）起带两道闸：按来源限频 + 单飞行代取，见
+        _APK_DOWNLOADS 上面那段。退路不变：拿不到真字节一律 302 发布页或 429，
+        绝不回 200 空文件。
         """
         plan, why = releases.download_plan()
-        data = None
-        if plan:
+        if not plan:
+            print(f"[site] 代取 APK 失败，退回发布页：{why}", flush=True)
+            return RedirectResponse(releases.RELEASES_PAGE, status_code=302)
+        ip = _client_ip(request)
+        if (retry_after := _apk_throttled(ip)):
+            raise HTTPException(status_code=429, detail="下载尝试过于频繁，请稍后再试",
+                                headers={"Retry-After": str(retry_after)})
+        if not _APK_SLOTS.acquire(blocking=False):
+            print("[site] 代取 APK 已有他人在途，退回发布页", flush=True)
+            return RedirectResponse(releases.RELEASES_PAGE, status_code=302)
+        try:
+            _APK_DOWNLOADS[ip].append(time.monotonic())
             data, why = releases.fetch_asset(plan["url"])
-        if not plan or data is None:
+        finally:
+            _APK_SLOTS.release()
+        if data is None:
             print(f"[site] 代取 APK 失败，退回发布页：{why}", flush=True)
             return RedirectResponse(releases.RELEASES_PAGE, status_code=302)
         return Response(content=data, media_type=APK_MEDIA_TYPE,
