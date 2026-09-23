@@ -403,7 +403,8 @@ def _prepare_chat(request: ChatRequest, principal: Principal):
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
-    provider = provider_store.resolve(request.provider, legacy_model=request.model)
+    provider = provider_store.resolve(request.provider, legacy_model=request.model,
+                                      user_id=principal.user_id)
 
     messages = list(request.messages)
     last = messages[-1] or {}
@@ -712,10 +713,14 @@ from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
 @app.get("/v1/models")
-def list_models(_: Principal = CurrentPrincipal):
+def list_models(principal: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
 
-    身份在这里刻意不用取名（catalog() 是全站视图），挂它也不是为了挡住匿名读取
+    清单是**按当前用户裁剪的**：全局共享条目 + 这个人自己的私有 provider。
+    别人的私有条目从这里根本不存在（与 resolve 的越权即回落同一套口径），
+    所以这个端点同时也是一个"哪些模型存在"的诚实答案，不掺枚举信号。
+
+    挂身份依赖不是为了挡住匿名读取
     ——那道门由 install_auth 的中间件在路由之前守着，但只在 **enforced 模式下、
     且只在 authz._PROTECTED_PREFIXES 那几个前缀（含 /v1/）之下**成立：disabled 模式
     人人都是本机管理员，websocket 握手更是压根不经过这个 HTTP 中间件（实测见
@@ -725,8 +730,8 @@ def list_models(_: Principal = CurrentPrincipal):
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
     """
     return {
-        "models": provider_store.catalog(),
-        "default": (provider_store.default() or {}).get("id"),
+        "models": provider_store.catalog(principal.user_id),
+        "default": (provider_store.default_for(principal.user_id) or {}).get("id"),
         "presets": PRESETS,
     }
 
@@ -749,9 +754,29 @@ class ProviderRequest(BaseModel):
     supports_vision: bool = False
     is_default: bool = False
 
+def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
+    """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
+
+    别人的私有 provider 与不存在的 id 走同一个 404、同一句话——和 sessions、
+    uploads 那两处的防枚举纪律一模一样：管理面与个人面都不许长成
+    "这个 id 存在吗"的探测器。
+    """
+    existing = provider_store.get(provider_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    owner = existing.get("owner") or ""
+    if require_own:
+        if owner != user_id:
+            raise HTTPException(status_code=404, detail="模型服务不存在")
+    elif owner:
+        # 管理员面碰私有条目：不存在（对管理员也不暴露用户私配的存在性）
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    return existing
+
 @app.get("/v1/providers")
 def list_providers(_: Principal = RequireAdmin):
-    # 绝不返回明文密钥，只给掩码与"是否已配置"
+    # 绝不返回明文密钥，只给掩码与"是否已配置"。清单只含共享条目：
+    # 用户私有 provider 连"存在"这件事都不进管理员面（owner 维度见 providers.py）
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
@@ -765,6 +790,7 @@ def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
 @app.put("/v1/providers/{provider_id}")
 def update_provider(provider_id: str, req: ProviderRequest,
                           _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     record = req.model_dump()
     record["id"] = provider_id
     try:
@@ -775,12 +801,14 @@ def update_provider(provider_id: str, req: ProviderRequest,
 
 @app.delete("/v1/providers/{provider_id}")
 def remove_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     if provider_store.delete(provider_id):
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
 def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     if provider_store.set_default(provider_id):
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
@@ -792,13 +820,13 @@ def test_provider(provider_id: str, _: Principal = RequireAdmin):
     必须是同步 def：ping 是一次 timeout=20 的阻塞模型调用，留在 async 里就是
     "点一下测试，整台服务二十秒不响应"（见 test_event_loop_not_blocked）。
     """
+    _owner_gate(provider_id, "", require_own=False)
     try:
         return provider_store.ping(provider_id)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/v1/providers/test")
-def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+def _test_draft(req: ProviderRequest) -> dict:
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())
@@ -813,7 +841,87 @@ def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
                                        max_tokens=4)
         return {"ok": True, "detail": f"{candidate['model']} 响应正常"}
     except Exception as e:
-        return {"ok": False, "detail": _fail_reason(e)}
+        # 上游/中转站可能把 Authorization 原样打印回来——出口过一次 scrub。
+        return {"ok": False, "detail": scrub_secrets(_fail_reason(e))}
+
+@app.post("/v1/providers/test")
+def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+    return _test_draft(req)
+
+# ---------- 个人模型服务（用户自带 API） ----------
+# 与管理员面的分界线：这里每条路由都按 principal.user_id 圈所有权。
+# 用户能增删改的只有自己名下的条目；自己的密钥只服务自己的请求（paid_by=user
+# 在 _validate 之上由这里钉死）。"普通用户可改写全站上游"依然是禁区——
+# 私有条目永不进站级默认（providers.default() 已滤），也不对其他人可见。
+
+class ProviderDefaultRequest(BaseModel):
+    provider_id: str
+
+@app.get("/v1/me/providers")
+def my_providers(principal: Principal = CurrentPrincipal):
+    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。"""
+    return {
+        "shared": provider_store.public_list(None),
+        "mine": provider_store.mine_public(principal.user_id),
+        "default": provider_store.get_pref(principal.user_id),
+        "presets": PRESETS,
+    }
+
+@app.post("/v1/me/providers")
+def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    record = req.model_dump()
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.put("/v1/me/providers/{provider_id}")
+def update_my_provider(provider_id: str, req: ProviderRequest,
+                       principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    record = req.model_dump()
+    record["id"] = provider_id
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.delete("/v1/me/providers/{provider_id}")
+def remove_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    provider_store.delete(provider_id)
+    return {"status": "deleted", "id": provider_id}
+
+@app.post("/v1/me/providers/default")
+def set_my_default_provider(req: ProviderDefaultRequest,
+                            principal: Principal = CurrentPrincipal):
+    """把「我默认用哪个模型」存到服务端。共享或自己的私有条目都可以指。"""
+    provider = provider_store.get(req.provider_id)
+    if provider is None or not provider_store.visible_to(req.provider_id, principal.user_id):
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    try:
+        provider_store.set_pref(principal.user_id, req.provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "default": req.provider_id}
+
+@app.post("/v1/me/providers/{provider_id}/test")
+def test_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    """只许试自己的条目：拿别人的（含共享的）已存密钥去发探测请求不是这个门的功能。"""
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    try:
+        return provider_store.ping(provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/v1/me/providers/test")
+def test_my_provider_draft(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    """保存前草稿试连：密钥是这个人刚填的，出口照过 scrub。"""
+    return _test_draft(req)
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")

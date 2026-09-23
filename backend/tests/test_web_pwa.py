@@ -661,8 +661,9 @@ def test_success_erases_the_stale_red_line():
     models = _function_body(js, "loadModels")
     assert re.search(r'\}\s*else\s*\{\s*setStatus\(""\);', models), \
         "拿到可用模型之后没人擦那句红的"
-    # 反向：真没模型时那句实话必须还在，两分支按角色分开措辞也是
-    assert "请联系管理员配置模型服务" in models and "设置 → 模型服务" in models, \
+    # 反向：真没模型时那句实话必须还在。两分支按角色分流：管理员配共享，
+    # 普通用户现在也能在同一页用自己的 API Key 添加"我的模型"（或联系管理员）。
+    assert "联系管理员" in models and "设置 → 模型服务" in models and "API Key" in models, \
         "把实话一起擦掉了：零模型时用户该看见一句真话"
 
 
@@ -1231,17 +1232,20 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
 
 
 def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
-    """providers 转管理员之后，普通用户点进「模型服务」就是一个 403。
+    """管理员专属控件靠一条属性（data-admin-only）+ JS 里一处统一收口，而不是散落的 if。
 
-    约定是一条属性（data-admin-only）+ JS 里一处统一开关，而不是散落的 if：
-    以后新加管理员专属控件只要带上这条属性就自动纳入，不必再改 app.js，也
-    不会"改了三处漏一处"。
+    v0.21 起「模型服务」入口和页体对所有人开放（普通用户在那里配"我的模型"），
+    不再属于管理员专属；这一页里唯一还收着的特权入口是"添加共享模型服务"那颗
+    按钮。契约随之改向：addSharedBtn 必须带属性，providers 三件套必须**不**带——
+    谁把它们重新标记回去，就等于把普通用户的入口又锁进 403。
     """
     html = _html()
     js = _js()
     marked = _ids_with_attr(html, "data-admin-only")
-    assert {"navProviders", "rowProviders", "paneProviders"} <= marked, \
-        f"模型服务的入口或页体没标出来：{sorted(marked)}"
+    assert "addSharedBtn" in marked, \
+        f"「添加共享模型服务」没标成管理员专属：{sorted(marked)}"
+    assert not ({"navProviders", "rowProviders", "paneProviders"} & marked), \
+        f"模型服务入口又被锁回管理员专属了：{sorted(marked)}"
     assert 'querySelectorAll("[data-admin-only]")' in js, "app.js 没有统一按属性收口"
     sweep = _function_body(js, "applyRole")
     assert re.search(r'classList\.toggle\("hidden"', sweep), "收口没有真的隐藏元素"

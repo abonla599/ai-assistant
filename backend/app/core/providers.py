@@ -155,9 +155,14 @@ class ProviderStore:
         # 两处事实来源迟早会漂移（"搬了记录没搬密钥"就是下一次的数据丢失），
         # 而 PROVIDERS_DB_PATH 一个变量本来就该把这份配置整体指走。
         self.keys_path = os.path.join(os.path.dirname(self.path), "provider_keys.json")
+        # 每人"默认用哪个模型"也是同一份配置的第三张脸，同样从记录路径推导。
+        # 此前这个偏好只活在设备 localStorage 里，换手机就回到全局默认——
+        # 用户在自己的私有模型和管理员共享模型之间的选择从此有了一份服务端答案。
+        self.prefs_path = os.path.join(os.path.dirname(self.path), "provider_prefs.json")
         self._lock = threading.Lock()
         self._items = []
         self._keys = {}
+        self._prefs = self._load_prefs()
         self._load()
 
     def _load_keys(self):
@@ -175,6 +180,22 @@ class ProviderStore:
 
     def _write_keys(self):
         _write_json_atomic(self.keys_path, self._keys)
+
+    def _load_prefs(self):
+        if not os.path.isfile(self.prefs_path):
+            return {}
+        try:
+            with open(self.prefs_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (ValueError, OSError) as e:
+            # 偏好读不动就当没设过：default_for 会回落全局默认，用户顶多回到
+            # "用站级默认"，不该把整个聊天链路拖崩。
+            print(f"⚠️ 模型偏好读不了（{e}），本轮按未设置默认处理")
+            return {}
+
+    def _write_prefs(self):
+        _write_json_atomic(self.prefs_path, self._prefs)
 
     def _load(self):
         migrated = False
@@ -241,6 +262,29 @@ class ProviderStore:
         with self._lock:
             return [dict(p) for p in self._items]
 
+    @staticmethod
+    def _is_private(p: dict) -> bool:
+        return bool(p.get("owner"))
+
+    @staticmethod
+    def _in_pool(p: dict, user_id: str) -> bool:
+        """某个用户"看得见、用得了"的判定：全局共享条目人人可见，私有条目只有主人可见。"""
+        owner = p.get("owner") or ""
+        return not owner or (user_id is not None and owner == user_id)
+
+    def pool(self, user_id: str = None) -> list:
+        """该用户可用的 provider 全集（共享 + 自己的私有）。user_id 为 None 只看共享。"""
+        with self._lock:
+            return [dict(p) for p in self._items if self._in_pool(p, user_id)]
+
+    def mine(self, user_id: str) -> list:
+        with self._lock:
+            return [dict(p) for p in self._items if p.get("owner") == user_id]
+
+    def visible_to(self, provider_id: str, user_id: str = None) -> bool:
+        p = self.get(provider_id)
+        return p is not None and self._in_pool(p, user_id)
+
     def get(self, provider_id: str):
         with self._lock:
             for p in self._items:
@@ -259,11 +303,15 @@ class ProviderStore:
 
         一个都不可用时仍退回老顺序，好让 resolve() 说出准确那句「缺少有效密钥」，
         而不是把"配了但没填 key"说成"尚未配置任何模型服务"。
+
+        私有条目（owner 非空）永不参选：用户自带 key 的模型只服务他一个人，
+        它要是能顶掉站级默认，一个人的配置就改变了所有人的默认上游。
         """
         with self._lock:
-            usable = [p for p in self._items
+            shared = [p for p in self._items if not self._is_private(p)]
+            usable = [p for p in shared
                       if not looks_placeholder(p.get("api_key", ""))]
-            for pool in (usable, self._items):
+            for pool in (usable, shared):
                 if not pool:
                     continue
                 for p in pool:
@@ -272,18 +320,62 @@ class ProviderStore:
                 return dict(pool[0])
             return None
 
-    def resolve(self, provider_id: str = None, legacy_model: str = None) -> dict:
-        """按 provider id 取配置；兼容旧的 model 字段；都没有则用默认。"""
+    def get_pref(self, user_id: str):
+        if not user_id:
+            return None
+        with self._lock:
+            return self._prefs.get(user_id)
+
+    def default_for(self, user_id: str = None):
+        """「这个人不指定模型时真正会用哪个」的唯一答案。
+
+        顺序：他自己的默认偏好（仍在其可用池内且密钥可用）→ 站级默认。
+        偏好失效（被删、密钥被清空）不报错，静默回落——换一台设备登录的人
+        不该因为上一台设备选过什么而被挡住聊天。
+        """
+        pref_id = self.get_pref(user_id)
+        if pref_id:
+            for p in self.pool(user_id):
+                if p["id"] == pref_id and not looks_placeholder(p.get("api_key", "")):
+                    return p
+        return self.default()
+
+    def set_pref(self, user_id: str, provider_id: str) -> None:
+        """把「我的默认模型」持久化到服务端。可指向共享或自己的私有条目。"""
+        if not user_id:
+            raise ProviderError("需要登录身份才能设置默认模型")
+        provider = self.get(provider_id)
+        if provider is None or not self._in_pool(provider, user_id):
+            raise ProviderError("模型服务不存在")
+        if looks_placeholder(provider.get("api_key", "")):
+            raise ProviderError(f"模型「{provider.get('label')}」缺少有效密钥")
+        with self._lock:
+            self._prefs[user_id] = provider_id
+            self._write_prefs()
+
+    def resolve(self, provider_id: str = None, legacy_model: str = None,
+                user_id: str = None) -> dict:
+        """按 provider id 取配置；兼容旧的 model 字段；都没有则用默认。
+
+        user_id 是给 HTTP 入口用的归属闸门：带了它，查找只在"共享 + 本人私有"
+        这个池子里做，别人的私有条目和根本不存在的条目是同一种失败（回落默认），
+        这条链路因此不会变成一个"这个 provider id 存在吗"的探测器。
+        不带 user_id 的既有调用方（pipeline/streaming/agents）拿的是入口已验过
+        归属的具体 id，行为保持原样。
+        """
         wanted = provider_id or legacy_model
+        pool = self.pool(user_id)
         provider = self.get(wanted) if wanted else None
+        if provider is not None and user_id is not None and not self._in_pool(provider, user_id):
+            provider = None
         if provider is None and wanted:
-            # 旧客户端可能传 "deepseek-chat" 之外的写法，忽略大小写再试一次
-            for p in self.all():
+            # 旧客户端可能传 provider id 之外的写法（如模型名），忽略大小写在池内再试一次
+            for p in pool:
                 if p["id"].lower() == wanted.lower() or p.get("model", "").lower() == wanted.lower():
                     provider = p
                     break
         if provider is None:
-            provider = self.default()
+            provider = self.default_for(user_id) if user_id is not None else self.default()
         if provider is None:
             raise ProviderError("尚未配置任何模型服务，请在「设置 → 模型服务」中添加")
         if looks_placeholder(provider.get("api_key", "")):
@@ -296,13 +388,23 @@ class ProviderStore:
         with self._lock:
             existing = next((i for i, p in enumerate(self._items) if p["id"] == cleaned["id"]), None)
             if existing is None:
-                cleaned["is_default"] = cleaned["is_default"] or not self._items
+                # 私有记录永不占站级默认位（包括"库里第一条"的自动置顶）。
+                if self._is_private(cleaned):
+                    cleaned["is_default"] = False
+                else:
+                    cleaned["is_default"] = cleaned["is_default"] or not self._items
                 self._items.append(cleaned)
                 # 「最多一颗 ★」是不变式，两条写路径都得守：更新分支清了别人的，
                 # 新增分支不清的话库里能存下两颗，而 default() 只认遍历到的第一颗。
                 if cleaned["is_default"]:
                     self._clear_default_except(cleaned["id"])
             else:
+                # 归属是服务端管的事实，不从请求里取：更新一条已存在的记录时
+                # owner 一律沿用库内那份——管理员的 PUT 不该把共享条目"改姓"，
+                # 也不该有任何路径能把私有条目转公或转给另一个人。
+                cleaned["owner"] = self._items[existing].get("owner") or ""
+                if self._is_private(cleaned):
+                    cleaned["is_default"] = False
                 # 未填新密钥时保留原密钥，避免编辑界面回显掩码后被写回
                 if looks_placeholder(cleaned["api_key"]):
                     cleaned["api_key"] = self._items[existing].get("api_key", "")
@@ -325,13 +427,25 @@ class ProviderStore:
             if len(self._items) == before:
                 return False
             if self._items and not any(p.get("is_default") for p in self._items):
-                self._items[0]["is_default"] = True
+                first_shared = next((p for p in self._items if not self._is_private(p)), None)
+                if first_shared is not None:
+                    first_shared["is_default"] = True
+            # 有人把默认押在这条上：删了就顺手清偏好，让 default_for 静默回落，
+            # 而不是留一个指向幽灵 id 的偏好永远走回落分支（行为一样，但脏）。
+            dirty = False
+            for uid, pid in list(self._prefs.items()):
+                if pid == provider_id:
+                    del self._prefs[uid]
+                    dirty = True
+            if dirty:
+                self._write_prefs()
             self._flush()
             return True
 
     def set_default(self, provider_id: str) -> bool:
         with self._lock:
-            if not any(p["id"] == provider_id for p in self._items):
+            hit = next((p for p in self._items if p["id"] == provider_id), None)
+            if hit is None or self._is_private(hit):
                 return False
             self._clear_default_except(provider_id)
             self._flush()
@@ -358,6 +472,9 @@ class ProviderStore:
         paid_by = str(record.get("paid_by") or "operator").strip()
         if paid_by not in ("operator", "user"):
             raise ProviderError("paid_by 只许 operator 或 user")
+        # owner 只由服务端写路径设置（/v1/me/providers 钉上调用者 user_id）；
+        # 这里只做归一，空串 = 全局共享。
+        owner = str(record.get("owner") or "").strip()
         return {
             "id": str(record.get("id") or f"p_{uuid.uuid4().hex[:8]}"),
             "label": label,
@@ -367,15 +484,22 @@ class ProviderStore:
             "supports_vision": bool(record.get("supports_vision")),
             "is_default": bool(record.get("is_default")),
             "paid_by": paid_by,
+            "owner": owner,
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
-    def public_list(self) -> list:
-        return [self._public(p) for p in self.all()]
+    def public_list(self, user_id: str = None) -> list:
+        """user_id=None → 全局共享清单（管理员面）；带 user_id → 该用户可用池。"""
+        return [self._public(p) for p in self.pool(user_id)]
 
-    def catalog(self) -> list:
+    def mine_public(self, user_id: str) -> list:
+        return [self._public(p) for p in self.mine(user_id)]
+
+    def catalog(self, user_id: str = None) -> list:
         items = []
-        for p in self.all():
+        pool = self.pool(user_id) if user_id is not None else [
+            p for p in self.all() if not self._is_private(p)]
+        for p in pool:
             usable = not looks_placeholder(p.get("api_key", ""))
             items.append({
                 "id": p["id"],
@@ -383,6 +507,7 @@ class ProviderStore:
                 "model": p["model"],
                 "supports_vision": p["supports_vision"],
                 "default": bool(p.get("is_default")),
+                "shared": not self._is_private(p),
                 "usable": usable,
                 "reason": "" if usable else "未配置有效密钥",
             })
@@ -394,6 +519,7 @@ class ProviderStore:
             "id": p["id"], "label": p["label"], "base_url": p["base_url"],
             "model": p["model"], "supports_vision": p["supports_vision"],
             "is_default": bool(p.get("is_default")),
+            "shared": not ProviderStore._is_private(p),
             "api_key_masked": mask_key(p.get("api_key", "")),
             "has_key": not looks_placeholder(p.get("api_key", "")),
             "paid_by": p.get("paid_by") or "operator",
