@@ -1304,22 +1304,56 @@ def test_context_length_is_displayed_and_budgeted_in_tokens():
     html = _html()
     js = _js()
 
-    m = re.search(r'<b id="ctxVal">\d+</b>k', html)
-    assert m, "上下文长度没有按 k 缩写显示（形如 8k）"
+    m = re.search(r'<b id="ctxVal">\d+</b>/<span id="ctxCap">\d+</span>k', html)
+    assert m, "上下文长度没有按「预算/上限k」显示（形如 8/64k）"
     row = html[m.start():html.index("</div>", m.start())]
     assert "条" not in row, "k 之外还挂着「条」：两套刻度同时出现在一行里"
     assert "携带上下文条数" not in html
     range_tag = re.search(r'<input[^>]*id="ctxRange"[^>]*>', html).group(0)
-    assert 'aria-label="上下文 token 预算（k）"' in range_tag
-    assert 'min="2"' in range_tag and 'max="60"' in range_tag, "滑杆还停在旧条数量程"
+    assert "上限随所选模型" in range_tag
+    assert 'min="2"' in range_tag and 'max="64"' in range_tag, "滑杆还停在旧量程"
 
     assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
     ob = _function_body(js, "outbound")
     assert "contextTokensK" in ob and "truncateWithin(" in ob, "发送历史没按 token 预算截"
+    assert "modelCapK()" in ob, "发送预算没对模型上限取 min：界面收敛不是唯一防线"
     assert "estimateTokens" in _function_body(js, "truncateWithin")
     boot = _function_body(js, "boot")
     assert "migrateContextPref()" in boot, "老设备的条数设置没在开机时换算"
     assert "contextTokensK" in _function_body(js, "migrateContextPref")
+
+
+def test_context_cap_follows_the_selected_model_end_to_end():
+    """「随所选模型自动取上限」是一条从存储到滑杆的链，断在哪一环界面都是假的。
+
+    后端：_validate 与 catalog 都过 normalize_max_context_k（老记录兜底 64）；
+    表单：provCtxK 有进有出；界面：renderModelSelect 刷完必重画上下文行，
+    而量程只认 modelCapK 一个出处。前端读的后端字段名由源码对源码钉死。
+    """
+    js = _js()
+    html = _html()
+    import app.core.providers as providers
+    import app.main as main
+
+    assert "max_context_k" in inspect.getsource(providers.normalize_max_context_k)
+    assert "max_context_k" in inspect.getsource(providers.ProviderStore.catalog), \
+        "catalog 不再把上限带给前端：模型档案成哑字段"
+    assert "max_context_k" in inspect.getsource(providers.ProviderStore._public)
+    assert "max_context_k" in main.ProviderRequest.model_fields, "API 不收这个字段，表单填了也白填"
+
+    cap = _function_body(js, "modelCapK")
+    assert "max_context_k" in cap and "currentProvider()" in cap, "封顶读的不是当前模型"
+    sync = _function_body(js, "syncCtxRow")
+    assert "modelCapK()" in sync and 'range.max' in sync and "ctxCap" in sync
+    assert "pref.contextTokensK > cap" in sync, "超限的旧预算没被收敛，显示与实发会分叉"
+    assert "state.providers.length" in sync, "清单未就绪就改写 pref：冷启动会误砍大模型的设置"
+    assert "syncCtxRow()" in _function_body(js, "renderModelSelect"), \
+        "切模型/刷清单没重画上下文行"
+
+    assert 'id="provCtxK"' in html
+    draft = _function_body(js, "providerDraftFromForm")
+    assert "provCtxK" in draft and "max_context_k" in draft, "表单的值进不了草稿"
+    assert "provCtxK" in _function_body(js, "openProviderForm"), "编辑不回显上限"
 
 
 def test_token_estimate_and_budget_truncation_behavior():

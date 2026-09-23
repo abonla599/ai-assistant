@@ -541,3 +541,43 @@ def test_prefs_persist_and_sweep_on_delete(tmp_path):
 def ProviderStore_reopen(tmp_path):
     from app.core.providers import ProviderStore
     return ProviderStore(path=str(tmp_path / "providers.json"))
+
+
+# ---------- 上下文上限（max_context_k）：滑杆随模型封顶的数据源 ----------
+
+def test_max_context_k_normalizes_any_input():
+    """判据只有这一处：写路径、读路径、兜底都走同一个函数。"""
+    from app.core.providers import normalize_max_context_k, DEFAULT_MAX_CONTEXT_K
+    assert normalize_max_context_k(None) == DEFAULT_MAX_CONTEXT_K == 64
+    assert normalize_max_context_k("") == 64
+    assert normalize_max_context_k("abc") == 64      # 垃圾输入不炸配置，兜底
+    assert normalize_max_context_k("256") == 256
+    assert normalize_max_context_k(256.9) == 256
+    assert normalize_max_context_k(-5) == 1          # 钳下限：0/负数没有意义
+    assert normalize_max_context_k(100000) == 10000  # 钳上限：防手滑 1M 打成 1000M
+
+
+def test_max_context_k_roundtrips_through_api_and_catalog():
+    """表单填的上限必须原样出现在 _public 与 /v1/models 里，前端才有封顶依据。"""
+    plain = client.post("/v1/providers", json=_payload()).json()["provider"]
+    assert plain["max_context_k"] == 64, "没填时应兜底为 64K"
+    big = client.post("/v1/providers", json=_payload(max_context_k=256)).json()["provider"]
+    assert big["max_context_k"] == 256
+    entry = next(m for m in client.get("/v1/models").json()["models"] if m["id"] == big["id"])
+    assert entry["max_context_k"] == 256, "catalog 没把上限带给前端：滑杆封不了顶"
+
+
+def test_legacy_provider_without_field_still_reports_a_number(tmp_path):
+    """字段加入之前就躺在盘上的老记录：读路径兜底成数字，界面拿不到 undefined。"""
+    import json
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps([{
+        "id": "old-one", "label": "老条目", "base_url": "https://api.old/v1",
+        "api_key": "sk-real-looking-legacy-999",  # secret-scan:allow 测试假密钥
+        "model": "m", "supports_vision": False, "is_default": False,
+        "paid_by": "operator", "owner": "",
+    }]), encoding="utf-8")
+    from app.core.providers import ProviderStore
+    store = ProviderStore(path=str(path))
+    assert store.catalog()[0]["max_context_k"] == 64
+    assert store.public_list()[0]["max_context_k"] == 64

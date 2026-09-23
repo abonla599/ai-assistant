@@ -246,12 +246,38 @@ function migrateContextPref() {
   }
 }
 
+/* 当前模型允许把预算拖到多远（K token）：读模型档案的 max_context_k。
+   后端 catalog/_public 已过一遍归一，这里拿到的必是数字；清单还没回来
+   （冷启动、未登录）时兜到 64，与服务端缺省同一口径。 */
+function modelCapK() {
+  const p = currentProvider();
+  return (p && p.max_context_k) || 64;
+}
+
+/* 设置里的「上下文长度」行：滑杆量程、步长与 `预算/上限` 显示随当前模型重画。
+   清单在手才允许把超限的旧预算收敛写回——冷启动时上限还只是兜底值，
+   那时就改写会把 256k 模型的设置误砍成 64。 */
+function syncCtxRow() {
+  const known = state.providers.length > 0;
+  const cap = Math.max(2, modelCapK());
+  const range = $("ctxRange");
+  range.max = cap;
+  range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
+  if (known && pref.contextTokensK > cap) pref.contextTokensK = cap;
+  range.value = pref.contextTokensK;
+  $("ctxVal").textContent = pref.contextTokensK;
+  $("ctxCap").textContent = cap;
+}
+
 function outbound() {
   const persona = pref.persona(pref.sessionId);
   const reserve = persona ? estimateTokens(persona) + 4 : 0;
+  // 读数时再对模型上限取一次 min：syncCtxRow 的收敛可能还没跑过（刚切完模型、
+  // 或这份 pref 是别的设备带来的大值），别指望界面刷新当唯一防线。
+  const budgetK = Math.min(pref.contextTokensK, modelCapK());
   const msgs = truncateWithin(
     state.messages.filter((m) => m.content && !m.transient),
-    Math.max(500, pref.contextTokensK * 1000 - reserve));
+    Math.max(500, budgetK * 1000 - reserve));
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
 }
@@ -729,6 +755,7 @@ function renderModelSelect() {
   });
   sel.value = pref.provider;
   renderModelChip();
+  syncCtxRow();   // 模型清单/当前模型变了，上下文行的量程与「/上限」跟着变
 }
 
 /* ---------------- 发送框旁的快速切换模型 ----------------
@@ -906,6 +933,7 @@ function openProviderForm(p, scope) {
   $("provLabel").value = p.label;
   $("provBase").value = p.base_url;
   $("provModel").value = p.model;
+  $("provCtxK").value = p.max_context_k || "";
   $("provVision").checked = !!p.supports_vision;
   $("provKey").value = "";
   $("provKey").placeholder = p.api_key_masked ? `已设置（${p.api_key_masked}），留空则不修改` : "填入 API Key";
@@ -917,7 +945,7 @@ function openBlankProviderForm(scope) {
   state.editingProvider = null;
   state.editingScope = scope;
   $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
-  $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
+  $("provKey").value = ""; $("provModel").value = ""; $("provCtxK").value = ""; $("provVision").checked = false;
   $("provKey").placeholder = "填入 API Key";
   $("provTestResult").textContent = "";
   $("provForm").classList.remove("hidden");
@@ -928,6 +956,7 @@ function fillFormFromPreset(preset) {
   if (!state.editingProvider) $("provLabel").value = preset.label;
   $("provBase").value = preset.base_url;
   $("provModel").value = preset.model;
+  if (preset.max_context_k != null) $("provCtxK").value = preset.max_context_k;
   $("provVision").checked = !!preset.supports_vision;
 }
 
@@ -944,6 +973,8 @@ function providerDraftFromForm() {
     base_url: $("provBase").value.trim(),
     api_key: $("provKey").value.trim(),
     model: $("provModel").value.trim(),
+    // 留空 → undefined → 服务端归一为缺省 64；判据（钳 1..10000）只写后端一处。
+    max_context_k: Number($("provCtxK").value) || undefined,
     supports_vision: $("provVision").checked,
     is_default: false,
   };
@@ -2641,8 +2672,7 @@ async function boot() {
   SHELL.onEvent(onShellEvent);
   updateSendEnabled();
   migrateContextPref();
-  $("ctxRange").value = pref.contextTokensK;
-  $("ctxVal").textContent = pref.contextTokensK;
+  syncCtxRow();   // 量程/上限先按兜底画一版，loadModels 后 renderModelSelect 会再校准
   $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
   /* 第一屏只能是中性层：方案 C 起本机连"有没有凭据"都看不见（httpOnly 的本意），

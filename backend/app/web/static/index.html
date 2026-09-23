@@ -185,9 +185,11 @@
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h9l3 3v13H6V4Z"/><path d="M9 4v5h6"/></svg></span>
               <span class="set-lbl">上下文长度</span>
               <!-- 2026-09-23：刻度从"条"换成 token（缩写 k）。条数让人以为
-                   上下文与内容无关，而模型真正吃得下的是 token——设置直接说 token。 -->
-              <span class="set-val"><b id="ctxVal">8</b>k
-                <input type="range" id="ctxRange" min="2" max="60" step="2" value="8" aria-label="上下文 token 预算（k）"></span></div>
+                   上下文与内容无关，而模型真正吃得下的是 token——设置直接说 token。
+                   斜杠后那截是**当前模型的上限**，来自模型档案的 max_context_k，
+                   切模型自动跟着换；滑杆拖不过它，预算也就不会越界吃 4xx。 -->
+              <span class="set-val"><b id="ctxVal">8</b>/<span id="ctxCap">64</span>k
+                <input type="range" id="ctxRange" min="2" max="64" step="2" value="8" aria-label="上下文 token 预算（k），上限随所选模型"></span></div>
             <button class="set-row" id="exportBtn">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></span>
               <span class="set-lbl">导出本次对话</span><span class="set-go">›</span></button>
@@ -287,6 +289,9 @@
             <label class="field"><span>Base URL</span><input id="provBase" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off"></label>
             <label class="field"><span>API Key</span><input id="provKey" type="password" placeholder="留空则保留原密钥" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
             <label class="field"><span>模型名</span><input id="provModel" type="text" placeholder="deepseek-flash / qwen-vl-max" autocomplete="off"></label>
+            <!-- 上限（K token）决定聊天设置里"上下文长度"滑杆能拖到多远：
+                 留空按 64K；豆包 256k 填 256，1M 窗口的填 1000。 -->
+            <label class="field"><span>上下文上限（K token）</span><input id="provCtxK" type="number" min="1" max="10000" step="1" placeholder="留空按 64，例如 256 或 1000" inputmode="numeric"></label>
             <label class="check"><input id="provVision" type="checkbox"><span>该模型支持图片输入（视觉）</span></label>
             <div class="row">
               <button class="btn" type="button" id="provTestBtn">测试连通</button>
