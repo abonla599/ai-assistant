@@ -51,6 +51,31 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# ── VC 运行库换血：顶层那份 msvcp/vcruntime 必须来自系统，不能是构建 Python 的同级旧拷贝 ──
+# 本机跑的是商店版 Python，它的安装目录里躺着一份 msvcp140.dll 14.29（"built by:
+# cloudtest"）。PyInstaller 顺 python312.dll 的依赖把它收进 _internal 顶层；exe 的
+# DLL 搜索顺序是"应用目录优先"，于是 chromadb_rust_bindings.pyd（C++/MSVC，导入
+# MSVCP140/VCRUNTIME140/VCRUNTIME140_1）被塞了一份比它构建时预期更老的运行库。
+# 表现：手机第一次发 /v1/chat/stream，记忆检索走 HNSW query，在 MSVCP140+0x13080
+# 对空指针做写 → 0xc0000005 整进程阵亡 → cloudflared 回 502 → watchdog 拉起、下条
+# 聊天再炸。2026-09-23 那次"HTTP 502"的全部根因，dump 里栈是
+# chromadb_rust_bindings+0x22ec309 → MSVCP140+0x1300c。
+# 最小复现（源码环境即可，不进 exe 也能炸）：
+#   ctypes.WinDLL(r"…\_internal\MSVCP140.dll")   # 预载老运行库
+#   chromadb.PersistentClient(...).get_or_create_collection("user_memories")
+#       .query(query_embeddings=[[0.1]*1536], n_results=5)                      # 段错误
+# numpy 自己那份哈希名并排的 msvcp140-<hash>.dll 不在射程内（SxS 名字不同，互不遮蔽），
+# 所以只洗顶层裸名，并整体换成系统 System32 的现役版本。
+_VC_NAMES = {"msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+             "msvcp140_codecvt_ids.dll", "vcruntime140.dll", "vcruntime140_1.dll"}
+a.binaries = [b for b in a.binaries
+              if os.path.basename(str(b[0])).lower() not in _VC_NAMES]
+import glob as _glob
+for _dll in (sorted(_glob.glob(r"C:\Windows\System32\msvcp140*.dll"))
+             + sorted(_glob.glob(r"C:\Windows\System32\vcruntime140*.dll"))):
+    a.binaries.append((os.path.basename(_dll), _dll, "BINARY"))
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
