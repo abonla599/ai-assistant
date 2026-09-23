@@ -5,6 +5,7 @@
 和 streaming.MODEL_CONFIG 三处，互不同步，导致"显示 DeepSeek 实际调 GPT"、
 "选了没反应的模型"这类问题无法根治。
 """
+import hashlib
 import json
 import os
 import re
@@ -229,6 +230,10 @@ class ProviderStore:
         self._keys = {p["id"]: p.get("api_key", "") for p in self._items if p.get("api_key")}
         _write_json_atomic(self.keys_path, self._keys)
         self._register_log_terms()
+        # 写路径 = 配置变了（改 key、换 base_url、动 timeout 之外的任何一维都算）。
+        # 客户端缓存整表作废，下一次 build_client 用新值重建——漏掉这一句，
+        # "改了设置没生效"会精确复现在上游连接层。
+        invalidate_client_cache()
 
 
     # ---- 查询 ----
@@ -412,16 +417,48 @@ class ProviderStore:
             return {"ok": False, "detail": scrub_secrets(f"{type(e).__name__}: {str(e)[:180]}")}
 
 
+def _client_cache_key(provider: dict, timeout: float, max_retries: int) -> tuple:
+    """缓存键带全"会改变上游连接行为"的每一维。
+    api_key 只进摘要不进字典键：键会随 dump/日志排查被整份打出来，
+    明文凭据不该多活一份副本。
+    """
+    raw = f"{provider.get('id')}|{provider.get('base_url')}|{provider.get('api_key')}"
+    return (hashlib.sha256(raw.encode("utf-8")).hexdigest(), timeout, max_retries)
+
+
 def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -> OpenAI:
     """唯一一个构造上游客户端的地方。
 
     timeout/max_retries 以前是各调用点自己传的（聊天走默认、探活走 20s/0 次），
     于是"探活"自己又现构了一份客户端——那份和这份漂移出一个参数，
     就会出现"探活说通、聊天说超时"这种查不出形状的话。
+
+    同一份配置现在只建一次（2026-09-23 审查 #9）：旧写法每次聊天都新建
+    `httpx.Client` + `OpenAI` 且从不 close，没有连接复用、fd 一路泄漏。
+    构造放锁内：客户端的构造不发网络请求，代价可忽略，换来的是"两个并发
+    首调各建一份、后一份覆盖前一份、前一份永远没人 close"这种竞态不存在。
+    任何配置写路径（_flush）整表作废：改过 key/base_url 的下一次调用必然建新的。
     """
-    return OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
-                  timeout=timeout, max_retries=max_retries,
-                  http_client=httpx.Client(verify=system_ssl_context()))
+    key = _client_cache_key(provider, timeout, max_retries)
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(key)
+        if client is None:
+            client = OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
+                            timeout=timeout, max_retries=max_retries,
+                            http_client=httpx.Client(verify=system_ssl_context()))
+            _CLIENT_CACHE[key] = client
+        return client
+
+
+def invalidate_client_cache() -> None:
+    """配置变更时作废整表。不按键精确淘汰是刻意的：条目就几 providers 的量，
+    整表清空没有代价，而"哪些维度算变更"以后一旦漂移，精确淘汰就会留下旧客户端。"""
+    with _CLIENT_CACHE_LOCK:
+        _CLIENT_CACHE.clear()
+
+
+_CLIENT_CACHE = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
 
 
 store = ProviderStore()
