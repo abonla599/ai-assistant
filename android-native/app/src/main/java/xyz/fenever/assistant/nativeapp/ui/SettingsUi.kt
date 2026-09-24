@@ -316,6 +316,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          onNote: (String, Boolean) -> Unit,
                          onModelsChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
+    // 「检查更新」的应用内状态：结果只写在这行的值槽里，绝不拉浏览器（用户要求）
+    var checking by remember { mutableStateOf(false) }
+    var updNote by remember { mutableStateOf("") }
     val light = isWebLight()
     val admin = Prefs.role == "admin"
     val me = Prefs.currentEntry()
@@ -431,10 +434,27 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         ).joinToString(" · ")
         SetRow("ⓘ", "版本", plain = true, trailing = "",
             valSlot = { SetValText(versionVal) })
-        SetRow("↻", "检查更新", trailing = "↗", valSlot = {
-            SetValText("$shellVer · 去下载页")
+        // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
+        // 值槽依次显示「点按检查 → 正在检查… → 结果」，全程不跳外部。
+        SetRow("↻", "检查更新", trailing = "", valSlot = {
+            SetValText(when {
+                checking -> "正在检查…"
+                updNote.isNotEmpty() -> updNote
+                else -> "$shellVer · 点按检查"
+            })
         }) {
-            onOpenUrl("https://github.com/abonla599/ai-assistant/releases/latest")
+            if (checking) return@SetRow
+            checking = true
+            scope.launch {
+                runCatching { Api.latestRelease() }
+                    .onSuccess { tag ->
+                        updNote = if (isNewerVersion(tag, BuildConfig.VERSION_NAME))
+                            "发现新版本 $tag，请到下载页获取安装包"
+                        else "已是最新版本 v${BuildConfig.VERSION_NAME}"
+                    }
+                    .onFailure { updNote = "没查到更新：GitHub 暂时打不开" }
+                checking = false
+            }
         }
         SetRow("☾", "外观", trailing = "⇅", valSlot = {
             SetValText(if (light) "浅色" else "深色")
@@ -556,6 +576,23 @@ private fun hostOf(url: String): String = runCatching {
     val def = when (u.scheme) { "https" -> 443; "http" -> 80; else -> -1 }
     if (u.port > 0 && u.port != def) "$h:${u.port}" else h
 }.getOrDefault("")
+
+/** 版本号逐段比大小（tag 形如 v0.22 / 0.22.1，缺段按 0 补）。任何一段解析不出数字
+ *  就当「没有更新」——宁可不报，也不给一行假的新版本提示。 */
+private fun isNewerVersion(tag: String, current: String): Boolean {
+    fun parts(s: String): List<Int>? {
+        val segs = s.trim().trimStart('v', 'V').split('.')
+        return segs.map { it.trim().toIntOrNull() ?: return null }
+    }
+    val a = parts(tag) ?: return false
+    val b = parts(current) ?: return false
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val x = a.getOrElse(i) { 0 }
+        val y = b.getOrElse(i) { 0 }
+        if (x != y) return x > y
+    }
+    return false
+}
 
 /* ---------------- 账户页（renderAccounts 逐行） ---------------- */
 @Composable

@@ -1,5 +1,6 @@
 package xyz.fenever.assistant.nativeapp.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -594,11 +595,19 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    // 设置弹层（.modal 手机档：底部出、一张弹层内换 view，不开第二层）
+    // 设置弹层（.modal 手机档：底部出、一张弹层内换 view，不开第二层）。
+    // 用户钦定出口只有两个：返回键 和 一级页右上角 ×——点遮罩不关（onDismissRequest
+    // 留空，它只会由遮罩触发，因为拖拽关闭已用 sheetGesturesEnabled=false 禁掉），
+    // 返回键由弹层内的 BackHandler 接管：二级页先退回一级列表（同 ‹），一级页关整层。
     if (settingsPage != null) {
-        ModalBottomSheet(onDismissRequest = { settingsPage = null },
+        ModalBottomSheet(onDismissRequest = { /* 遮罩点击：不关，见上 */ },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = MaterialTheme.colorScheme.surface) {
+            containerColor = MaterialTheme.colorScheme.surface,
+            sheetGesturesEnabled = false) {
+            BackHandler {
+                val p = settingsPage ?: ""
+                settingsPage = if (p.isNotEmpty()) "" else null
+            }
             SettingsSheet(
                 page = settingsPage ?: "",
                 onOpenPage = { settingsPage = it },
