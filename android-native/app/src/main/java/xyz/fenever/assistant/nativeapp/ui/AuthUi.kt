@@ -33,15 +33,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.shapes.GenericShape
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.OutlineStyle
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -61,14 +66,20 @@ val RECOVERY_QUESTIONS = listOf(
 )
 
 /* 网页 .auth-sheet 那道拱形顶边：border-radius: 50% 50% 0 0 / 30px 30px 0 0。
- * 椭圆拱用一段二次贝塞尔近似（控制点 (w/2, -b) 时曲线恰好过拱顶 (w/2, 0)）。 */
-private val ArchTopShape = GenericShape { s, d ->
-    val b = with(d) { 30.dp.toPx() }.let { if (it * 2 > s.height) s.height / 2 else it }
-    moveTo(0f, b)
-    quadraticBezierTo(s.width / 2f, -b, s.width, b)
-    lineTo(s.width, s.height)
-    lineTo(0f, s.height)
-    close()
+ * 椭圆拱用一段二次贝塞尔近似（控制点 (w/2, -b) 时曲线恰好过拱顶 (w/2, 0)）。
+ * 不走 GenericShape（此版本 ui-graphics 无该包），直接实现 Shape。 */
+private val ArchTopShape = object : Shape {
+    override fun createOutline(size: Size, outlineStyle: OutlineStyle, density: Density): Outline {
+        val b = with(density) { 30.dp.toPx() }.let { if (it * 2 > size.height) size.height / 2 else it }
+        val path = Path().apply {
+            moveTo(0f, b)
+            quadraticBezierTo(size.width / 2f, -b, size.width, b)
+            lineTo(size.width, size.height)
+            lineTo(0f, size.height)
+            close()
+        }
+        return Outline.Generic(path)
+    }
 }
 
 @Composable
