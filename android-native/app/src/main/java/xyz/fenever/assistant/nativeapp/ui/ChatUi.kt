@@ -37,6 +37,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -62,11 +64,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isShifted
-import androidx.compose.ui.input.key.nativeKeyCode
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -688,15 +686,11 @@ private fun InputCard(input: String, onInput: (String) -> Unit,
                 cursorBrush = SolidColor(scheme.primary),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 200.dp)
                     .padding(horizontal = 6.dp, vertical = 4.dp)
-                    .focusRequester(focusRequester)
-                    // 网页：Enter 发送、Shift+Enter 换行；只拦"没按 Shift 的 Enter"
-                    .onPreviewKeyEvent { e ->
-                        if (e.type == KeyEventType.KeyDown &&
-                            e.nativeKeyCode == android.view.KeyEvent.KEYCODE_ENTER &&
-                            !e.isShifted) {
-                            onSendKey(); true
-                        } else false
-                    },
+                    .focusRequester(focusRequester),
+                // 网页：Enter 发送、Shift+Enter 换行。手机键盘对位：Send 键=发送，
+                // 键盘上的回车/换行键照常插入换行（Gboard 上 Shift 语义由键面自己给）。
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { onSendKey() }),
                 decorationBox = { inner ->
                     Box {
                         if (input.isEmpty())
@@ -832,15 +826,13 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
                 modifier = Modifier.fillMaxWidth().widthIn(max = 320.dp)
                     .background(scheme.surface, RoundedCornerShape(10.dp))
                     .border(BorderStroke(1.dp, scheme.primary), RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 9.dp)
-                    .onPreviewKey { code, shift ->
-                        if (code == android.view.KeyEvent.KEYCODE_ENTER && !shift) {
-                            val t = draft.trim(); if (t.isNotEmpty()) onSaveEdit(t) else onCancelEdit()
-                            true
-                        } else if (code == android.view.KeyEvent.KEYCODE_ESCAPE) {
-                            onCancelEdit(); true
-                        } else false
-                    },
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                // 网页 Enter 保存/Esc 取消；手机对位 Done 键保存（空稿=取消）
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = {
+                    val t = draft.trim()
+                    if (t.isNotEmpty()) onSaveEdit(t) else onCancelEdit()
+                }),
             )
         } else {
             val shape = if (mine) RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp,
@@ -973,12 +965,6 @@ private fun AttPreview(a: AttItem) {
             .clip(RoundedCornerShape(10.dp))
             .border(BorderStroke(1.dp, scheme.outline), RoundedCornerShape(10.dp)))
 }
-
-private fun Modifier.onPreviewKey(handle: (keyCode: Int, shift: Boolean) -> Boolean): Modifier =
-    onPreviewKeyEvent { e ->
-        e.type == KeyEventType.KeyDown &&
-            handle(e.nativeKeyCode, e.isShifted)
-    }
 
 /* 轻量 Markdown：``` 围栏内是代码卡（--code-bg 深底、line 描边、圆角 14、等宽 13/1.6，
  * 横向可滚），其余按段落文本。完整 MD 排版留给网页版；原生保证可读、形状对得上。 */
