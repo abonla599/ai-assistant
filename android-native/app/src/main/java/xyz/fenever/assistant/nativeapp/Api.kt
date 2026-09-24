@@ -223,7 +223,7 @@ object Api {
     // ---------- 记忆 ----------
     suspend fun addMemory(content: String): JsonElement =
         json.parseToJsonElement(call("/v1/memory/add", "POST",
-            obj(listOf("content" to s(content), "summarize" to JsonPrimitive(false))))))
+            obj(listOf("content" to s(content), "summarize" to JsonPrimitive(false)))))
 
     suspend fun listMemory(limit: Int = 50): JsonElement =
         json.parseToJsonElement(call("/v1/memory/list?limit=$limit"))

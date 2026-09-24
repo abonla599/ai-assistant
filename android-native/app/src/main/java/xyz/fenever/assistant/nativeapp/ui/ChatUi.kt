@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -138,6 +137,9 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                 val d = doneEv ?: throw ApiException(0, "流式响应未正常结束")
                 messages = messages + UiMessage("assistant",
                     d.fullText.ifEmpty { acc.toString() }, d.messageId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 用户主动"停止"或退屏：只收尾，不落失败气泡，也不触发非流式回退
+                throw e
             } catch (e: Exception) {
                 if (acc.isEmpty()) {
                     // 通道层面失败才退回非流式（与 Web 的 retryable 语义一致）；
@@ -196,13 +198,15 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(messages) { m -> MessageBubble(m, feedbackSent.contains(m.messageId)) { mid, rating ->
-                    scope.launch {
-                        runCatching { Api.feedback(mid, rating) }.onSuccess {
-                            feedbackSent = feedbackSent + mid
+                items(messages) { m ->
+                    MessageBubble(m, feedbackSent.contains(m.messageId ?: "")) { mid, rating ->
+                        scope.launch {
+                            runCatching { Api.feedback(mid, rating) }.onSuccess {
+                                feedbackSent = feedbackSent + mid
+                            }
                         }
                     }
-                } }
+                }
                 streaming?.let { s -> if (s.isNotEmpty()) item { MessageBubble(UiMessage("assistant", s), false, null) } }
                 if (busy && streaming?.isEmpty() == true) item {
                     Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically,
@@ -224,7 +228,8 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 IconButton(onClick = { picker.launch("image/*") }) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "添加图片")
+                    // core 图标集没有 AttachFile，用文本符号避免为单个图标引入 icons-extended
+                    Text("📎", style = MaterialTheme.typography.titleMedium)
                 }
                 OutlinedTextField(
                     value = input, onValueChange = { input = it },
