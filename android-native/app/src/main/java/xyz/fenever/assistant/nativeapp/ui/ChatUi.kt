@@ -63,8 +63,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isShiftKeyPressed
-import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -691,9 +689,9 @@ private fun InputCard(input: String, onInput: (String) -> Unit,
                     .focusRequester(focusRequester)
                     // 网页：Enter 发送、Shift+Enter 换行；只拦"没按 Shift 的 Enter"
                     .onPreviewKeyEvent { e ->
-                        if (e.type == KeyEventType.Key &&
-                            e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
-                            !e.isShiftKeyPressed) {
+                        if (e.type == KeyEventType.KeyDown &&
+                            e.keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                            !e.isShiftPressed) {
                             onSendKey(); true
                         } else false
                     },
@@ -976,8 +974,8 @@ private fun AttPreview(a: AttItem) {
 
 private fun Modifier.onPreviewKey(handle: (keyCode: Int, shift: Boolean) -> Boolean): Modifier =
     onPreviewKeyEvent { e ->
-        e.type == KeyEventType.Key &&
-            handle(e.nativeKeyEvent.keyCode, e.nativeKeyEvent.isShiftKeyPressed)
+        e.type == KeyEventType.KeyDown &&
+            handle(e.keyCode, e.isShiftPressed)
     }
 
 /* 轻量 Markdown：``` 围栏内是代码卡（--code-bg 深底、line 描边、圆角 14、等宽 13/1.6，
