@@ -2,6 +2,7 @@ package xyz.fenever.assistant.nativeapp.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
@@ -24,9 +26,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,9 +44,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.Prefs
@@ -55,14 +62,15 @@ import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
-                      onWebApp: () -> Unit, onLoggedOut: () -> Unit) {
+fun SessionListScreen(onOpenChat: (String) -> Unit, onSettings: () -> Unit,
+                      onLoggedOut: () -> Unit) {
     val scope = rememberCoroutineScope()
     var sessions by remember { mutableStateOf<List<SessionSummary>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf("") }
 
     // 每次进入本屏重新拉列表：从聊天页返回时组合会重建，这里不缓存旧数据。
     LaunchedEffect(Unit) {
@@ -76,28 +84,61 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
         loading = false
     }
 
+    // 网页侧栏的 .search-box + 分组：先按标题过滤，再按日期归组（今天/昨天/7 天内/更早）
+    val visible = sessions.filter {
+        search.isBlank() || it.title.contains(search.trim(), ignoreCase = true)
+    }
+    val groupedList = LinkedHashMap<String, MutableList<SessionSummary>>()
+    visible.forEach { s ->
+        groupedList.getOrPut(groupOf(s.created_at)) { mutableListOf() }.add(s)
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("对话", fontWeight = FontWeight.SemiBold)
-                        Text(Prefs.username.ifBlank { "AI 助手" },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                        AiBrandMark(22)
+                        // 网页 .brand 的 clip-text 渐变字标同款
+                        Text(buildAnnotatedString {
+                            withStyle(SpanStyle(brush = aiPrimaryBrush(),
+                                fontWeight = FontWeight.SemiBold)) {
+                                append("AI 智能助手")
+                            }
+                        }, fontSize = 17.sp)
                     }
-                },
-                actions = {
-                    TextButton(onClick = onMemory) { Text("记忆") }
-                    TextButton(onClick = onWebApp) { Text("网页") }
-                    TextButton(onClick = {
-                        Prefs.clearAuth(); onLoggedOut()
-                    }) { Text("退出", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)),
             )
+        },
+        bottomBar = {
+            // 网页 .sb-foot 的 .who-row：「我是谁 + 进设置」合成一行，整行可点
+            Row(Modifier.fillMaxWidth()
+                .clickable(onClick = onSettings)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.86f))
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                Box(Modifier.size(28.dp)
+                    .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    Text(Prefs.username.take(1).ifBlank { "·" },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold)
+                }
+                Text(Prefs.username.ifBlank { "未登录" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("设置", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("⚙", style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         },
         floatingActionButton = {
             FloatingActionButton(onClick = {
@@ -141,16 +182,44 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
                     }) { Text("重试") }
                 }
                 else -> LazyColumn(Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp)) {
+                    contentPadding = PaddingValues(top = 6.dp, bottom = 96.dp)) {
+                    item {
+                        // 网页 .search-box：会话搜索框挂在列表顶上
+                        OutlinedTextField(search, { search = it },
+                            placeholder = { Text("搜索会话", style = MaterialTheme.typography.bodyMedium) },
+                            singleLine = true,
+                            shape = RoundedCornerShape(999.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+                    }
                     if (error != null) item {
                         Text(error!!, color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                             style = MaterialTheme.typography.bodySmall)
                     }
-                    items(sessions, key = { it.session_id }) { s ->
-                        SessionRow(s,
-                            onOpen = { onOpenChat(s.session_id) },
-                            onDelete = { pendingDelete = s })
+                    if (visible.isEmpty()) item {
+                        Text("没有匹配的会话",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp))
+                    }
+                    groupedList.forEach { (label, list) ->
+                        stickyHeader {
+                            // 网页 .sb-group：弱化的小日期头
+                            Text(label, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.92f))
+                                    .padding(horizontal = 16.dp, vertical = 6.dp))
+                        }
+                        items(list, key = { it.session_id }) { s ->
+                            SessionRow(s,
+                                onOpen = { onOpenChat(s.session_id) },
+                                onDelete = { pendingDelete = s })
+                        }
                     }
                 }
             }
@@ -178,6 +247,26 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
     }
 }
 
+/* 会话按日分组，和网页侧栏 .sb-group 同一组标签。created_at 是 ISO 串，
+ * 直接截日期段比较；java.time 要 API 26，minSdk 24 用 SimpleDateFormat。 */
+private fun groupOf(iso: String): String {
+    if (iso.length < 10) return "更早"
+    val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+        .format(java.util.Date())
+    if (iso.take(10) == today) return "今天"
+    val ms = try {
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            .parse(iso.take(10))?.time ?: return "更早"
+    } catch (e: Exception) { return "更早" }
+    val days = ((java.util.Date().time - ms) / (24 * 3600 * 1000L)).toInt()
+    return when {
+        days <= 1 -> "昨天"
+        days < 7 -> "7 天内"
+        days < 30 -> "30 天内"
+        else -> "更早"
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionRow(s: SessionSummary, onOpen: () -> Unit, onDelete: () -> Unit) {
@@ -201,8 +290,7 @@ private fun SessionRow(s: SessionSummary, onOpen: () -> Unit, onDelete: () -> Un
     }
 }
 
-/* created_at 是 ISO 串：截到分钟，年份只在跨年时出现，列表行短一点。
- * 用 SimpleDateFormat 而不是 java.time——后者要 API 26，minSdk 24 会挂。 */
+/* created_at 是 ISO 串：截到分钟，年份只在跨年时出现，列表行短一点。 */
 private fun fmtTime(iso: String): String {
     if (iso.length < 16) return iso
     val thisYear = java.text.SimpleDateFormat("yyyy", java.util.Locale.US)

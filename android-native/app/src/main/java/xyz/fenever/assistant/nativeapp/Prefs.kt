@@ -31,6 +31,18 @@ object Prefs {
         get() = sp.getString("role", "user").orEmpty()
         set(value) = sp.edit().putString("role", value).apply()
 
+    /* 外观三态：system / dark / light，对应网页端 .set-row「外观」的 ⇅ 切换。
+     * 落 SharedPreferences 是为了冷启动第一帧就带上，不闪一下深色。 */
+    var themeMode: String
+        get() = sp.getString("theme_mode", "system").orEmpty()
+        set(value) = sp.edit().putString("theme_mode", value).apply()
+
+    /* 设置页「当前模型」的本机默认：/v1/models 的 default 是服务端全局默认，
+     * 这里存的是"这台手机想多用哪个"，聊天页冷启动优先取它。 */
+    var defaultProviderId: String
+        get() = sp.getString("default_provider", "").orEmpty()
+        set(value) = sp.edit().putString("default_provider", value).apply()
+
     val isAuthed: Boolean get() = token.isNotEmpty()
 
     /* 换服务器等于换一个身份世界：旧 token 在新地址上必然 401，留着只会把

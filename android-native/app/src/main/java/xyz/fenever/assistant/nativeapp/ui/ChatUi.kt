@@ -12,6 +12,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -71,6 +72,7 @@ import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ChatEvent
 import xyz.fenever.assistant.nativeapp.ChatMessageDto
 import xyz.fenever.assistant.nativeapp.ModelInfo
+import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.UploadInfo
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
 import xyz.fenever.assistant.nativeapp.theme.WebTokens
@@ -98,15 +100,21 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
     var uploads by remember { mutableStateOf(listOf<UploadInfo>()) }
     var feedbackSent by remember { mutableStateOf(setOf<String>()) }
     var streamJob by remember { mutableStateOf<Job?>(null) }
+    var title by remember { mutableStateOf("新对话") }
+    var attachOpen by remember { mutableStateOf(false) }
+    var pickMime by remember { mutableStateOf("image/*") }
     val listState = rememberLazyListState()
 
     LaunchedEffect(sessionId) {
         runCatching { Api.getSession(sessionId) }.onSuccess { detail ->
+            title = detail.title.ifBlank { "新对话" }
             messages = detail.messages.map { UiMessage(it.role, it.content, it.message_id) }
         }.onFailure { error = it.message }
         runCatching { Api.models() }.onSuccess { mr ->
             models = mr.models
-            providerId = mr.default
+            // 本机默认（设置页里选的）优先于服务端全局默认
+            providerId = Prefs.defaultProviderId.takeIf { it.isNotEmpty() }
+                ?: mr.default
                 ?: models.firstOrNull { it.default }?.id
                 ?: models.firstOrNull()?.id
         }
@@ -118,7 +126,7 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
             runCatching {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: throw Exception("读取附件失败")
-                var name = "image.jpg"
+                var name = if (pickMime == "image/*") "image.jpg" else "file.bin"
                 ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
                     null, null, null)?.use { c ->
                     if (c.moveToFirst()) name = c.getString(0) ?: name
@@ -193,23 +201,11 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
         containerColor = Color.Transparent,
         topBar = {
         TopAppBar(
-            title = {
-                Box {
-                    val cur = models.firstOrNull { it.id == providerId }
-                    // 网页 .model-chip：描边胶囊 + 下拉角标
-                    AssistChip(onClick = { modelsOpen = true },
-                        label = { Text((cur?.name ?: "选择模型") + "  ⌄", maxLines = 1,
-                            style = MaterialTheme.typography.labelMedium) })
-                    DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
-                        models.forEach { m ->
-                            DropdownMenuItem(
-                                text = { Text(m.name + if (m.usable) "" else "（不可用）") },
-                                onClick = { providerId = m.id; modelsOpen = false },
-                            )
-                        }
-                    }
-                }
-            },
+            // 网页 .topbar 只有两样：返回 +「我在哪段对话里」。模型芯片在输入卡里。
+            title = { Text(title, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold) },
             navigationIcon = {
                 IconButton(onClick = { streamJob?.cancel(); onBack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -229,7 +225,7 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
             LazyColumn(Modifier.weight(1f), state = listState,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 items(messages) { m ->
                     // onFeedback 不是末位参数（typing 在后），不能用尾随 lambda 语法
                     MessageBubble(m, feedbackSent.contains(m.messageId ?: ""), { mid, rating ->
@@ -254,22 +250,36 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                         label = { Text(u.name, maxLines = 1) })
                 }
             }
-            Row(Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // 网页 .input-card：圆角 18 表面卡 + 细描边，输入区与按钮都在卡内
-                Surface(Modifier.weight(1f),
+            // 网页 .attach-menu：＋ 点开浮在输入卡上方的平铺瓦片。原生侧能直达的是
+            // 相册图片与任意文件两项（相机取景那格是网页 getUserMedia 独有，不虚设）。
+            AnimatedVisibility(visible = attachOpen,
+                enter = fadeIn(tween(140)) + slideInVertically(tween(140)) { it / 4 },
+                modifier = Modifier.padding(horizontal = 12.dp)) {
+                Surface(Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp, MaterialTheme.colorScheme.outline)) {
+                    Row(Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        AttachTile("🖼", "图片") {
+                            pickMime = "image/*"; attachOpen = false; picker.launch("image/*")
+                        }
+                        AttachTile("📄", "文件") {
+                            pickMime = "*/*"; attachOpen = false; picker.launch("*/*")
+                        }
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                // 网页 .input-card：圆角 18 表面卡 + 细描边；上行 textarea，
+                // 下行 .input-foot：＋ / 提示 / 模型芯片 / 停止 / 发送
+                Surface(Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(18.dp),
                     color = MaterialTheme.colorScheme.surface,
                     border = androidx.compose.foundation.BorderStroke(
                         1.dp, MaterialTheme.colorScheme.outline)) {
-                    Row(Modifier.padding(start = 2.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        IconButton(onClick = { picker.launch("image/*") }) {
-                            // core 图标集没有 AttachFile，用文本符号避免为单个图标引入 icons-extended
-                            Text("📎", style = MaterialTheme.typography.titleMedium)
-                        }
+                    Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                         OutlinedTextField(
                             value = input, onValueChange = { input = it },
                             placeholder = { Text("发消息…") },
@@ -281,32 +291,90 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
                             ),
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                        if (busy) {
-                            TextButton(onClick = { streamJob?.cancel() }) {
-                                Text("停止", color = MaterialTheme.colorScheme.error,
-                                    fontWeight = FontWeight.SemiBold)
+                        Row(Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            IconButton(onClick = { attachOpen = !attachOpen }) {
+                                Text(if (attachOpen) "✕" else "＋",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (attachOpen) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                        } else {
-                            // 网页 .btn-send：36px 渐变圆钮，深字
-                            Button(onClick = { doSend() },
-                                enabled = input.isNotBlank() || uploads.isNotEmpty(),
-                                shape = CircleShape,
-                                contentPadding = PaddingValues(0.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.Transparent,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary),
-                                elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp),
-                                modifier = Modifier.size(42.dp)
-                                    .background(aiPrimaryBrush(), CircleShape)) {
-                                Text("↑", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            // 网页 .hint：状态说人话，占位吃掉剩余宽度
+                            Text(when {
+                                busy && streaming?.isNotEmpty() == true -> "生成中…"
+                                busy -> "连接中…"
+                                else -> ""
+                            }, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f))
+                            Box {
+                                val cur = models.firstOrNull { it.id == providerId }
+                                // 网页 .model-chip：描边胶囊 + ⌄，点开纵向弹单
+                                Surface(Modifier
+                                    .clickable { modelsOpen = true }
+                                    .border(androidx.compose.foundation.BorderStroke(
+                                        1.dp, MaterialTheme.colorScheme.outline), CircleShape),
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.surfaceVariant) {
+                                    Text((cur?.name ?: "选择模型") + "  ⌄", maxLines = 1,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp))
+                                }
+                                DropdownMenu(expanded = modelsOpen,
+                                    onDismissRequest = { modelsOpen = false }) {
+                                    models.forEach { m ->
+                                        DropdownMenuItem(
+                                            text = { Text(m.name + if (m.id == providerId) "  ✓"
+                                                    else if (m.usable) "" else "（不可用）") },
+                                            onClick = { providerId = m.id; modelsOpen = false },
+                                        )
+                                    }
+                                }
+                            }
+                            if (busy) {
+                                TextButton(onClick = { streamJob?.cancel() }) {
+                                    Text("停止", color = MaterialTheme.colorScheme.error,
+                                        fontWeight = FontWeight.SemiBold)
+                                }
+                            } else {
+                                // 网页 .btn-send：36px 渐变圆钮，深字
+                                Button(onClick = { doSend() },
+                                    enabled = input.isNotBlank() || uploads.isNotEmpty(),
+                                    shape = CircleShape,
+                                    contentPadding = PaddingValues(0.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.Transparent,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary),
+                                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp),
+                                    modifier = Modifier.size(38.dp)
+                                        .background(aiPrimaryBrush(), CircleShape)) {
+                                    Text("↑", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        }
+    }
+}
+
+@Composable
+private fun AttachTile(ico: String, label: String, onClick: () -> Unit) {
+    Surface(Modifier.clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp, MaterialTheme.colorScheme.outline)) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(ico, style = MaterialTheme.typography.titleMedium)
+            Text(label, style = MaterialTheme.typography.labelLarge)
         }
     }
 }

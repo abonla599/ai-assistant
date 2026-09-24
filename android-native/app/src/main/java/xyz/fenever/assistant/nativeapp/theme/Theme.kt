@@ -131,10 +131,21 @@ private val WebTypography = Typography(
     labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 11.sp),
 )
 
+/* 外观三态（system/dark/light）：设置页「外观」⇅ 就地切换。
+ * 用 Compose state 而不是只读 Prefs——改一下整棵树立刻换肤，不重启 Activity。 */
+object ThemeMode {
+    var value: String by androidx.compose.runtime.mutableStateOf("system")
+}
+
 @Composable
-fun AiTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+fun AiTheme(content: @Composable () -> Unit) {
+    val dark = when (ThemeMode.value) {
+        "dark" -> true
+        "light" -> false
+        else -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (darkTheme) DarkScheme else LightScheme,
+        colorScheme = if (dark) DarkScheme else LightScheme,
         shapes = WebShapes,
         typography = WebTypography,
         content = content,

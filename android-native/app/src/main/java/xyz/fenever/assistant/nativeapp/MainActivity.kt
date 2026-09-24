@@ -9,18 +9,22 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import xyz.fenever.assistant.nativeapp.theme.AiTheme
+import xyz.fenever.assistant.nativeapp.theme.ThemeMode
 import xyz.fenever.assistant.nativeapp.ui.LoginScreen
 import xyz.fenever.assistant.nativeapp.ui.RegisterScreen
 import xyz.fenever.assistant.nativeapp.ui.ResetScreen
 import xyz.fenever.assistant.nativeapp.ui.ChatScreen
 import xyz.fenever.assistant.nativeapp.ui.MemoryScreen
 import xyz.fenever.assistant.nativeapp.ui.SessionListScreen
+import xyz.fenever.assistant.nativeapp.ui.SettingsScreen
 import xyz.fenever.assistant.nativeapp.ui.WebAppScreen
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(savedInstanceState: Bundle) {
         super.onCreate(savedInstanceState)
         Prefs.init(applicationContext)
+        // 冷启动第一帧就把已存的外观偏好灌进 Compose state，不闪一下深色
+        ThemeMode.value = Prefs.themeMode
         setContent {
             AiTheme { AppNav() }
         }
@@ -53,8 +57,7 @@ private fun AppNav() {
         composable("sessions") {
             SessionListScreen(
                 onOpenChat = { id -> nav.navigate("chat/$id") },
-                onMemory = { nav.navigate("memory") },
-                onWebApp = { nav.navigate("webapp") },
+                onSettings = { nav.navigate("settings") },
                 onLoggedOut = { nav.navigate("login") { popUpTo("sessions") { inclusive = true } } },
             )
         }
@@ -67,5 +70,21 @@ private fun AppNav() {
         }
         composable("memory") { MemoryScreen(onBack = { nav.popBackStack() }) }
         composable("webapp") { WebAppScreen(onBack = { nav.popBackStack() }) }
+        composable("settings") {
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onMemory = { nav.navigate("memory") },
+                onWebApp = { nav.navigate("webapp") },
+                // 改密码成功后旧会话凭据不再可信：与网页端一致，回到登录页重登
+                onReset = { nav.navigate("reset_from_settings") },
+                onLoggedOut = { nav.navigate("login") { popUpTo("sessions") { inclusive = true } } },
+            )
+        }
+        composable("reset_from_settings") {
+            ResetScreen(onDone = {
+                Prefs.clearAuth()
+                nav.navigate("login") { popUpTo("sessions") { inclusive = true } }
+            }, onBack = { nav.popBackStack() })
+        }
     }
 }
