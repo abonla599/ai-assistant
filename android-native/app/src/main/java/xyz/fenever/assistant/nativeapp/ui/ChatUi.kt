@@ -269,7 +269,6 @@ fun ChatScreen(onWebApp: () -> Unit, onReset: () -> Unit, onLoggedOut: () -> Uni
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        drawerWidth = 300.dp,
         drawerContent = {
             SessionDrawer(
                 tick = drawerTick,

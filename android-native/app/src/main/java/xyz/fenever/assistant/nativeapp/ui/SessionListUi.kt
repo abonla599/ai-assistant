@@ -89,7 +89,8 @@ fun SessionDrawer(tick: Int, currentId: String,
         groupedList.getOrPut(groupOf(s.created_at)) { mutableListOf() }.add(s)
     }
 
-    Column(Modifier.fillMaxSize()
+    // ModalNavigationDrawer 不给宽度参数：抽屉宽度由内容自身决定（网页侧栏 ~75% 屏宽）
+    Column(Modifier.width(300.dp).fillMaxSize()
         .background(MaterialTheme.colorScheme.surface)
         .padding(top = 8.dp)) {
         // 品牌行：图标 + 渐变字标 + ✕ 关闭
