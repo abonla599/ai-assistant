@@ -43,12 +43,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -75,6 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -596,26 +596,35 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     }
 
     // 设置弹层（.modal 手机档：底部出、一张弹层内换 view，不开第二层）。
-    // 用户钦定出口只有两个：返回键 和 一级页右上角 ×——点遮罩不关（onDismissRequest
-    // 留空，它只会由遮罩触发，因为拖拽关闭已用 sheetGesturesEnabled=false 禁掉），
-    // 返回键由弹层内的 BackHandler 接管：二级页先退回一级列表（同 ‹），一级页关整层。
+    // 用户钦定出口只有两个：返回键 和 一级页右上角 ×。M3 1.6 的 ModalBottomSheet
+    // 遮罩点击/下拉手势和返回键共用 onDismissRequest 分不开，也没有关手势的参数，
+    // 所以这里用全屏 Dialog 自己拼底部弹层：dismissOnClickOutside=false 让点遮罩
+    // 彻底无响应，无拖拽手势可关，返回键由弹层内 BackHandler 接管——二级页先退回
+    // 一级列表（同 ‹），一级页关整层。
     if (settingsPage != null) {
-        ModalBottomSheet(onDismissRequest = { /* 遮罩点击：不关，见上 */ },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = MaterialTheme.colorScheme.surface,
-            sheetGesturesEnabled = false) {
+        Dialog(onDismissRequest = { /* 只有 ×/返回键会改 settingsPage，这里轮不到 */ },
+            properties = DialogProperties(usePlatformDefaultWidth = false,
+                                          dismissOnClickOutside = false,
+                                          dismissOnBackPress = false)) {
             BackHandler {
                 val p = settingsPage ?: ""
                 settingsPage = if (p.isNotEmpty()) "" else null
             }
-            SettingsSheet(
-                page = settingsPage ?: "",
-                onOpenPage = { settingsPage = it },
-                onRequireAuth = { mode -> settingsPage = null; onRequireAuth(mode) },
-                onOpenUrl = onOpenUrl,
-                onModelsChanged = { scope.launch { loadModelsNow() } },
-                onLoggedOut = { settingsPage = null; onLoggedOut() },
-            )
+            Box(Modifier.fillMaxSize()
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.4f))) {
+                Column(Modifier.fillMaxWidth().align(Alignment.BottomCenter)
+                    .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                    .background(MaterialTheme.colorScheme.surface)) {
+                    SettingsSheet(
+                        page = settingsPage ?: "",
+                        onOpenPage = { settingsPage = it },
+                        onRequireAuth = { mode -> settingsPage = null; onRequireAuth(mode) },
+                        onOpenUrl = onOpenUrl,
+                        onModelsChanged = { scope.launch { loadModelsNow() } },
+                        onLoggedOut = { settingsPage = null; onLoggedOut() },
+                    )
+                }
+            }
         }
     }
 }
