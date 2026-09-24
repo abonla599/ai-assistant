@@ -102,8 +102,7 @@ fun SessionDrawer(tick: Int, currentId: String,
     Column(Modifier.width(drawerW).fillMaxSize()
         .background(xyz.fenever.assistant.nativeapp.theme.glassColor())
         .border(1.dp, MaterialTheme.colorScheme.outline,
-            RoundedCornerShape(0.dp)),
-        contentPadding = PaddingValues(top = 10.dp, bottom = 10.dp)) {
+            RoundedCornerShape(0.dp))) {
 
         // .sb-head：品牌行 + × 关闭（× 是 only-mobile 那颗）
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 6.dp),
@@ -250,6 +249,7 @@ private fun DrawerNav(ico: String, label: String, onClick: () -> Unit) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun SessionDrawerRow(s: xyz.fenever.assistant.nativeapp.SessionSummary,
                              active: Boolean, onOpen: () -> Unit, onDelete: () -> Unit) {

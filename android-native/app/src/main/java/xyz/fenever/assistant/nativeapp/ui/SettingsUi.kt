@@ -229,19 +229,19 @@ private fun SetGroup(title: String) {
         modifier = Modifier.padding(start = 2.dp, top = 22.dp, bottom = 8.dp))
 }
 
-/** 网页 .set-row：min-height 54、padding 0 14、gap 12、15px 字；last-child 无底边线。 */
+/** 网页 .set-row：min-height 54、padding 0 14、gap 12、15px 字；last-child 无底边线。
+ *  onClick 放最后一位且非空：调用方尾随 lambda 走它，valSlot 用命名参数传。 */
 @Composable
 private fun SetRow(ico: String, label: String,
                    divider: Boolean = true,
                    danger: Boolean = false, plain: Boolean = false,
-                   onClick: (() -> Unit)? = null,
                    trailing: String = "›",
-                   valSlot: (@Composable () -> Unit)? = null) {
+                   valSlot: (@Composable () -> Unit)? = null,
+                   onClick: () -> Unit = {}) {
     val scheme = MaterialTheme.colorScheme
     val labelColor = if (danger) scheme.error else scheme.onSurface
     Row(Modifier.fillMaxWidth()
-        .then(if (onClick != null && !plain)
-            Modifier.clickable(onClick = onClick) else Modifier)
+        .then(if (!plain) Modifier.clickable(onClick = onClick) else Modifier)
         .heightIn(min = 54.dp).padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -251,7 +251,7 @@ private fun SetRow(ico: String, label: String,
         Text(label, fontSize = 15.sp, color = labelColor, maxLines = 1,
             overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         valSlot?.invoke()
-        if (trailing.isNotEmpty() && onClick != null) {
+        if (trailing.isNotEmpty()) {
             Text(trailing, fontSize = 15.sp, color = text3Color(),
                 modifier = Modifier.width(14.dp), textAlign = TextAlign.Center)
         }
@@ -553,7 +553,8 @@ private fun CtxValue(k: Int, cap: Int) {
 private fun hostOf(url: String): String = runCatching {
     val u = Uri.parse(url)
     val h = u.host ?: ""
-    if (u.port > 0 && u.port != u.defaultPort) "$h:${u.port}" else h
+    val def = when (u.scheme) { "https" -> 443; "http" -> 80; else -> -1 }
+    if (u.port > 0 && u.port != def) "$h:${u.port}" else h
 }.getOrDefault("")
 
 /* ---------------- 账户页（renderAccounts 逐行） ---------------- */
@@ -742,7 +743,7 @@ private fun MemRow(weight: Double, content: String, onDelete: () -> Unit) {
 /** .row：输入 + 按钮（记忆添加/搜索/令牌三个表单同一条积木；btn 空串 = 只有输入）。 */
 @Composable
 private fun FormRow(placeholder: String, value: String, onValue: (String) -> Unit,
-                    btn: String = "保存", onSubmit: () -> Unit) {
+                    btn: String = "保存", onSubmit: () -> Unit = {}) {
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -3,6 +3,7 @@ package xyz.fenever.assistant.nativeapp
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /* 本机配置与凭据存储。结构照抄网页端 localStorage 的那套事实来源：

@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -62,7 +63,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftKeyPressed
+import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -684,15 +688,15 @@ private fun InputCard(input: String, onInput: (String) -> Unit,
                 cursorBrush = SolidColor(scheme.primary),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 200.dp)
                     .padding(horizontal = 6.dp, vertical = 4.dp)
-                    .focusRequester(focusRequester),
-                // 网页：Enter 发送、Shift+Enter 换行；只拦"没按 Shift 的 Enter"
-                onPreviewKeyEvent = { e ->
-                    if (e.type == androidx.compose.ui.input.key.KeyEventType.Key &&
-                        e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
-                        !e.nativeKeyEvent.isShiftKeyPressed) {
-                        onSendKey(); true
-                    } else false
-                },
+                    .focusRequester(focusRequester)
+                    // 网页：Enter 发送、Shift+Enter 换行；只拦"没按 Shift 的 Enter"
+                    .onPreviewKeyEvent { e ->
+                        if (e.type == KeyEventType.Key &&
+                            e.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                            !e.isShiftKeyPressed) {
+                            onSendKey(); true
+                        } else false
+                    },
                 decorationBox = { inner ->
                     Box {
                         if (input.isEmpty())

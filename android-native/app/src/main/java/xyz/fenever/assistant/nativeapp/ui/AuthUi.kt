@@ -186,7 +186,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
             } catch (e: Exception) {
                 if (e is ApiException && e.status == 409) {
                     // 重名是"改一下就好"的事：只挂在用户名那一格下面，表单末尾不跟着染红
-                    userErr = e.message
+                    userErr = e.message ?: "用户名已存在，换一个试试"
                 } else {
                     hint = "注册失败：" + (e.message ?: "")
                 }
@@ -449,6 +449,7 @@ private fun PillField(placeholder: String, value: String, onValue: (String) -> U
 private fun EyeToggle(shown: Boolean, onToggle: () -> Unit) {
     Box(Modifier.size(36.dp).clickable(onClick = onToggle),
         contentAlignment = Alignment.Center) {
+        val col = MaterialTheme.colorScheme.onSurfaceVariant
         Canvas(Modifier.size(18.dp)) {
             val w = size.width; val h = size.height
             val eye = Path().apply {
@@ -457,7 +458,6 @@ private fun EyeToggle(shown: Boolean, onToggle: () -> Unit) {
                 quadraticBezierTo(w / 2f, h * 0.98f, w * 0.06f, h / 2f)
                 close()
             }
-            val col = MaterialTheme.colorScheme.onSurfaceVariant
             drawPath(eye, col, style = Stroke(width = h * 0.09f))
             drawCircle(col, radius = h * 0.21f, center = Offset(w / 2f, h / 2f))
             if (!shown) drawLine(col, Offset(w * 0.12f, h * 0.9f),
