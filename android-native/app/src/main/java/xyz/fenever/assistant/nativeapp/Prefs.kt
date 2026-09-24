@@ -43,6 +43,11 @@ object Prefs {
         get() = sp.getString("default_provider", "").orEmpty()
         set(value) = sp.edit().putString("default_provider", value).apply()
 
+    /* 网页壳是"聊天页即主页"：冷启动直接回到上次那段对话，空串表示新对话。 */
+    var lastSessionId: String
+        get() = sp.getString("last_session", "").orEmpty()
+        set(value) = sp.edit().putString("last_session", value).apply()
+
     val isAuthed: Boolean get() = token.isNotEmpty()
 
     /* 换服务器等于换一个身份世界：旧 token 在新地址上必然 401，留着只会把
@@ -53,6 +58,7 @@ object Prefs {
     }
 
     fun clearAuth() {
-        sp.edit().remove("token").remove("username").remove("role").apply()
+        sp.edit().remove("token").remove("username").remove("role")
+            .remove("last_session").apply()
     }
 }

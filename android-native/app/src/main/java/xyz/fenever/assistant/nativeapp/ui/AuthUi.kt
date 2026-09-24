@@ -209,7 +209,9 @@ fun LoginScreen(onAuthed: () -> Unit, onRegister: () -> Unit, onReset: () -> Uni
     var server by remember { mutableStateOf(Prefs.baseUrl) }
 
     AuthScaffold {
-        BrandHeader("v${xyz.fenever.assistant.nativeapp.BuildConfig.VERSION_NAME}")
+        // 网页 .auth-sheet 的副标题文案，逐字对齐（版本号挪到页脚没有位置，先并入括号）
+        BrandHeader("登录后继续；还没有账号就点下面的「立即注册」。" +
+            "  (v${xyz.fenever.assistant.nativeapp.BuildConfig.VERSION_NAME})")
         AuthSheet {
             Spacer(Modifier.height(6.dp))
             if (editServer) {
