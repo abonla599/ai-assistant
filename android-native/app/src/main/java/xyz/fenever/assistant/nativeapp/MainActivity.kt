@@ -20,7 +20,7 @@ import xyz.fenever.assistant.nativeapp.ui.SettingsScreen
 import xyz.fenever.assistant.nativeapp.ui.WebAppScreen
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle) {
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Prefs.init(applicationContext)
         // 冷启动第一帧就把已存的外观偏好灌进 Compose state，不闪一下深色

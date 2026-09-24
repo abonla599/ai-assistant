@@ -172,10 +172,10 @@ fun SettingsScreen(onBack: () -> Unit, onMemory: () -> Unit, onWebApp: () -> Uni
                 Column {
                     models.forEach { m ->
                         val on = m.id == (Prefs.defaultProviderId.ifBlank { curModel?.id ?: "" })
-                        TextButton(Modifier.fillMaxWidth(), onClick = {
+                        TextButton(onClick = {
                             Prefs.defaultProviderId = m.id
                             modelPickOpen = false
-                        }) {
+                        }, modifier = Modifier.fillMaxWidth()) {
                             Text(if (on) "✓ ${m.name}" else m.name,
                                 color = if (on) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurface)
