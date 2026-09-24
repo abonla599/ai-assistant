@@ -187,7 +187,7 @@ private fun SessionRow(s: SessionSummary, onOpen: () -> Unit, onDelete: () -> Un
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)),
-        elevation = CardDefaults.cardElevated(defaultElevation = 1.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)
             .combinedClickable(onClick = onOpen, onLongClick = onDelete),
     ) {

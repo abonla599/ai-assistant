@@ -156,7 +156,7 @@ private fun AuthCard(content: @Composable androidx.compose.foundation.layout.Col
     Card(
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevated(defaultElevation = 2.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = Modifier.fillMaxWidth(),
     ) { Column(Modifier.padding(20.dp), content = content) }
 }

@@ -173,7 +173,7 @@ fun MemoryScreen(onBack: () -> Unit) {
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surface
                                 .copy(alpha = 0.95f)),
-                        elevation = CardDefaults.cardElevated(defaultElevation = 1.dp)) {
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
                         Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically) {
