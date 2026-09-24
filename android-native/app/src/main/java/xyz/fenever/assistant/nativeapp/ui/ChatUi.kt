@@ -2,24 +2,39 @@ package xyz.fenever.assistant.nativeapp.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -28,10 +43,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,11 +58,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import xyz.fenever.assistant.nativeapp.Api
+import xyz.fenever.assistant.nativeapp.ApiException
+import xyz.fenever.assistant.nativeapp.ChatEvent
+import xyz.fenever.assistant.nativeapp.ChatMessageDto
+import xyz.fenever.assistant.nativeapp.ModelInfo
+import xyz.fenever.assistant.nativeapp.UploadInfo
+import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
+import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ChatEvent
 import xyz.fenever.assistant.nativeapp.ChatMessageDto
@@ -163,13 +189,18 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
         }
     }
 
-    Scaffold(topBar = {
+    Scaffold(
+        containerColor = Color.Transparent,
+        topBar = {
         TopAppBar(
             title = {
                 Box {
                     val cur = models.firstOrNull { it.id == providerId }
                     TextButton(onClick = { modelsOpen = true }) {
-                        Text(cur?.name ?: "选择模型")
+                        Box(Modifier.size(8.dp)
+                            .background(MaterialTheme.colorScheme.primary, CircleShape))
+                        Spacer(Modifier.width(8.dp))
+                        Text(cur?.name ?: "选择模型", fontWeight = FontWeight.SemiBold)
                     }
                     DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
                         models.forEach { m ->
@@ -186,8 +217,11 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             },
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)),
         )
     }) { pad ->
+        AiGlowBackground {
         Column(Modifier.padding(pad).fillMaxSize()) {
             error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error,
@@ -208,25 +242,24 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                     }
                 }
                 streaming?.let { s -> if (s.isNotEmpty()) item { MessageBubble(UiMessage("assistant", s), false, null) } }
-                if (busy && streaming?.isEmpty() == true) item {
-                    Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.padding(4.dp))
-                        Text("思考中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
+                if (busy && streaming?.isEmpty() == true) item { TypingBubble() }
             }
             if (uploads.isNotEmpty()) Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 uploads.forEach { u ->
                     AssistChip(onClick = { uploads = uploads.filter { it.id != u.id } },
                         label = { Text(u.name, maxLines = 1) })
                 }
             }
-            Row(Modifier.fillMaxWidth().imePadding().padding(8.dp),
+            Row(Modifier.fillMaxWidth().imePadding().padding(horizontal = 10.dp, vertical = 8.dp)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                    RoundedCornerShape(26.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                    RoundedCornerShape(26.dp))
+                .padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 IconButton(onClick = { picker.launch("image/*") }) {
                     // core 图标集没有 AttachFile，用文本符号避免为单个图标引入 icons-extended
                     Text("📎", style = MaterialTheme.typography.titleMedium)
@@ -234,14 +267,37 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                 OutlinedTextField(
                     value = input, onValueChange = { input = it },
                     placeholder = { Text("发消息…") },
-                    maxLines = 5, modifier = Modifier.weight(1f),
+                    maxLines = 5,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.weight(1f),
                 )
                 if (busy) {
-                    TextButton(onClick = { streamJob?.cancel() }) { Text("停止") }
+                    TextButton(onClick = { streamJob?.cancel() }) {
+                        Text("停止", color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold)
+                    }
                 } else {
-                    Button(onClick = { doSend() }) { Text("发送") }
+                    Button(onClick = { doSend() },
+                        enabled = input.isNotBlank() || uploads.isNotEmpty(),
+                        shape = CircleShape,
+                        contentPadding = PaddingValues(0.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = Color.White),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp),
+                        modifier = Modifier.size(48.dp)
+                            .background(aiPrimaryBrush(), CircleShape)) {
+                        Text("发送", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
             }
+        }
         }
     }
 }
@@ -250,37 +306,65 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
 private fun MessageBubble(m: UiMessage, feedbackGiven: Boolean,
                           onFeedback: ((String, Int) -> Unit)?) {
     val mine = m.role == "user"
-    val bg = when {
-        mine -> MaterialTheme.colorScheme.primary
-        m.failed -> MaterialTheme.colorScheme.errorContainer
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    val fg = when {
-        mine -> MaterialTheme.colorScheme.onPrimary
-        m.failed -> MaterialTheme.colorScheme.onErrorContainer
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
-    ) {
+    val shape = RoundedCornerShape(if (mine) 20.dp else 8.dp,
+        if (mine) 8.dp else 20.dp, 20.dp, 20.dp)
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    AnimatedVisibility(visible = shown,
+        enter = fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 4 }) {
         Column(
-            Modifier.widthIn(max = 300.dp)
-                .background(bg, RoundedCornerShape(if (mine) 14.dp else 6.dp,
-                    if (mine) 6.dp else 14.dp, 14.dp, 14.dp))
-                .padding(10.dp)) {
-            RichText(m.text, fg)
-        }
-        if (!mine && m.messageId != null && !m.failed && onFeedback != null) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onFeedback(m.messageId, 1) }, enabled = !feedbackGiven) {
-                    Text(if (feedbackGiven) "已反馈" else "有用",
-                        style = MaterialTheme.typography.labelSmall)
-                }
-                TextButton(onClick = { onFeedback(m.messageId, -1) }, enabled = !feedbackGiven) {
-                    Text("没用", style = MaterialTheme.typography.labelSmall)
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
+        ) {
+            val bubbleMod = Modifier.widthIn(max = 310.dp).then(
+                when {
+                    mine -> Modifier.background(aiPrimaryBrush(), shape)
+                    m.failed -> Modifier.background(
+                        MaterialTheme.colorScheme.errorContainer, shape)
+                    else -> Modifier
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f), shape)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant
+                            .copy(alpha = 0.5f), shape)
+                })
+            Column(bubbleMod.padding(12.dp)) {
+                RichText(m.text,
+                    when {
+                        mine -> Color.White
+                        m.failed -> MaterialTheme.colorScheme.onErrorContainer
+                        else -> MaterialTheme.colorScheme.onSurface
+                    })
+            }
+            if (!mine && m.messageId != null && !m.failed && onFeedback != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { onFeedback(m.messageId, 1) }, enabled = !feedbackGiven) {
+                        Text(if (feedbackGiven) "已反馈" else "有用",
+                            style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = { onFeedback(m.messageId, -1) }, enabled = !feedbackGiven) {
+                        Text("没用", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
+        }
+    }
+}
+
+/* 等首 token 的占位气泡：三个起伏的琥珀小点，代替旧版转圈+文字。 */
+@Composable
+private fun TypingBubble() {
+    val tr = rememberInfiniteTransition(label = "typing")
+    Row(Modifier.widthIn(max = 310.dp)
+        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+            RoundedCornerShape(8.dp, 20.dp, 20.dp, 20.dp))
+        .padding(horizontal = 14.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        repeat(3) { i ->
+            val a by tr.animateFloat(0.25f, 1f,
+                infiniteRepeatable(tween(520, delayMillis = i * 170), RepeatMode.Reverse),
+                label = "dot$i")
+            Box(Modifier.size(7.dp)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = a), CircleShape))
         }
     }
 }
