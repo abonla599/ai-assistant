@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -26,135 +25,182 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/* 视觉方向：墨黑 × 暖纸 × 琥珀——"深夜写信"的纸感界面。
- * 琥珀只在主操作与用户气泡发声；标题使用重字重 + 紧字距构成识别度，
- * 背景用径向光晕替代纯色，拒绝 AI 味的白底紫渐变。 */
-object AiColors {
-    val Ink = Color(0xFF17140F)
-    val Paper = Color(0xFFFAF6EE)
-    val Amber = Color(0xFFD96A0B)
-    val AmberDeep = Color(0xFF9E4C00)
-    val AmberSoft = Color(0xFFF5C77F)
-    val Teal = Color(0xFF0F6E5D)
-    val TealSoft = Color(0xFF8FD5C4)
-    val Danger = Color(0xFFB3261E)
+/* 视觉不另起炉灶：逐 token 照抄网页版 style.css 的设计语言——
+ * 深蓝黑底、薄荷绿(--accent) × 紫罗兰蓝(--accent-2) 双强调色主渐变、
+ * 用户气泡是深青→靛紫渐变、助手气泡是弱表面 + 细描边。
+ * 默认走深主题（网页 :root 即深色）；浅色映射 [data-theme="light"] 一并带全。 */
+object WebTokens {
+    // ---- dark（网页 :root）----
+    val Bg = Color(0xFF0B0E15)
+    val BgSoft = Color(0xFF10141D)
+    val BgHover = Color(0xFF191E2A)
+    val Surface = Color(0xFF141824)
+    val Text = Color(0xFFE6E9ED)
+    val Text2 = Color(0xFF98A1AD)
+    val Text3 = Color(0xFF6A7481)
+    val Line = Color(0xFF242A3A)
+    val Accent = Color(0xFF2FBF8F)
+    val AccentSoft = Color(0x242FBF8F)      // rgba(47,191,143,.14)
+    val Accent2 = Color(0xFF6C7BFF)
+    val Accent2Soft = Color(0x296C7BFF)     // rgba(108,123,255,.16)
+    val UserBubble = Color(0xFF1D3A49)
+    val UserBubble2 = Color(0xFF2B2F58)
+    val Danger = Color(0xFFF87171)
+    val CodeBg = Color(0xFF080A11)
+    val AuthBand = Color(0xFF06080F)
+    val AuthPanel = Color(0xFF151A2B)
+    val BtnPrimaryInk = Color(0xFF062518)   // 渐变主按钮上的深字
+
+    // ---- light（网页 [data-theme="light"]）----
+    val LAccent = Color(0xFF0A7D5E)
+    val LAccentSoft = Color(0xFFE6F6F0)
+    val LAccent2 = Color(0xFF5566F0)
+    val LAccent2Soft = Color(0xFFE9ECFD)
+    val LBg = Color(0xFFFFFFFF)
+    val LBgSoft = Color(0xFFF6F7FB)
+    val LBgHover = Color(0xFFECEEF4)
+    val LSurface = Color(0xFFFFFFFF)
+    val LText = Color(0xFF17191F)
+    val LText2 = Color(0xFF5B6472)
+    val LLine = Color(0xFFE4E7EE)
+    val LUserBubble = Color(0xFFE0F5EE)
+    val LUserBubble2 = Color(0xFFE6E9FC)
+    val LDanger = Color(0xFFDC2626)
+    val LAuthBand = Color(0xFFDFE3F2)
+    val LAuthPanel = Color(0xFFFFFFFF)
 }
 
-private val LightScheme = lightColorScheme(
-    primary = AiColors.Amber,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFFFE7CC),
-    onPrimaryContainer = Color(0xFF4E2400),
-    secondary = AiColors.Teal,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD8EFE8),
-    background = AiColors.Paper,
-    onBackground = AiColors.Ink,
-    surface = Color(0xFFFFFDF8),
-    onSurface = AiColors.Ink,
-    surfaceVariant = Color(0xFFF0E9DA),
-    onSurfaceVariant = Color(0xFF5C554A),
-    error = AiColors.Danger,
-    onError = Color.White,
-    errorContainer = Color(0xFFFDE3E0),
-    outline = Color(0xFFD8CFBC),
-    outlineVariant = Color(0xFFE9E1D1),
-)
-
 private val DarkScheme = darkColorScheme(
-    primary = Color(0xFFFFA54C),
-    onPrimary = AiColors.Ink,
-    primaryContainer = Color(0xFF6B3300),
-    onPrimaryContainer = Color(0xFFFFDDBF),
-    secondary = AiColors.TealSoft,
-    background = Color(0xFF141210),
-    onBackground = Color(0xFFEDE6D8),
-    surface = Color(0xFF1E1B17),
-    onSurface = Color(0xFFEDE6D8),
-    surfaceVariant = Color(0xFF2A2620),
-    onSurfaceVariant = Color(0xFFB4AB99),
-    error = Color(0xFFFF8A80),
-    errorContainer = Color(0xFF5C1A15),
-    outline = Color(0xFF4A443B),
-    outlineVariant = Color(0xFF332E27),
+    primary = WebTokens.Accent,
+    onPrimary = WebTokens.BtnPrimaryInk,
+    primaryContainer = Color(0xFF173B31),
+    onPrimaryContainer = WebTokens.Accent,
+    secondary = WebTokens.Accent2,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFF232A4D),
+    background = WebTokens.Bg,
+    onBackground = WebTokens.Text,
+    surface = WebTokens.Surface,
+    onSurface = WebTokens.Text,
+    surfaceVariant = WebTokens.BgSoft,
+    onSurfaceVariant = WebTokens.Text2,
+    error = WebTokens.Danger,
+    onError = Color(0xFF2B0F0F),
+    errorContainer = Color(0xFF3A1D20),
+    onErrorContainer = WebTokens.Text,
+    outline = WebTokens.Line,
+    outlineVariant = Color(0xFF1C2230),
 )
 
-// 圆角刻度：气泡与卡片都走"信纸折角"的大圆角，锐角只出现在代码块。
-private val AiShapeTokens = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(20.dp),
-    large = RoundedCornerShape(28.dp),
-    extraLarge = RoundedCornerShape(40.dp),
+private val LightScheme = lightColorScheme(
+    primary = WebTokens.LAccent,
+    onPrimary = Color.White,        // 浅主题主按钮是白字（网页同款规则）
+    primaryContainer = WebTokens.LAccentSoft,
+    onPrimaryContainer = WebTokens.LAccent,
+    secondary = WebTokens.LAccent2,
+    background = WebTokens.LBg,
+    onBackground = WebTokens.LText,
+    surface = WebTokens.LSurface,
+    onSurface = WebTokens.LText,
+    surfaceVariant = WebTokens.LBgSoft,
+    onSurfaceVariant = WebTokens.LText2,
+    error = WebTokens.LDanger,
+    outline = WebTokens.LLine,
+    outlineVariant = WebTokens.LLine,
 )
 
-private val AiTypography = Typography(
-    headlineMedium = TextStyle(
-        fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp, fontSize = 28.sp),
-    headlineSmall = TextStyle(
-        fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.3).sp, fontSize = 22.sp),
-    titleLarge = TextStyle(fontWeight = FontWeight.Bold, letterSpacing = 0.sp, fontSize = 20.sp),
-    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp),
-    bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 24.sp),
-    bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 15.sp, lineHeight = 22.sp),
-    bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp),
-    labelLarge = TextStyle(fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp, fontSize = 14.sp),
-    labelSmall = TextStyle(fontWeight = FontWeight.Medium, letterSpacing = 0.4.sp, fontSize = 11.sp),
+// 网页 --radius: 18px 是主刻度；卡片 18、输入 12~14、气泡见各屏
+private val WebShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp),
+)
+
+// 网页正文 15px/1.7；标题 600 字重、无花哨字距——克制本身就是这套设计的识别度
+private val WebTypography = Typography(
+    headlineSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 20.sp),
+    titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
+    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 15.sp),
+    bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 26.sp),
+    bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 15.sp, lineHeight = 25.sp),
+    bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.5.sp),
+    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
+    labelMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 13.sp),
+    labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 11.sp),
 )
 
 @Composable
 fun AiTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = if (darkTheme) DarkScheme else LightScheme,
-        shapes = AiShapeTokens,
-        typography = AiTypography,
+        shapes = WebShapes,
+        typography = WebTypography,
         content = content,
     )
 }
 
-/* 品牌主渐变：登录按钮、发送键、FAB 共用，保证"琥珀只在一处发声"的连续感。 */
+/* 主渐变 accent→accent-2：主按钮、发送键、品牌字标共用（网页 .btn-primary /
+ * .brand clip-text 同款）。 */
 @Composable
-fun aiPrimaryBrush(): Brush = Brush.linearGradient(
-    listOf(AiColors.AmberSoft, MaterialTheme.colorScheme.primary, AiColors.AmberDeep))
+fun aiPrimaryBrush(): Brush {
+    val scheme = MaterialTheme.colorScheme
+    return Brush.linearGradient(
+        if (scheme.background == WebTokens.LBg)
+            listOf(WebTokens.LAccent, WebTokens.LAccent2)
+        else listOf(WebTokens.Accent, WebTokens.Accent2))
+}
 
-/* 氛围背景：两枚径向光晕（琥珀 + 青）叠在纸色上；登录/列表共用。 */
+/* 用户气泡渐变：深青→靛紫（网页 .msg.user .msg-body 135° 双色渐变）。 */
+@Composable
+fun userBubbleBrush(): Brush {
+    val scheme = MaterialTheme.colorScheme
+    return Brush.linearGradient(
+        if (scheme.background == WebTokens.LBg)
+            listOf(WebTokens.LUserBubble, WebTokens.LUserBubble2)
+        else listOf(WebTokens.UserBubble, WebTokens.UserBubble2))
+}
+
+/* 氛围光与网页 body 一致：右上紫罗兰、左下薄荷，很淡，不随内容滚动。 */
 @Composable
 fun AiGlowBackground(content: @Composable BoxScope.() -> Unit) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    val scheme = MaterialTheme.colorScheme
+    val light = scheme.background == WebTokens.LBg
+    val glow2 = if (light) WebTokens.LAccent2Soft else WebTokens.Accent2Soft
+    val glowA = if (light) WebTokens.LAccentSoft else WebTokens.AccentSoft
+    Box(Modifier.fillMaxSize().background(scheme.background)) {
         Canvas(Modifier.fillMaxSize()) {
             drawCircle(
-                Brush.radialGradient(
-                    listOf(AiColors.Amber.copy(alpha = 0.30f), Color.Transparent),
-                    center = Offset(size.width * 0.88f, size.height * 0.10f),
-                    radius = size.width * 0.62f),
-                radius = size.width * 0.62f,
-                center = Offset(size.width * 0.88f, size.height * 0.10f))
+                Brush.radialGradient(listOf(glow2, Color.Transparent),
+                    center = Offset(size.width * 0.88f, -size.height * 0.12f),
+                    radius = size.width * 0.72f),
+                radius = size.width * 0.72f,
+                center = Offset(size.width * 0.88f, -size.height * 0.12f))
             drawCircle(
-                Brush.radialGradient(
-                    listOf(AiColors.Teal.copy(alpha = 0.18f), Color.Transparent),
-                    center = Offset(size.width * 0.06f, size.height * 0.80f),
-                    radius = size.width * 0.55f),
-                radius = size.width * 0.55f,
-                center = Offset(size.width * 0.06f, size.height * 0.80f))
+                Brush.radialGradient(listOf(glowA, Color.Transparent),
+                    center = Offset(-size.width * 0.12f, size.height * 1.08f),
+                    radius = size.width * 0.66f),
+                radius = size.width * 0.66f,
+                center = Offset(-size.width * 0.12f, size.height * 1.08f))
         }
         content()
     }
 }
 
-/* 品牌记号：墨色方块里一枚琥珀圆点，签名式元素。 */
+/* 品牌记号：网页用的是 icon.png 那枚渐变圆角方块，原生端同形制重现。 */
 @Composable
 fun AiBrandMark(sizeDp: Int = 44) {
     Box(
-        Modifier
-            .size(sizeDp.dp)
-            .background(AiColors.Ink, RoundedCornerShape((sizeDp / 3).dp)),
+        Modifier.size(sizeDp.dp)
+            .background(aiPrimaryBrush(), RoundedCornerShape((sizeDp / 3).dp)),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size((sizeDp * 0.62f).dp)) {
-            drawCircle(Brush.linearGradient(listOf(AiColors.AmberSoft, AiColors.AmberDeep)))
+        Canvas(Modifier.size((sizeDp * 0.52f).dp)) {
+            drawCircle(Color.White.copy(alpha = 0.92f))
         }
     }
 }
 
-/* 等宽段（代码块）统一从这取，保持聊天与后续页面一致。 */
+/* 等宽段（代码块）统一从这取。 */
 val AiMono = FontFamily.Monospace

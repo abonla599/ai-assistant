@@ -14,12 +14,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -83,7 +82,7 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
             TopAppBar(
                 title = {
                     Column {
-                        Text("对话", fontWeight = FontWeight.ExtraBold)
+                        Text("对话", fontWeight = FontWeight.SemiBold)
                         Text(Prefs.username.ifBlank { "AI 助手" },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -110,12 +109,12 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
                     creating = false
                 }
             },
-                shape = RoundedCornerShape(18.dp),
+                shape = CircleShape,
                 containerColor = Color.Transparent,
-                contentColor = Color.White,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
                 elevation = FloatingActionButtonDefaults.elevation(8.dp),
-                modifier = Modifier.size(60.dp)
-                    .background(aiPrimaryBrush(), RoundedCornerShape(18.dp)),
+                modifier = Modifier.size(56.dp)
+                    .background(aiPrimaryBrush(), CircleShape),
             ) { Icon(Icons.Default.Add, contentDescription = "新对话") }
         },
     ) { pad ->
@@ -183,35 +182,22 @@ fun SessionListScreen(onOpenChat: (String) -> Unit, onMemory: () -> Unit,
 @Composable
 private fun SessionRow(s: SessionSummary, onOpen: () -> Unit, onDelete: () -> Unit) {
     val title = s.title.ifBlank { "新对话" }
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)
-            .combinedClickable(onClick = onOpen, onLongClick = onDelete),
-    ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.size(42.dp)
-                .background(aiPrimaryBrush(), RoundedCornerShape(13.dp)),
-                contentAlignment = Alignment.Center) {
-                Text(title.take(1), color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Black)
-            }
-            Column(Modifier.weight(1f)) {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold)
-                Text(fmtTime(s.created_at) +
-                    if (s.model.isNotBlank()) " · ${s.model}" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
+    // 网页 .sb-item：无卡片无头像，纯平的一行标题 + 省略号截断，圆角 12、hover 才有一层浅底。
+    // 移动端没有 hover，给一层极淡的 surface 让行可辨，其余保持平铺。
+    Column(Modifier.fillMaxWidth()
+        .padding(horizontal = 10.dp, vertical = 4.dp)
+        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+            RoundedCornerShape(12.dp))
+        .combinedClickable(onClick = onOpen, onLongClick = onDelete)
+        .padding(horizontal = 14.dp, vertical = 11.dp)) {
+        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium)
+        Text(fmtTime(s.created_at) +
+            if (s.model.isNotBlank()) " · ${s.model}" else "",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

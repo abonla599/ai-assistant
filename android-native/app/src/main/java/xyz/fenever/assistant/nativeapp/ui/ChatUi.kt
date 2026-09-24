@@ -12,18 +12,18 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -62,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import xyz.fenever.assistant.nativeapp.Api
@@ -71,7 +72,9 @@ import xyz.fenever.assistant.nativeapp.ChatMessageDto
 import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.UploadInfo
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
+import xyz.fenever.assistant.nativeapp.theme.WebTokens
 import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
+import xyz.fenever.assistant.nativeapp.theme.userBubbleBrush
 
 
 private data class UiMessage(val role: String, val text: String,
@@ -192,12 +195,10 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
             title = {
                 Box {
                     val cur = models.firstOrNull { it.id == providerId }
-                    TextButton(onClick = { modelsOpen = true }) {
-                        Box(Modifier.size(8.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape))
-                        Spacer(Modifier.width(8.dp))
-                        Text(cur?.name ?: "选择模型", fontWeight = FontWeight.SemiBold)
-                    }
+                    // 网页 .model-chip：描边胶囊 + 下拉角标
+                    AssistChip(onClick = { modelsOpen = true },
+                        label = { Text((cur?.name ?: "选择模型") + "  ⌄", maxLines = 1,
+                            style = MaterialTheme.typography.labelMedium) })
                     DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
                         models.forEach { m ->
                             DropdownMenuItem(
@@ -237,8 +238,11 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                         }
                     }
                 }
-                streaming?.let { s -> if (s.isNotEmpty()) item { MessageBubble(UiMessage("assistant", s), false, null) } }
-                if (busy && streaming?.isEmpty() == true) item { TypingBubble() }
+                streaming?.let { s -> if (s.isNotEmpty()) item { MessageBubble(UiMessage("assistant", s), false, null, typing = true) } }
+                if (busy && streaming?.isEmpty() == true) item {
+                    // 网页版首 token 前就是"空气泡 + 呼吸光标"，这里一模一样
+                    MessageBubble(UiMessage("assistant", ""), false, null, typing = true)
+                }
             }
             if (uploads.isNotEmpty()) Row(
                 Modifier.fillMaxWidth().padding(horizontal = 14.dp),
@@ -248,48 +252,55 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                         label = { Text(u.name, maxLines = 1) })
                 }
             }
-            Row(Modifier.fillMaxWidth().imePadding().padding(horizontal = 10.dp, vertical = 8.dp)
-                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                    RoundedCornerShape(26.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                    RoundedCornerShape(26.dp))
-                .padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+            Row(Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                IconButton(onClick = { picker.launch("image/*") }) {
-                    // core 图标集没有 AttachFile，用文本符号避免为单个图标引入 icons-extended
-                    Text("📎", style = MaterialTheme.typography.titleMedium)
-                }
-                OutlinedTextField(
-                    value = input, onValueChange = { input = it },
-                    placeholder = { Text("发消息…") },
-                    maxLines = 5,
-                    shape = RoundedCornerShape(20.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent,
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                    ),
-                    modifier = Modifier.weight(1f),
-                )
-                if (busy) {
-                    TextButton(onClick = { streamJob?.cancel() }) {
-                        Text("停止", color = MaterialTheme.colorScheme.error,
-                            fontWeight = FontWeight.SemiBold)
-                    }
-                } else {
-                    Button(onClick = { doSend() },
-                        enabled = input.isNotBlank() || uploads.isNotEmpty(),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(0.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.Transparent,
-                            contentColor = Color.White),
-                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp),
-                        modifier = Modifier.size(48.dp)
-                            .background(aiPrimaryBrush(), CircleShape)) {
-                        Text("发送", style = MaterialTheme.typography.labelLarge)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // 网页 .input-card：圆角 18 表面卡 + 细描边，输入区与按钮都在卡内
+                Surface(Modifier.weight(1f),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp, MaterialTheme.colorScheme.outline)) {
+                    Row(Modifier.padding(start = 2.dp, end = 8.dp, top = 2.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        IconButton(onClick = { picker.launch("image/*") }) {
+                            // core 图标集没有 AttachFile，用文本符号避免为单个图标引入 icons-extended
+                            Text("📎", style = MaterialTheme.typography.titleMedium)
+                        }
+                        OutlinedTextField(
+                            value = input, onValueChange = { input = it },
+                            placeholder = { Text("发消息…") },
+                            maxLines = 5,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (busy) {
+                            TextButton(onClick = { streamJob?.cancel() }) {
+                                Text("停止", color = MaterialTheme.colorScheme.error,
+                                    fontWeight = FontWeight.SemiBold)
+                            }
+                        } else {
+                            // 网页 .btn-send：36px 渐变圆钮，深字
+                            Button(onClick = { doSend() },
+                                enabled = input.isNotBlank() || uploads.isNotEmpty(),
+                                shape = CircleShape,
+                                contentPadding = PaddingValues(0.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color.Transparent,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary),
+                                elevation = ButtonDefaults.buttonElevation(defaultElevation = 3.dp),
+                                modifier = Modifier.size(42.dp)
+                                    .background(aiPrimaryBrush(), CircleShape)) {
+                                Text("↑", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
@@ -300,10 +311,12 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
 
 @Composable
 private fun MessageBubble(m: UiMessage, feedbackGiven: Boolean,
-                          onFeedback: ((String, Int) -> Unit)?) {
+                          onFeedback: ((String, Int) -> Unit)?,
+                          typing: Boolean = false) {
     val mine = m.role == "user"
-    val shape = RoundedCornerShape(if (mine) 20.dp else 8.dp,
-        if (mine) 8.dp else 20.dp, 20.dp, 20.dp)
+    val scheme = MaterialTheme.colorScheme
+    val shape = if (mine) RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)
+                else RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp)
     var shown by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { shown = true }
     AnimatedVisibility(visible = shown,
@@ -312,23 +325,27 @@ private fun MessageBubble(m: UiMessage, feedbackGiven: Boolean,
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
         ) {
-            val bubbleMod = Modifier.widthIn(max = 310.dp).then(
+            // 网页 .msg-role：气泡上方一行小字标注是谁说的
+            Text(if (mine) "我" else "AI", style = MaterialTheme.typography.labelSmall,
+                color = scheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+            val bubbleMod = (if (mine) Modifier.widthIn(max = 320.dp)
+                             else Modifier.fillMaxWidth()).then(
                 when {
-                    mine -> Modifier.background(aiPrimaryBrush(), shape)
-                    m.failed -> Modifier.background(
-                        MaterialTheme.colorScheme.errorContainer, shape)
+                    m.failed && !mine -> Modifier
+                        .background(scheme.errorContainer.copy(alpha = 0.6f), shape)
+                        .border(1.dp, scheme.error, shape)
+                    mine -> Modifier.background(userBubbleBrush(), shape)
                     else -> Modifier
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f), shape)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant
-                            .copy(alpha = 0.5f), shape)
+                        .background(scheme.surfaceVariant, shape)
+                        .border(1.dp, scheme.outline, shape)
                 })
-            Column(bubbleMod.padding(12.dp)) {
+            Column(bubbleMod.padding(
+                horizontal = if (mine) 15.dp else 16.dp,
+                vertical = if (mine) 10.dp else 12.dp)) {
                 RichText(m.text,
-                    when {
-                        mine -> Color.White
-                        m.failed -> MaterialTheme.colorScheme.onErrorContainer
-                        else -> MaterialTheme.colorScheme.onSurface
-                    })
+                    if (mine || !m.failed) scheme.onBackground else scheme.onErrorContainer)
+                if (typing) BlinkCursor()
             }
             if (!mine && m.messageId != null && !m.failed && onFeedback != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -345,24 +362,13 @@ private fun MessageBubble(m: UiMessage, feedbackGiven: Boolean,
     }
 }
 
-/* 等首 token 的占位气泡：三个起伏的琥珀小点，代替旧版转圈+文字。 */
+/* 网页 .typing .msg-body::after 那颗呼吸的 ▋。 */
 @Composable
-private fun TypingBubble() {
-    val tr = rememberInfiniteTransition(label = "typing")
-    Row(Modifier.widthIn(max = 310.dp)
-        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-            RoundedCornerShape(8.dp, 20.dp, 20.dp, 20.dp))
-        .padding(horizontal = 14.dp, vertical = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        repeat(3) { i ->
-            val a by tr.animateFloat(0.25f, 1f,
-                infiniteRepeatable(tween(520, delayMillis = i * 170), RepeatMode.Reverse),
-                label = "dot$i")
-            Box(Modifier.size(7.dp)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = a), CircleShape))
-        }
-    }
+private fun BlinkCursor() {
+    val tr = rememberInfiniteTransition(label = "cursor")
+    val a by tr.animateFloat(1f, 0f,
+        infiniteRepeatable(tween(500), RepeatMode.Reverse), label = "blink")
+    Text("▋", color = MaterialTheme.colorScheme.primary.copy(alpha = a))
 }
 
 /* 轻量渲染：``` 围栏内的内容用等宽小卡片呈现，其余按段落文本。
@@ -388,13 +394,21 @@ private fun RichText(text: String, color: androidx.compose.ui.graphics.Color) {
     }
     Column {
         parts.forEach { (seg, code) ->
-            if (code) Text(seg, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                style = MaterialTheme.typography.bodySmall, color = color,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.08f))
-                    .padding(6.dp))
-            else if (seg.isNotBlank()) Text(seg, style = MaterialTheme.typography.bodyMedium,
+            if (code) {
+                // 网页 .msg-body pre：--code-bg 深底 + --line 描边 + 14px 圆角，等宽 13px/1.6
+                val preShape = RoundedCornerShape(14.dp)
+                Text(seg.trimEnd('\n'),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    fontSize = 13.sp, lineHeight = 21.sp,
+                    color = WebTokens.Text,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .background(WebTokens.CodeBg, preShape)
+                        .border(1.dp, WebTokens.Line, preShape)
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .horizontalScroll(rememberScrollState()))
+            } else if (seg.isNotBlank()) Text(seg, style = MaterialTheme.typography.bodyMedium,
                 color = color)
         }
     }

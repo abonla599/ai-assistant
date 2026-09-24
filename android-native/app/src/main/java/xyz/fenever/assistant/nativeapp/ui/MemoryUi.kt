@@ -3,23 +3,19 @@ package xyz.fenever.assistant.nativeapp.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -107,7 +103,7 @@ fun MemoryScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) { loadList() }
 
     Scaffold(containerColor = Color.Transparent, topBar = {
-        TopAppBar(title = { Text("我的记忆", fontWeight = FontWeight.ExtraBold) },
+        TopAppBar(title = { Text("我的记忆", fontWeight = FontWeight.SemiBold) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -168,31 +164,34 @@ fun MemoryScreen(onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(rows.size) { i ->
                     val r = rows[i]
-                    Card(Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surface
-                                .copy(alpha = 0.95f)),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-                        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.width(3.dp).height(28.dp)
-                                .background(MaterialTheme.colorScheme.primary,
-                                    RoundedCornerShape(2.dp)))
-                            Column(Modifier.weight(1f)) {
-                                Text(r.text, style = MaterialTheme.typography.bodyMedium)
-                                if (r.note.isNotBlank()) Text(r.note,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                    // 网页记忆面板的 .mem-row：--bg-soft 底 + --line 描边 + 10px 圆角，
+                    // 元信息是一颗胶囊小标签，不放左侧色条。
+                    Column(Modifier.fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(10.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outline,
+                            RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.Top) {
+                            Text(r.text, style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f))
                             if (r.id != null) IconButton(onClick = {
                                 scope.launch {
                                     runCatching { Api.deleteMemory(listOf(r.id)) }
                                         .onSuccess { rows = rows - r }
                                         .onFailure { error = it.message }
                                 }
-                            }) { Icon(Icons.Default.Delete, contentDescription = "删除") }
+                            }) { Icon(Icons.Default.Delete, contentDescription = "删除",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                        if (r.note.isNotBlank()) {
+                            Text(r.note, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                                    .border(1.dp, MaterialTheme.colorScheme.outline,
+                                        CircleShape)
+                                    .padding(horizontal = 10.dp, vertical = 2.dp))
                         }
                     }
                 }
