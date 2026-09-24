@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.text.withStyle
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,9 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.shape.GenericShape
+import androidx.compose.ui.graphics.shapes.GenericShape
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -62,8 +62,8 @@ val RECOVERY_QUESTIONS = listOf(
 
 /* 网页 .auth-sheet 那道拱形顶边：border-radius: 50% 50% 0 0 / 30px 30px 0 0。
  * 椭圆拱用一段二次贝塞尔近似（控制点 (w/2, -b) 时曲线恰好过拱顶 (w/2, 0)）。 */
-private val ArchTopShape = GenericShape { s, _ ->
-    val b = 30.dp.toPx().let { if (it * 2 > s.height) s.height / 2 else it }
+private val ArchTopShape = GenericShape { s, d ->
+    val b = with(d) { 30.dp.toPx() }.let { if (it * 2 > s.height) s.height / 2 else it }
     moveTo(0f, b)
     quadraticBezierTo(s.width / 2f, -b, s.width, b)
     lineTo(s.width, s.height)

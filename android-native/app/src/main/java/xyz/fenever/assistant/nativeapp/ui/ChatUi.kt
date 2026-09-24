@@ -45,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -230,13 +231,14 @@ fun ChatScreen(sessionId: String, onBack: () -> Unit) {
                     horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(messages) { m ->
-                    MessageBubble(m, feedbackSent.contains(m.messageId ?: "")) { mid, rating ->
+                    // onFeedback 不是末位参数（typing 在后），不能用尾随 lambda 语法
+                    MessageBubble(m, feedbackSent.contains(m.messageId ?: ""), { mid, rating ->
                         scope.launch {
                             runCatching { Api.feedback(mid, rating) }.onSuccess {
                                 feedbackSent = feedbackSent + mid
                             }
                         }
-                    }
+                    })
                 }
                 streaming?.let { s -> if (s.isNotEmpty()) item { MessageBubble(UiMessage("assistant", s), false, null, typing = true) } }
                 if (busy && streaming?.isEmpty() == true) item {
