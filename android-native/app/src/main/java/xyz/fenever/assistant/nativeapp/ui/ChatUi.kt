@@ -45,7 +45,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ModalDrawer
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -267,8 +267,8 @@ fun ChatScreen(onWebApp: () -> Unit, onReset: () -> Unit, onLoggedOut: () -> Uni
     fun openDrawer() { scope.launch { drawerState.open() } }
     fun closeDrawer() { scope.launch { drawerState.close() } }
 
-    ModalDrawer(
-        modalDrawerState = drawerState,
+    ModalNavigationDrawer(
+        drawerState = drawerState,
         drawerWidth = 300.dp,
         drawerContent = {
             SessionDrawer(
