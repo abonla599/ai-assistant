@@ -37,7 +37,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
-import androidx.compose.ui.graphics.OutlineStyle
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.SpanStyle
@@ -69,7 +68,7 @@ val RECOVERY_QUESTIONS = listOf(
  * 椭圆拱用一段二次贝塞尔近似（控制点 (w/2, -b) 时曲线恰好过拱顶 (w/2, 0)）。
  * 不走 GenericShape（此版本 ui-graphics 无该包），直接实现 Shape。 */
 private val ArchTopShape = object : Shape {
-    override fun createOutline(size: Size, outlineStyle: OutlineStyle, density: Density): Outline {
+    override fun createOutline(size: Size, density: Density): Outline {
         val b = with(density) { 30.dp.toPx() }.let { if (it * 2 > size.height) size.height / 2 else it }
         val path = Path().apply {
             moveTo(0f, b)
