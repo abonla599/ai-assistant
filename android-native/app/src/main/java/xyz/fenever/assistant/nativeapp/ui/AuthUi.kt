@@ -2,7 +2,7 @@ package xyz.fenever.assistant.nativeapp.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,7 +62,7 @@ val RECOVERY_QUESTIONS = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AuthScaffold(title: String, onBack: (() -> Unit)? = null,
-                         content: @Composable BoxScope.() -> Unit) {
+                         content: @Composable ColumnScope.() -> Unit) {
     Scaffold(
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
@@ -152,7 +152,7 @@ private fun GradientButton(onClick: () -> Unit, enabled: Boolean = true,
 }
 
 @Composable
-private fun AuthCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+private fun AuthCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

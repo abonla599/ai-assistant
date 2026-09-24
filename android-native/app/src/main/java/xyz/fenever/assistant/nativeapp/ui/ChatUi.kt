@@ -72,11 +72,7 @@ import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.UploadInfo
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
 import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
-import xyz.fenever.assistant.nativeapp.ApiException
-import xyz.fenever.assistant.nativeapp.ChatEvent
-import xyz.fenever.assistant.nativeapp.ChatMessageDto
-import xyz.fenever.assistant.nativeapp.ModelInfo
-import xyz.fenever.assistant.nativeapp.UploadInfo
+
 
 private data class UiMessage(val role: String, val text: String,
                              val messageId: String? = null, val failed: Boolean = false)
