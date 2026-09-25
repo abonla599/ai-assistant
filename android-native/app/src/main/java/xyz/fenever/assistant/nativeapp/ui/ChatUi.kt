@@ -390,6 +390,34 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
+    /* ---------------- 按住说话（VoiceUi 接线，放在 sendNow 之后：局部函数不能前向引用） ----------------
+     * 只在输入框为空、没在生成时接管长按；松手出字直接 sendNow，上滑取消。 */
+    val voice = rememberVoiceRecorder()
+    var voiceCancel by remember { mutableStateOf(false) }
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) setStatus("没给麦克风权限，语音输入用不了", true)
+    }
+    // 识别回调都落在主线程；每次重组重新挂闭包，闭里永远是最新的 sendNow
+    voice.onFinal = { t -> sendNow(t) }
+    voice.onError = { m -> setStatus(m, true) }
+    val voiceHoldMod = Modifier.voiceHold(
+        enabled = { input.text.isEmpty() && !busy && !voice.listening },
+        onStart = {
+            if (!voice.available) {
+                setStatus("这台设备没有语音识别服务，用不了按住说话", true)
+            } else if (ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+            } else {
+                voiceCancel = false; voice.start()
+            }
+        },
+        onZone = { voiceCancel = it },
+        onFinish = { cancelling -> voice.finish(!cancelling) },
+    )
+
     fun sendFeedback(index: Int, rating: Int) {
         val m = messages.getOrNull(index) ?: return
         if (m.messageId == null) {
@@ -540,6 +568,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         onStop = { stopRequested = true; streamJob?.cancel() },
                         onSend = { sendNow(input.text) },
                         canSend = input.text.isNotBlank() || pending.isNotEmpty(),
+                        voiceMod = voiceHoldMod,
                     )
                     // .attach-menu：卡片下方玻璃面板（网页 DOM 顺序就在 .input-card 之后）
                     AnimatedVisibility(visible = attachOpen,
@@ -597,6 +626,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     }
                 }
             }
+            // 录音浮层盖满整屏（AiGlowBackground 本身就是全屏 Box），穹顶贴底
+            if (voice.listening) VoiceOverlay(voice.heard, voice.level, voiceCancel)
         }
     }
 
@@ -696,36 +727,40 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                       status: String, statusErr: Boolean, busy: Boolean,
                       chipModel: String, chipVisible: Boolean, chipOpen: Boolean,
                       onToggleChip: () -> Unit, onStop: () -> Unit, onSend: () -> Unit,
-                      canSend: Boolean) {
+                      canSend: Boolean, voiceMod: Modifier) {
     val scheme = MaterialTheme.colorScheme
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
         color = scheme.surface, border = BorderStroke(1.dp, scheme.outline),
         shadowElevation = 6.dp) {
         Column(Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 6.dp)) {
-            BasicTextField(
-                value = input, onValueChange = onInput,
-                textStyle = TextStyle(fontSize = 15.sp, lineHeight = 24.sp,
-                    color = scheme.onSurface),
-                cursorBrush = SolidColor(scheme.primary),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 200.dp)
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
-                    .focusRequester(focusRequester),
-                // 网页：Enter 发送、Shift+Enter 换行。手机键盘对位：Send 键=发送，
-                // 键盘上的回车/换行键照常插入换行（Gboard 上 Shift 语义由键面自己给）。
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onSendKey() }),
-                decorationBox = { inner ->
-                    Box {
-                        if (input.text.isEmpty())
-                            // 手机键盘没有 Shift+Enter 这回事，网页那句提示照搬过来
-                            // 只会误导；改成聊天 App 通用的说法。
-                            Text("发消息或按住说话", fontSize = 15.sp,
-                                color = text3Color(),
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp))
-                        inner()
-                    }
-                },
-            )
+            // voiceMod 挂在外层 Box 上：Initial pass 先于文本框看到按下，
+            // 但不消费——没进语音模式时点击/长按选字照常是文本框自己的事。
+            Box(Modifier.fillMaxWidth().then(voiceMod)) {
+                BasicTextField(
+                    value = input, onValueChange = onInput,
+                    textStyle = TextStyle(fontSize = 15.sp, lineHeight = 24.sp,
+                        color = scheme.onSurface),
+                    cursorBrush = SolidColor(scheme.primary),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 200.dp)
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                        .focusRequester(focusRequester),
+                    // 网页：Enter 发送、Shift+Enter 换行。手机键盘对位：Send 键=发送，
+                    // 键盘上的回车/换行键照常插入换行（Gboard 上 Shift 语义由键面自己给）。
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { onSendKey() }),
+                    decorationBox = { inner ->
+                        Box {
+                            if (input.text.isEmpty())
+                                // 手机键盘没有 Shift+Enter 这回事，网页那句提示照搬过来
+                                // 只会误导；改成聊天 App 通用的说法。
+                                Text("发消息或按住说话", fontSize = 15.sp,
+                                    color = text3Color(),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp))
+                            inner()
+                        }
+                    },
+                )
+            }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -10,6 +10,16 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 安装期权限、不弹框：AlarmManager 的闹钟重启不保留，靠它把表重排一遍。 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 按住说话的录音。运行时才弹框（ChatUi 里在第一次长按时才请求）。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Android 11+ 的包可见性：SpeechRecognizer 绑的是系统识别服务，
+         不声明这条，isRecognitionAvailable 在部分 ROM 上会假报"没有服务"。 -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"

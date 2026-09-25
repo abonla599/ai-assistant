@@ -701,3 +701,30 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .us-primary { border: 0; color: #fff; text-decoration: none;
               background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
 .us-primary:hover { filter: brightness(1.06); }
+
+/* ---------------- 按住说话录音浮层（v0.22，与原生 VoiceOverlay 同款三件套） ----------------
+ * 穹顶 = 一枚 400px 圆沉出屏底一半，露出的弧顶就是那只"碗"；波纹条两头低中间高。
+ * z-index 90：压过设置(60)/相机(70)，让在认证层(200)之下——登录页没有输入框，按不到。 */
+.voice-mask { position: fixed; inset: 0; z-index: 90; background: rgba(0, 0, 0, .6);
+              touch-action: none; user-select: none; -webkit-user-select: none; }
+/* 长按起说的手势归 JS 管：窄屏输入框上禁掉浏览器自己的平移/选字手势，
+   否则 pointerdown 之后的滚动会把"按住"打断（桌面宽屏不受影响）。 */
+@media (max-width: 860px) { #input { touch-action: none; } }
+.voice-dome { position: absolute; left: 50%; bottom: -200px; transform: translateX(-50%);
+              width: 400px; height: 400px; border-radius: 50%;
+              background: linear-gradient(180deg, #5C8CFF, #2451D6);
+              transition: background .15s; }
+.voice-mask.cancelling .voice-dome { background: linear-gradient(180deg, #FF7A6B, #E5484D); }
+.voice-panel { position: absolute; left: 0; right: 0; bottom: 44px;
+               display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.voice-heard { max-width: 78%; color: #fff; font-size: 16px; font-weight: 500; line-height: 1.5;
+               text-align: center; display: -webkit-box; -webkit-line-clamp: 3;
+               -webkit-box-orient: vertical; overflow: hidden; }
+.voice-bars { display: flex; align-items: center; gap: 3px; height: 38px; }
+.voice-bars i { width: 3px; border-radius: 2px; background: #fff;
+                animation: voiceBar 720ms ease-in-out infinite alternate; }
+.voice-mask.cancelling .voice-bars i { background: #FFD7D2; }
+.voice-hint { color: #fff; font-size: 15px; font-weight: 600; }
+@keyframes voiceBar { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) { .voice-bars i { animation-duration: 1.6s; } }
+
