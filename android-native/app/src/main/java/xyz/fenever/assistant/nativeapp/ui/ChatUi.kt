@@ -396,7 +396,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var voiceCancel by remember { mutableStateOf(false) }
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()) { granted ->
-        if (!granted) setStatus("没给麦克风权限，语音输入用不了", true)
+        if (granted) setStatus("麦克风权限已开，再按住说话就行")
+        else setStatus("没给麦克风权限，语音输入用不了", true)
     }
     // 识别回调都落在主线程；每次重组重新挂闭包，闭里永远是最新的 sendNow
     voice.onFinal = { t -> sendNow(t) }
