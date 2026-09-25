@@ -27,7 +27,28 @@ PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset
                           # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
                           # 出站请求带 10 分钟缓存（app/core/releases.py）：一小时内最多
                           # 6 次，与来多少请求无关。
-                          "/v1/release/latest"})
+                          "/v1/release/latest",
+                          # 壳「检查更新」的透传端点：与上面那条共用同一份快照与同一套
+                          # 缓存代价，公开的是本来就公开的发布元数据。它替代的是
+                          # "壳自己直连 api.github.com"——那条通道要过各家 ROM 的下载器。
+                          "/v1/update/info"})
+
+# 会话 Cookie（方案 C：凭据不进 JS）。名字刻意短且不带语义泄露；值就是存储层
+# 签发的那枚令牌原文，服务端不新建第二套凭据体系。
+# path=/v1：静态页面与文档路由永远收不到它，能带上它的只有数据端点本身。
+# HttpOnly：页面脚本读不到 document.cookie，XSS 拿不走会话。
+# SameSite=Lax：跨站 POST 一律不带 Cookie（第一道 CSRF 防线），顶层 GET 跳转仍带。
+# 不设 Max-Age = 会话级 Cookie：浏览器/WebView 进程退出即蒸发。
+SESSION_COOKIE = "session"
+
+# CSRF 第二道防线：不带凭据请求头、却带会话 Cookie 的不安全方法，必须声明这个
+# 自定义头。跨站脚本能诱导浏览器带出 Cookie（同站顶层导航之外其实带不出，Lax
+# 已挡 POST），但任何站点的 JS 都发不出"既带该头又能让浏览器附上本站 Cookie"的
+# 跨站 POST；而原生 HTTP 客户端从来不受同源约束，也就从来不需要这道门。
+# 值不校验内容，只要求非空：它是"我在 JS 里"的声明位，不是秘密。
+CSRF_HEADER = "x-csrf"
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_DETAIL = "缺少 CSRF 校验头"
 
 # 免凭据的第二种形状：带变量段的公开路由。精确匹配的门今天只有票据兑换这一条
 # 需要跨过去——链接本身就是凭据（128 位随机、5 分钟过期、一次作废，见
@@ -80,7 +101,7 @@ def docs_kwargs_for_mode(mode: str) -> dict:
     return {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
-def _credential(request: Request) -> str:
+def _header_credential(request: Request) -> str:
     supplied = request.headers.get("authorization", "").strip()
     scheme, _, credential = supplied.partition(" ")
     # 认证方案名大小写不敏感（RFC 7235）；未写方案名时整值即凭据
@@ -89,6 +110,20 @@ def _credential(request: Request) -> str:
     elif scheme.lower() not in ("bearer", "token"):
         credential = ""
     return credential or request.headers.get("x-access-token", "").strip()
+
+
+def _cookie_credential(request: Request) -> str:
+    """httpOnly 会话 Cookie 里的那一枚；页面 JS 永远看不见它的值。"""
+    return request.cookies.get(SESSION_COOKIE, "").strip()
+
+
+def _credential(request: Request) -> str:
+    """请求携带的凭据原文：请求头优先，其次是会话 Cookie。
+
+    保持这个函数名不为别的——logout 与一切"把调用方刚用的那枚作废/复述回去"的
+    语义都要走同一份口径，否则会出现"中间件认得这枚、退出说不认识"。
+    """
+    return _header_credential(request) or _cookie_credential(request)
 
 
 def _secrets_match(supplied: str, secret: str) -> bool:
@@ -144,6 +179,17 @@ def install_auth(app) -> None:
         if _auth_mode() == "disabled":
             request.state.principal = BOOTSTRAP_PRINCIPAL
             return await call_next(request)
+
+        # CSRF 闸门只可能由"凭据出自 Cookie"触发：带请求头凭据的请求不是浏览器
+        # 自动附带的东西（没有 CORS 就没有跨站自定义头，而受同源约束的自动信道
+        # 恰恰只有 Cookie 一条），本身对 CSRF 免疫。顺序放在身份判定之前：一个
+        # 既没登录又跨站伪造的 POST 该先被 CSRF 挡下，而不是替攻击者免费试探
+        # "这台服务器配没配身份"。
+        if (request.method in _UNSAFE_METHODS
+                and not _header_credential(request)
+                and _cookie_credential(request)
+                and not request.headers.get(CSRF_HEADER, "").strip()):
+            return JSONResponse(status_code=403, content={"detail": CSRF_DETAIL})
 
         if not _has_any_identity():
             return JSONResponse(status_code=503,

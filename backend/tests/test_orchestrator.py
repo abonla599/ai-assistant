@@ -10,8 +10,6 @@
 import ast
 import inspect
 
-import pytest
-
 from app.agents.orchestrator import Orchestrator
 
 MODULE = ast.parse(inspect.getsource(Orchestrator))
@@ -41,7 +39,17 @@ def test_run_accepts_task_id():
     assert "task_id" in params, "run() 不接受 task_id，/v1/agent/orchestrate 必然 TypeError"
 
 
-@pytest.mark.xfail(reason="任务归属尚未做：task_store 里的任务不记是谁建的", strict=False)
 def test_task_records_its_owner():
-    task = type("T", (), {})()
-    assert hasattr(task, "owner")
+    """F-1a 的占位符转正。
+
+    这一格原先是 `xfail`，断言对象还是 `type("T", (), {})()` 现造的鸭子——它测的
+    不是产品，是"永远没有任务的代码路径"，所以连 xfail 都算不上证据。
+    Task 现在必填 user_id（test_task_store.py 锁了拒收空归属），这里锁的是
+    归属要能跟着任务过一遍 to_dict/from_dict：落盘再读回来时"属于谁"不能丢，
+    丢了的话重启后 tasks_of 就会把所有人的任务都筛没。
+    """
+    from app.agents.task_store import Task
+
+    task = Task(goal="排一下今天的背诵", user_id="alice")
+    assert task.user_id == "alice"
+    assert Task.from_dict(task.to_dict()).user_id == "alice"

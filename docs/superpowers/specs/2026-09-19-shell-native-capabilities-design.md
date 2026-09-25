@@ -58,6 +58,13 @@ JVM 上一 `new JSONObject()` 就抛 `"Stub!"`。用它等于让 core 层的单�
 代价写死在这里：用 `setAndAllowWhileIdle`，提醒**可能晚几分钟**，Doze 深睡下更晚。
 对"7:30 背词"够用，对"准点抢课"不够——本产品不承诺准点。
 
+> **2026-09-22 修订（v0.18）**：上面这条"不申请 SCHEDULE_EXACT_ALARM"已作废，起因是用户报告
+> "设过的提醒从来没响过"。现行口径：**申请** `SCHEDULE_EXACT_ALARM`（`USE_EXACT_ALARM` 仍不申请，
+> 理由是它读不出真/假、拿不到授权时是静默的），拿不到授权时照旧回退 `setAndAllowWhileIdle`——
+> 提醒永远设得上，只是档位不同。"不承诺准点"这句仍然保留：本产品不把准点当成交付承诺，
+> 但它现在把**当前是哪一档**显示在提醒页那一行上。判据与理由见
+> `docs/superpowers/plans/2026-09-22-exact-alarms-and-reminder-status.md` §1。
+
 ## 2. 桥契约
 
 JS 世界只多一个对象 `window.AssistantShell`，八个方法，全部**同步返回 JSON 字符串**
@@ -73,6 +80,14 @@ pendingShares()                               → [{"id":...,"name":...,"mime":.
 readShareChunk(json)                          → {"b64":"..."}   {"id","offset","length"}
 consumeShare(id)                              → {"ok":true}
 ```
+
+> **2026-09-22 修订（v0.18）**：上面那份"八个"已经不是清单了——v0.16 加 `checkUpdate` 时它就是第九个，
+> 而当时唯一的锁只判"每个名字至少出现一次"，加方法不会红，于是这句散文独自谎了两个版本。
+> 现行口径：**清单不写在任何散文里**，由 `backend/tests/test_android_shell.py` 从 `ShellBridge.java`
+> 的 `@JavascriptInterface` 与 `shell.js` 的调用点各扫一遍比对（`shell.js:8` 同批去掉方法数）。
+> 这一版桥面上又多了两处：`capabilities()` 回包加 `notifications` / `exactAlarms` 两个键，
+> `listReminders()` 每行加 `firedAt` / `missed`，并新增 `openSettings(json)`（target 白名单两种）。
+> "只加不减不改语义"这条铁律不变——老壳还在人手上。
 
 三条铁律：
 
@@ -125,6 +140,17 @@ CDP 验收），提醒那栏显示"这里设的提醒只在这台手机的应用
   **不改 URL**（换 query 会触发整页重载，把已登录的界面打断）。
 - **重启**：`BootReceiver` 读表，把所有未来的 `at` 重排（AlarmManager 的闹钟在重启后不保留）。
   已过点的 `once` 不补发，只按 repeat 规则推到下一次。
+
+> **2026-09-22 修订（v0.18）**：这一节里三处按原样已不成立，改的都是"让到点这件事看得见"，
+> 不改排期语义（`once` 不补发、`at` 由网页算、32 条上限、requestCode 取 `id.hashCode()` 都照旧）。
+> - **存储形状**：每条多两个记账字段 `firedAt` / `missed`，所以是"三个可变字段"而不是原来那句
+>   "只有 `at` 可变"。读不到这两个键的旧落盘文件按 0 处理。
+> - **排期**：不再固定 `setAndAllowWhileIdle`。档位由 `core/AlarmPolicy.pick()` 依
+>   `canScheduleExactAlarms()` 与 SDK 版本决定，能排准点就用 `setExactAndAllowWhileIdle`，
+>   否则退回原方式——**任何情况下都至少排上一档**，不因为没授权就把这条提醒丢掉。
+> - **到点**：通知权限没给时不再"连表都不动地直接 return"，而是给这批到点的各记一笔 `missed`
+>   后返回（记一笔 ≠ 推进排期：吞掉这条是系统替我们做的决定）。发出去的那些记一笔 `firedAt`。
+>   这两笔就是提醒页那一行与"上次发出/几次没发出"的全部依据；判定只此一处（`PermissionStatus`）。
 
 ## 4. 系统分享入口
 

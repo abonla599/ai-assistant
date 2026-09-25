@@ -49,7 +49,8 @@ public final class ReminderStore {
             if (id == null || own == null || !(m.get("at") instanceof Number)) continue;
             items.add(new Reminder(id, own, ((Number) m.get("at")).longValue(),
                     strOr(m.get("title"), ""), strOr(m.get("body"), ""),
-                    strOr(m.get("repeat"), "once")));
+                    strOr(m.get("repeat"), "once"),
+                    longOr(m.get("firedAt")), longOr(m.get("missed"))));
         }
     }
 
@@ -58,6 +59,9 @@ public final class ReminderStore {
     private static String strOr(Object v, String fallback) {
         return v instanceof String ? (String) v : fallback;
     }
+
+    /** 上一版落盘的文件里根本没有这两个键，读不出数字就是 0（没响过、没丢过）。 */
+    private static long longOr(Object v) { return v instanceof Number ? ((Number) v).longValue() : 0L; }
 
     private synchronized void flush() {
         Map<String, Object> root = new LinkedHashMap<>();
@@ -71,10 +75,41 @@ public final class ReminderStore {
             row.put("title", r.title);
             row.put("body", r.body);
             row.put("repeat", r.repeat);
+            row.put("firedAt", r.firedAt);
+            row.put("missed", r.missed);
             rows.add(row);
         }
         root.put("items", rows);
         io.write(MiniJson.encode(root));
+    }
+
+    /**
+     * 记一笔"这条真的走到了发通知那一步"。
+     *
+     * <p>调用时序是"先记账再推进"（见 {@code ReminderReceiver}）：{@code markFired} 跑在
+     * {@link #advance} 之前，所以此刻对象通常还在表里——daily/weekly 本来就一直在，
+     * {@code once} 也是被 {@code advance} 摘掉之前先记下这一笔。但也必须能在对象已经不在
+     * 表里时安全调用（{@code ReminderStoreTest#markingARemovedReminderResurrectsNothing}
+     * 钉的就是这条），因为手里那个引用跟表里是不是还有它，本来就是两回事。
+     * 这里只改调用方给的那个对象，绝不重新入表——那会让删掉的 {@code once} 复活。
+     */
+    public synchronized void markFired(Reminder reminder, long at) {
+        if (reminder == null) return;
+        reminder.firedAt = at;
+        flush();
+    }
+
+    /**
+     * 记一笔"到点了，但通知没发出去"（Android 13+ 没给通知权限）。
+     *
+     * <p>这个方法本身不推进排期——那是调用方紧接着要做的 {@link #advance}，跟正常支同构；
+     * 记账和推进是两件事，不能因为"没响成"就连排期也不推进（那会变成永久孤儿，见
+     * {@code ReminderReceiver} 的注释）。
+     */
+    public synchronized void markMissed(Reminder reminder) {
+        if (reminder == null) return;
+        reminder.missed++;
+        flush();
     }
 
     public synchronized void setOwner(String user) {

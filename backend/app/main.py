@@ -81,7 +81,9 @@ except ImportError as e:
 
 try:
     from app.agents.orchestrator import Orchestrator
-    orchestrator = Orchestrator(model="deepseek-chat")
+    # 不给 Orchestrator 传模型名：留空 = 每次调用现走 setDefault 的 provider。
+    # 在这里刻一个服务商名，等于把用户在设置页里换默认模型的权力没收。
+    orchestrator = Orchestrator()
 except ImportError as e:
     orchestrator = None
     print(f"⚠️ 编排器不可用，/v1/agent/orchestrate 等端点将返回 503: {e}")
@@ -106,6 +108,11 @@ async def lifespan(app: FastAPI):
     # 紧接着打一行"齐不齐"：出事时人在看日志，而不是去猜当时 /health 回过什么。
     from app.core.selfcheck import log_startup_summary
     log_startup_summary()
+    # uvicorn 的 access/error logger 也要过一遍脱敏：访问日志会把查询串原样写出来
+    # （?model=deepseek-chat 就是这么漏进 named.log 的），光给文件流加壳拦不住它。
+    # 放在启动摘要之后，是因为这条之前已经有人往日志里写过东西。
+    from app.core import logsanitizer
+    logsanitizer.install_std_filters()
     # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
     # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
     from app.tools.availability import start_probe
@@ -185,9 +192,20 @@ mount_admin(app)
 # 身份规则见 app/core/authz.py（import 在创建应用那一节）。这里只负责装上。
 install_auth(app)
 
+# 耗时日志装在鉴权**之后**，于是它包在鉴权外面：被 401 挡掉的那几次同样留一行。
+# 人打不开页面的那些分钟，最需要知道的是"请求到底有没有到"——把观察器装在门里面，
+# 被门挡掉的那些就正好是日志里的一片空白。
+from app.core.request_log import RequestTiming
+
+app.add_middleware(RequestTiming)
+
 # ---------- 数据模型 ----------
 class ChatRequest(BaseModel):
-    model: str = "deepseek-chat"          # 兼容字段：作为 provider 的别名解析
+    # 兼容字段：作为 provider 的别名解析。默认从写死的服务商名改为 None（F-1f）：
+    # 名字刻在这儿，用户在设置页换了默认 provider 也不会有任何影响——resolve
+    # 对 None 与对该名字的兜底路径本来就是同一个 default()，去掉刻名只是把
+    # "碰巧被上游兜住"改成"这里本来就没写"。
+    model: Optional[str] = None
     provider: Optional[str] = None        # 模型服务 id（首选）
     attachments: List[str] = []           # /v1/uploads 返回的附件 id
     messages: list[dict]
@@ -202,6 +220,9 @@ class AgentRequest(BaseModel):
     task: str
     max_turns: Optional[int] = 10
     max_duration: Optional[int] = 120
+    # provider id（或旧式模型名）；留空走默认配置。端点原先向上写死
+    # "deepseek-chat"，等于在代码里刻了一个服务商名。
+    model: Optional[str] = None
 
 class OrchestrateRequest(BaseModel):
     goal: str
@@ -300,10 +321,33 @@ def release_latest(have: str = None):
     from app.core import releases
     return releases.probe(have)
 
+
+# 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
+@app.get("/v1/update/info")
+def update_info():
+    """壳「检查更新」的数据源：原样的 GitHub 发布 JSON + 顶层 `apk_sha256`。
+
+    为什么壳不自己问 GitHub 的发布接口：手机到 GitHub 的链路要过运营商、代理与各家
+    ROM 的下载器，正是 2026-09-23 那次"迅雷劫持 → 残包 → 安装失败"的案发通道；
+    而手机到这台服务器是天天在用的链路。一台机器出网、全员共享缓存，代价与
+    `/v1/release/latest` 完全同构（判据在 tests/test_release_probe.py）。
+
+    与那条卡片端点的分工：卡片要的是"要不要提一句"（拉不到就**不弹**，ok:false）；
+    这条要的是"人主动点了检查"，拉不到必须说出来——所以拉不到时是 502 带理由，
+    而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款。
+    """
+    from fastapi.responses import JSONResponse
+    from app.core import releases
+    manifest, reason = releases.latest_release_manifest()
+    if manifest is None:
+        return JSONResponse(status_code=502, content={"detail": f"问不到发布信息：{reason}"})
+    return manifest
+
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)
-from app.core.uploads import store as upload_store, build_user_content, UploadError
+from app.core.uploads import (store as upload_store, build_user_content,
+                              UploadError, MAX_UPLOAD_BYTES)
 
 
 def _fail_reason(e: BaseException) -> str:
@@ -359,7 +403,8 @@ def _prepare_chat(request: ChatRequest, principal: Principal):
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
-    provider = provider_store.resolve(request.provider, legacy_model=request.model)
+    provider = provider_store.resolve(request.provider, legacy_model=request.model,
+                                      user_id=principal.user_id)
 
     messages = list(request.messages)
     last = messages[-1] or {}
@@ -522,9 +567,12 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
 # 非本人一律 404 而不是 403：403 等于承认这个 id 存在，session_id 是 uuid4，
 # 但只要有一次 403 漏出来，这个接口就成了"哪些会话真实存在"的探测器。
 @app.post("/v1/sessions")
-def create_session(model: str = "deepseek-chat",
+def create_session(model: Optional[str] = None,
                          principal: Principal = CurrentPrincipal):
-    return sessions_store.create(model, owner=principal.user_id)
+    # 默认不再刻服务商名（F-1f）。会话上的 model 只是展示元数据——真正用哪个
+    # provider 是每次聊天时 resolve 决定的，这里传空串而不是 None：老记录与
+    # 白名单投影里该字段一直是字符串，别让"没指定"把形状改成 null。
+    return sessions_store.create(model or "", owner=principal.user_id)
 
 @app.get("/v1/sessions")
 def list_sessions(principal: Principal = CurrentPrincipal):
@@ -665,10 +713,14 @@ from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
 @app.get("/v1/models")
-def list_models(_: Principal = CurrentPrincipal):
+def list_models(principal: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
 
-    身份在这里刻意不用取名（catalog() 是全站视图），挂它也不是为了挡住匿名读取
+    清单是**按当前用户裁剪的**：全局共享条目 + 这个人自己的私有 provider。
+    别人的私有条目从这里根本不存在（与 resolve 的越权即回落同一套口径），
+    所以这个端点同时也是一个"哪些模型存在"的诚实答案，不掺枚举信号。
+
+    挂身份依赖不是为了挡住匿名读取
     ——那道门由 install_auth 的中间件在路由之前守着，但只在 **enforced 模式下、
     且只在 authz._PROTECTED_PREFIXES 那几个前缀（含 /v1/）之下**成立：disabled 模式
     人人都是本机管理员，websocket 握手更是压根不经过这个 HTTP 中间件（实测见
@@ -678,8 +730,8 @@ def list_models(_: Principal = CurrentPrincipal):
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
     """
     return {
-        "models": provider_store.catalog(),
-        "default": (provider_store.default() or {}).get("id"),
+        "models": provider_store.catalog(principal.user_id),
+        "default": (provider_store.default_for(principal.user_id) or {}).get("id"),
         "presets": PRESETS,
     }
 
@@ -700,11 +752,34 @@ class ProviderRequest(BaseModel):
     api_key: str = ""
     model: str
     supports_vision: bool = False
+    # 上下文上限（K token）。留 None → 存储层归一为缺省 64；界面据此给
+    # 「上下文长度」滑杆封顶。钳制/非法值判据只写在 providers._validate 一处。
+    max_context_k: Optional[int] = None
     is_default: bool = False
+
+def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
+    """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
+
+    别人的私有 provider 与不存在的 id 走同一个 404、同一句话——和 sessions、
+    uploads 那两处的防枚举纪律一模一样：管理面与个人面都不许长成
+    "这个 id 存在吗"的探测器。
+    """
+    existing = provider_store.get(provider_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    owner = existing.get("owner") or ""
+    if require_own:
+        if owner != user_id:
+            raise HTTPException(status_code=404, detail="模型服务不存在")
+    elif owner:
+        # 管理员面碰私有条目：不存在（对管理员也不暴露用户私配的存在性）
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    return existing
 
 @app.get("/v1/providers")
 def list_providers(_: Principal = RequireAdmin):
-    # 绝不返回明文密钥，只给掩码与"是否已配置"
+    # 绝不返回明文密钥，只给掩码与"是否已配置"。清单只含共享条目：
+    # 用户私有 provider 连"存在"这件事都不进管理员面（owner 维度见 providers.py）
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
@@ -718,6 +793,7 @@ def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
 @app.put("/v1/providers/{provider_id}")
 def update_provider(provider_id: str, req: ProviderRequest,
                           _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     record = req.model_dump()
     record["id"] = provider_id
     try:
@@ -728,12 +804,14 @@ def update_provider(provider_id: str, req: ProviderRequest,
 
 @app.delete("/v1/providers/{provider_id}")
 def remove_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     if provider_store.delete(provider_id):
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
 def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
     if provider_store.set_default(provider_id):
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
@@ -745,13 +823,13 @@ def test_provider(provider_id: str, _: Principal = RequireAdmin):
     必须是同步 def：ping 是一次 timeout=20 的阻塞模型调用，留在 async 里就是
     "点一下测试，整台服务二十秒不响应"（见 test_event_loop_not_blocked）。
     """
+    _owner_gate(provider_id, "", require_own=False)
     try:
         return provider_store.ping(provider_id)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/v1/providers/test")
-def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+def _test_draft(req: ProviderRequest) -> dict:
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())
@@ -766,13 +844,100 @@ def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
                                        max_tokens=4)
         return {"ok": True, "detail": f"{candidate['model']} 响应正常"}
     except Exception as e:
-        return {"ok": False, "detail": _fail_reason(e)}
+        # 上游/中转站可能把 Authorization 原样打印回来——出口过一次 scrub。
+        return {"ok": False, "detail": scrub_secrets(_fail_reason(e))}
+
+@app.post("/v1/providers/test")
+def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+    return _test_draft(req)
+
+# ---------- 个人模型服务（用户自带 API） ----------
+# 与管理员面的分界线：这里每条路由都按 principal.user_id 圈所有权。
+# 用户能增删改的只有自己名下的条目；自己的密钥只服务自己的请求（paid_by=user
+# 在 _validate 之上由这里钉死）。"普通用户可改写全站上游"依然是禁区——
+# 私有条目永不进站级默认（providers.default() 已滤），也不对其他人可见。
+
+class ProviderDefaultRequest(BaseModel):
+    provider_id: str
+
+@app.get("/v1/me/providers")
+def my_providers(principal: Principal = CurrentPrincipal):
+    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。"""
+    return {
+        "shared": provider_store.public_list(None),
+        "mine": provider_store.mine_public(principal.user_id),
+        "default": provider_store.get_pref(principal.user_id),
+        "presets": PRESETS,
+    }
+
+@app.post("/v1/me/providers")
+def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    record = req.model_dump()
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.put("/v1/me/providers/{provider_id}")
+def update_my_provider(provider_id: str, req: ProviderRequest,
+                       principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    record = req.model_dump()
+    record["id"] = provider_id
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.delete("/v1/me/providers/{provider_id}")
+def remove_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    provider_store.delete(provider_id)
+    return {"status": "deleted", "id": provider_id}
+
+@app.post("/v1/me/providers/default")
+def set_my_default_provider(req: ProviderDefaultRequest,
+                            principal: Principal = CurrentPrincipal):
+    """把「我默认用哪个模型」存到服务端。共享或自己的私有条目都可以指。"""
+    provider = provider_store.get(req.provider_id)
+    if provider is None or not provider_store.visible_to(req.provider_id, principal.user_id):
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    try:
+        provider_store.set_pref(principal.user_id, req.provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "default": req.provider_id}
+
+@app.post("/v1/me/providers/{provider_id}/test")
+def test_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    """只许试自己的条目：拿别人的（含共享的）已存密钥去发探测请求不是这个门的功能。"""
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    try:
+        return provider_store.ping(provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/v1/me/providers/test")
+def test_my_provider_draft(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    """保存前草稿试连：密钥是这个人刚填的，出口照过 scrub。"""
+    return _test_draft(req)
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")
 def upload_attachment(file: UploadFile = File(...),
                             principal: Principal = CurrentPrincipal):
-    blob = file.file.read()
+    # 先读满硬上限+1 字节再判，而不是裸 read() 全量进内存：save() 的分档体积校验
+    # 在拿到完整 blob 之后才跑，挡不住"先把你内存打爆"。read(n) 对 SpooledTemporaryFile
+    # 只多要一字节用于判超限，正常文件行为与原来逐字节一致。
+    blob = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过单次上传上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
     try:
         record = upload_store.save(file.filename or "unnamed", blob,
                                    file.content_type or "", owner=principal.user_id)
@@ -868,16 +1033,20 @@ def submit_feedback(feedback: FeedbackRequest,
 # 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
 # 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
 @app.post("/v1/agent/run")
-def run_agent(request: AgentRequest, _: Principal = RequireAdmin):
+def run_agent(request: AgentRequest, principal: Principal = RequireAdmin):
     try:
         from app.agents.react_agent import ReActAgent
         agent = ReActAgent(
-            model="deepseek-chat",
+            model=request.model,
             max_turns=request.max_turns
         )
+        # user_id 必须往下传：needs_user 类工具（查日程/查记忆）靠执行器用服务端
+        # 身份覆盖模型参数，原先这一格是空的——管理员跑 agent 时那些工具会静悄悄
+        # 落在 default_user 的账上，读到的可能不是自己的数据。
         result = agent.run(
             task=request.task,
-            max_duration=request.max_duration
+            max_duration=request.max_duration,
+            user_id=principal.user_id,
         )
         return {"result": result}
     except ImportError:

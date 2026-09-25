@@ -186,14 +186,68 @@ public class ReleasePlanTest {
     }
 
     @Test
-    public void theOnlyEndpointMentionedIsTheLatestReleaseApi() {
-        // 这一层不许顺手打别的地址：写死在这里，Activity 就没有第二处可以偷偷联网。
-        assertEquals("https://api.github.com/repos/abonla599/ai-assistant/releases/latest",
-                ReleasePlan.LATEST_URL);
+    public void theOnlyAssetShapeIsTheVersionNamedApk() {
+        // 这一层不再持有"去哪问"的地址（v0.19 起问与取都在自家服务器，
+        // "壳源码不出现 GitHub API 地址" 由 backend/tests/test_android_shell.py 数着）；
+        // 留在这里的是"只要那一个资产名"的形状。
         assertTrue(ReleasePlan.assetName("0.15").equals("ai-assistant-0.15.apk"));
     }
 
+    // ---------- 校验值：形状不对等于没有 ----------
+
+    private static final String DIGEST = "a" + "b".repeat(62) + "c"; // 64 位小写十六进制
+
+    @Test
+    public void anAvailableReleaseCarriesItsDigest() {
+        ReleasePlan.Decision d = ReleasePlan.decide("0.14", releaseWithDigest(DIGEST));
+        assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        assertEquals(DIGEST, d.sha256);
+    }
+
+    @Test
+    public void anythingThatIsNotLowercaseHex64IsNoDigestAtAll() {
+        String[] junk = {DIGEST.toUpperCase(), DIGEST.substring(1), DIGEST.substring(0, 63),
+                DIGEST.substring(0, 32) + DIGEST.substring(0, 32).toUpperCase(),
+                " " + DIGEST, "", null};
+        for (String value : junk) {
+            ReleasePlan.Decision d = ReleasePlan.decide("0.14", releaseWithDigest(value));
+            assertEquals("校验值形状没被拒：" + value, null, d.sha256);
+            // 缺校验值不改变"有没有新版"的判断——拒绝下载是下一层的事，且必须发生在动流量之前
+            assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        }
+    }
+
+    @Test
+    public void aReleaseWithoutTheDigestFieldIsStillReadAsARelease() {
+        // 老 Release（v0.18 及以前）正文里根本没有那行；decide 照常给 AVAILABLE，
+        // sha256 为 null 由 MainActivity 在点「下载」时拦下。
+        ReleasePlan.Decision d = ReleasePlan.decide("0.14", release("v0.15", GOOD_URL,
+                "ai-assistant-0.15.apk", 1L, null, false, false));
+        assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        assertNull(d.sha256);
+    }
+
     // ---------- 夹具 ----------
+
+    /** 在发布对象顶层挂一个 apk_sha256 字段（服务端注入的那一份），值可以是任意形状的原样字符串。 */
+    private static String releaseWithDigest(String digest) {
+        Map<String, Object> rel = new LinkedHashMap<>();
+        rel.put("tag_name", "v0.15");
+        rel.put("draft", false);
+        rel.put("prerelease", false);
+        rel.put("body", "说明");
+        Map<String, Object> asset = new LinkedHashMap<>();
+        asset.put("name", "ai-assistant-0.15.apk");
+        asset.put("browser_download_url", GOOD_URL);
+        asset.put("size", 103_000L);
+        List<Object> assets = new ArrayList<>();
+        assets.add(asset);
+        rel.put("assets", assets);
+        if (digest != null) {
+            rel.put("apk_sha256", digest);
+        }
+        return MiniJson.encode(rel);
+    }
 
     private static String release(String tag, String url, String assetName, long size,
                                   String body, boolean draft, boolean prerelease) {

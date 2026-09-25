@@ -19,6 +19,13 @@
 - **权限只加两项**：`android.permission.POST_NOTIFICATIONS`（运行时）、`android.permission.RECEIVE_BOOT_COMPLETED`（安装期）。**不申请** `SCHEDULE_EXACT_ALARM`，不加前台服务，不做厂商白名单引导。
 - **闹钟 API 固定为** `AlarmManager.setAndAllowWhileIdle(RTC_WAKEUP, at, pi)`；提醒允许晚几分钟，产品不承诺准点。
 - **桥对象名** `window.AssistantShell`，八个方法，全部同步返回 JSON 字符串：`capabilities` `setOwner` `scheduleReminder` `cancelReminder` `listReminders` `pendingShares` `readShareChunk` `consumeShare`。方法**只加不减不改语义**。
+
+> **2026-09-22 修订（v0.18）**：上面三条里有两条已经不成立——"不申请 `SCHEDULE_EXACT_ALARM`"与
+> "闹钟 API 固定为 `setAndAllowWhileIdle`"被推翻（现行是**按 `canScheduleExactAlarms()` 分档**、
+> 拿不到授权时仍回退到这句），而那句"八个方法"在 v0.16 加 `checkUpdate` 之后就已经不是清单了。
+> 现行口径看 spec `2026-09-19-shell-native-capabilities-design.md` §1 与 §2 的修订块，
+> 判据与理由在 `2026-09-22-exact-alarms-and-reminder-status.md`。
+> 这份计划本身按原样留着：它是当时的决定与当时的执行记录，改它等于改证据。
 - **桥绝不接触会话令牌**，绝不把外部字符串拼进 `evaluateJavascript`（只传 id）。
 - **id 正则**：`^[A-Za-z0-9_-]{8,24}$`。路径永远由壳自己拼成 `cacheDir/shares/<校验过的 id>`。
 - **上限**：每 owner 32 条提醒；`readShareChunk` 单次 `length` ≤ 512KB；分享件 ≤ 10MB（对齐 `backend/app/core/uploads.py:27`），消费后或 30 分钟即删。

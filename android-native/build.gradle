@@ -1,0 +1,7 @@
+// 混合 App 的原生工程：主体界面用 Kotlin/Compose，
+// 少量复杂配置页（模型服务/管理面）走 WebView 复用现有 Web 前端。
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+    id "org.jetbrains.kotlin.android" version "1.9.24" apply false
+    id "org.jetbrains.kotlin.plugin.serialization" version "1.9.24" apply false
+}

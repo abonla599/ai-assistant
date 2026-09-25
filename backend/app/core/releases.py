@@ -15,18 +15,39 @@
 等于把发布地址交给一个能中间人的人。验不过就报错、就不弹。
 """
 import json
+import re
 import threading
 import time
+import urllib.parse
 import urllib.request
+
+import httpx
 
 from app.core.tls import system_ssl_context
 
-# 全后端唯一一处 GitHub 地址（test_release_probe.py 数着它）。
+# 全后端唯一两处 GitHub 地址（`api.` 那条由 test_release_probe.py 数着）：
+# 一条问"最新是哪一版"，一条是问不到之后的退路——点了按钮的人总得拿到文件。
 LATEST_URL = "https://api.github.com/repos/abonla599/ai-assistant/releases/latest"
+RELEASES_PAGE = "https://github.com/abonla599/ai-assistant/releases/latest"
 USER_AGENT = "ai-assistant-release-probe"
 TIMEOUT_SECONDS = 5.0
 CACHE_SECONDS = 600
 MAX_BYTES = 256 * 1024
+
+# ---------- 官网那颗「安卓版」按钮要代取的字节 ----------
+# 白名单是两条，不是一条，而且这条是量出来的不是记住的：`browser_download_url` 在
+# github.com 上，它 302 去的是 **release-assets.githubusercontent.com**（2026-09-22 真跑
+# 代取时第一版只放了 objects.*，结果每一次都卡在"目标主机不在白名单里"、静默退回
+# 发布页——功能上线即失效）。objects.* 留着是因为别的资产形状确实会走它；
+# 每一跳都重新过这个判断（fetch_asset 里 follow_redirects 是关着的），否则
+# "第一跳合法、第二跳随你"，那正是这条代理存在的理由所反对的事。
+DOWNLOAD_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com",
+                            "objects.githubusercontent.com"})
+ASSET_TIMEOUT_SECONDS = 20.0
+APK_MAX_BYTES = 16 * 1024 * 1024
+MAX_HOPS = 3
+# 这个形状同时保证它放进 Content-Disposition 是安全的：没有 CR/LF、没有引号、没有分号。
+_ASSET_NAME_RE = re.compile(r"^ai-assistant-[0-9][0-9A-Za-z.\-]*\.apk$")
 
 _lock = threading.Lock()
 _payload = None                 # 上一次**成功**拉到的那份
@@ -109,11 +130,52 @@ def _fetch():
         "asset_name": (asset or {}).get("name") or "",
         "asset_url": (asset or {}).get("browser_download_url") or "",
         "size": int((asset or {}).get("size") or 0),
+        # 原样的那条发布 JSON。壳的「检查更新」走 /v1/update/info 透传它——判断逻辑
+        # （三态、资产名、URL 白名单）整个活在壳里且被 JVM 台架钉着，服务端只做
+        # "一台机器出网 + 缓存"这一段，不另起一份判断的第二真相。
+        "raw": body,
     }, ""
 
 
-def probe(have: str = None) -> dict:
-    """这张卡片要问的全部：最新是哪版、比手上这版新吗、去哪儿下。"""
+# 发版工作流写在 Release 正文末尾的那一行：`APK-SHA256: <64 位小写十六进制>`。
+# 摘要在构建机上、签完包之后算——所以它验的是"装进手机的那串字节就是发布的那一串"，
+# 服务端与下载通道都只是过手的人。锚定整行、大小写敏感：正文里的散文不许凑巧长成
+# 一条校验值。
+APK_SHA256_RE = re.compile(r"^APK-SHA256: ([0-9a-f]{64})$", re.M)
+
+
+def apk_sha256(body_text) -> str:
+    """从 Release 正文里取那行校验值；没有（旧版发布、手改正文）就是空串。"""
+    if not isinstance(body_text, str):
+        return ""
+    m = APK_SHA256_RE.search(body_text)
+    return m.group(1) if m else ""
+
+
+def latest_release_manifest():
+    """壳「检查更新」要的那份 JSON：原样透传 + 顶层多一枚 `apk_sha256`。
+
+    返回 (dict, reason)。拉不到时 (None, 理由)——调用方必须把这句理由原样带给人，
+    而不是回一份"看起来没有更新"的空 JSON：那条三态纪律（读不出来 ≠ 已是最新）
+    从壳里一路管到服务端这一层。
+    """
+    snapshot, reason = _snapshot()
+    if not snapshot:
+        return None, reason or "还没有一次成功过的发布页读取"
+    raw = snapshot.get("raw")
+    if not isinstance(raw, dict):
+        return None, "发布快照里没有原样 JSON（内部状态坏了）"
+    manifest = dict(raw)
+    manifest["apk_sha256"] = apk_sha256(raw.get("body"))
+    return manifest, ""
+
+
+def _snapshot() -> tuple:
+    """返回 (最新一次的发布快照 | None, 这次读取失败的理由)。
+
+    缓存的**唯一**入口：卡片（probe）与官网代取（download_plan）都从这里读，
+    所以"10 分钟内最多问 GitHub 一次"这条承诺只有一处实现，不会一边省、一边不省。
+    """
     global _payload, _fetched_at
     now = time.monotonic()
     with _lock:
@@ -129,7 +191,12 @@ def probe(have: str = None) -> dict:
         if why:
             reason = why
     with _lock:
-        snapshot = dict(_payload) if _payload else None
+        return (dict(_payload) if _payload else None), reason
+
+
+def probe(have: str = None) -> dict:
+    """这张卡片要问的全部：最新是哪版、比手上这版新吗、去哪儿下。"""
+    snapshot, reason = _snapshot()
 
     out = {"ok": bool(snapshot), "latest": (snapshot or {}).get("version", ""),
            "url": (snapshot or {}).get("url", ""),
@@ -159,3 +226,86 @@ def reset_for_tests() -> None:
     with _lock:
         _payload = None
         _fetched_at = None
+
+
+def _host_ok(url: str):
+    """这一跳能不能替用户去取。返回 (可以, 理由)。"""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https":
+        return False, f"下载地址不是 https：{parts.scheme or '空'}"
+    if parts.hostname not in DOWNLOAD_HOSTS:
+        return False, f"目标主机不在白名单里：{parts.hostname}"
+    return True, ""
+
+
+def download_plan():
+    """官网「安卓版」那颗按钮要的真东西：一个可以替用户去取的 APK 地址。
+
+    返回 ({"url", "name", "size", "version"}, "") 或 (None, 一句理由)。这个返回值决定
+    的是"陌生人的浏览器从我们这台服务器落下哪个字节流"，所以任何一项对不上都宁可拒：
+    调用方拿不到 plan 就退回发布页，而不是硬编一个地址给人。
+
+    资产名必须等于 `ai-assistant-<这一版>.apk`：一次发布可以同时挂着 mapping.txt、
+    别的平台的产物或上一次误传的旧包（`_pick_asset` 同一个理由），而且这条正则顺带
+    保证了它放进 Content-Disposition 是安全的——没有 CR/LF、没有引号、没有分号。
+    """
+    snapshot, reason = _snapshot()
+    if not snapshot:
+        return None, reason or "还没有一次成功过的发布页读取"
+    version = snapshot.get("version") or ""
+    name = snapshot.get("asset_name") or ""
+    url = snapshot.get("asset_url") or ""
+    try:
+        size = int(snapshot.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if not _ASSET_NAME_RE.match(name):
+        return None, f"资产名不是我们发布的那个形状：{name!r}"
+    if name != f"ai-assistant-{version}.apk":
+        return None, f"资产名与版本号对不上：{name!r} vs {version!r}"
+    if not size or size > APK_MAX_BYTES:
+        return None, f"这个包的大小不像一个 APK：{size}"
+    ok, why = _host_ok(url)
+    if not ok:
+        return None, why
+    return {"url": url, "name": name, "size": size, "version": version}, ""
+
+
+def _open_asset():
+    """取包用的客户端。跳转自己管（见 fetch_asset），所以这里必须关掉自动跟。"""
+    return httpx.Client(verify=system_ssl_context(), timeout=ASSET_TIMEOUT_SECONDS,
+                        follow_redirects=False, headers={"User-Agent": USER_AGENT})
+
+
+def fetch_asset(url: str):
+    """替用户把包取回来，返回 (字节 | None, 理由)。这个函数不抛。
+
+    一次下载 = 一台机器替所有点按钮的人去 GitHub 跑一趟：出口只有这一个 IP，
+    所以上面那条 10 分钟缓存省的是元数据，这里省不掉的是字节。
+    """
+    try:
+        with _open_asset() as client:
+            target = url
+            for _ in range(MAX_HOPS):
+                ok, why = _host_ok(target)
+                if not ok:
+                    return None, why
+                with client.stream("GET", target) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location") or ""
+                        if not location:
+                            return None, "上游说要跳转却没给地方"
+                        target = urllib.parse.urljoin(str(response.url), location)
+                        continue
+                    if response.status_code != 200:
+                        return None, f"上游回 {response.status_code}"
+                    chunks, total = [], 0
+                    for part in response.iter_bytes():
+                        total += len(part)
+                        if total > APK_MAX_BYTES:
+                            return None, f"下载超出上限：{total}+"
+                        chunks.append(part)
+                    return b"".join(chunks), ""
+            return None, f"跳转次数超过 {MAX_HOPS} 跳"
+    except Exception as e:
+        return None, f"取包失败：{type(e).__name__}"

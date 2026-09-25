@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from app.main import app
+from app.web.web_router import IMMUTABLE, asset_token
 
 client = TestClient(app)
 
@@ -16,22 +17,34 @@ client = TestClient(app)
 # ---------- 1. 挂载与不回归 ----------
 
 def test_root_serves_the_site_with_the_same_cache_policy_as_app():
+    """官网首页与 /app、/admin 是同一套页面口径——包括"允许晚 30 秒"这一笔。
+
+    判据是拿 /app/ 的头来比，不是抄一份字面量：三处页面各自的价钱必须一起动，
+    动一处就是第二份真相。窗口本身的大小钉在 tests/test_asset_versioning.py。
+    """
     res = client.get("/")
     assert res.status_code == 200
-    assert res.headers["cache-control"] == "no-cache"
+    assert res.headers["cache-control"] == client.get("/app/").headers["cache-control"], \
+        "官网首页的缓存口径和 PWA 走岔了"
     assert "frame-src 'none'" in res.headers["content-security-policy"]
 
 
 def test_site_assets_are_public_and_uncached():
-    """`/site/...` 是官网资源。公开是刻意的(css 和截图不含任何用户数据),
-    但必须和 /app 一样回 no-cache —— Cloudflare 已设「尊重现有标题」,
-    源站不表态就等于让别人的缓存策略替我们决定。"""
+    """`/site/...` 是官网资源。公开是刻意的(css 和截图不含任何用户数据)。
+
+    不带水印的那一个地址必须回 no-cache —— Cloudflare 已设「尊重现有标题」,
+    源站不表态就等于让别人的缓存策略替我们决定。带当下水印的那一个才允许长缓存,
+    两条一起写是因为它们是一对：省掉回源的收益,不能拿"把人钉在旧文件上"去换。
+    """
     res = client.get("/site/site.css")
     assert res.status_code == 200
     assert res.headers["cache-control"] == "no-cache"
+    fresh = client.get("/site/site.css", params={"v": asset_token()})
+    assert fresh.headers["cache-control"] == IMMUTABLE, "官网资源拿不到长缓存：首屏还是每趟回源"
     # 整串相等而不是 in:`/` 那半只用了 in,两边合起来才真正钉住"页面与资源的头
     # 是同一组",而这一组字面量在 web_router 里只有一份(site_headers)。
     assert res.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
+    assert fresh.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
 
 
 def test_unknown_paths_still_get_the_framework_json_404():
@@ -104,12 +117,15 @@ def test_invite_code_is_stated_as_not_needed():
     assert "向作者要" not in page, "v0.11 起自助注册,这句会把人挡在门外"
 
 
-def test_unavailable_features_stay_in_the_not_now_section():
-    """联网搜索、代码执行、扫描版 PDF 只许出现在「当前未开启」那一节里。
+def test_what_stays_unavailable_and_what_became_real():
+    """代码执行与扫描版 PDF 仍留在「当前未开启」；联网搜索 2026-09-22 起是现成能力。
 
+    两半都要钉：
+    - 还开不了的东西不许被写成现成的（"沙箱"仍禁在正文）；
+    - 已经开得了的东西不许继续装作开不了——官网低估自己也是不诚实，而且这条一旦
+      反向钉住，将来谁把搜索源改回坏的那条路，正文与代码就当场对不上。
     节的边界按 `<section id="not-now">` 这个标签算，不按「当前未开启」这四个字算：
-    正文里一句"见下面「当前未开启」"的指引会把后者锚点提前，那样 head 就悄悄漏掉了
-    真那一节，"沙箱/支持联网不许出现在正文"这半条就没牙了（Task 3 实拍轮就是这么露馅的）。
+    正文里一句指引会把锚点提前，那样 head 就悄悄漏掉真那一节（Task 3 实拍轮露过馅）。
     """
     page = _page()
     anchor = page.find('<section id="not-now">')
@@ -117,17 +133,50 @@ def test_unavailable_features_stay_in_the_not_now_section():
     end = page.find("</section>", anchor)
     assert end != -1, "「当前未开启」那一节没闭合"
     body = page[anchor:end]
-    for term in ("代码执行", "联网搜索", "扫描版 PDF"):
-        assert term in body, f"「{term}」应当在该节里说明"
+    for term in ("代码执行", "扫描版 PDF"):
+        assert term in body, f"「{term}」仍应在该节里说明"
+    assert "联网搜索" not in body and "能查实时信息" not in body,         "搜索已经能用了，还挂在「当前未开启」里就是低估"
     head = page[:anchor] + page[end:]
-    for banned in ("沙箱", "支持联网"):
-        assert banned not in head, f"「{banned}」被当成现成能力写进了正文"
+    assert "沙箱" not in head, "「沙箱」被当成现成能力写进了正文"
+    can = head.find('<section id="can-do">')
+    can_end = head.find("</section>", can)
+    assert can != -1 and can_end != -1, "找不到「已有功能」那一节"
+    assert "能查实时信息" in head[can:can_end], "搜索没被写进「已有功能」"
+    assert "来源" in head[can:can_end] and "查不到" in head[can:can_end],         "那条卡片必须自带限定：结果附来源、查不到就说查不到"
 
 
-def test_download_points_at_latest_not_a_pinned_filename():
+def test_the_alarm_permission_claim_matches_the_manifest():
+    """官网那句关于「精准闹钟」的话必须与清单里真正声明的那条权限是同一件事。
+
+    2026-09-22 之前两处都写着"不申请"。这类分裂不需要想象力：改清单的人不会想起去改官网，
+    而官网谎了对外一声不响——没人会在决定装不装的时候去翻 AndroidManifest。所以这条从清单
+    反向推页面（页面那句话只是它的投影），同时要求页面必须提这件事一次：否则"把那句谎删掉"
+    也能让这条锁悄悄绿掉。
+    """
+    manifest = (Path(__file__).resolve().parents[2]
+                / "android" / "app" / "src" / "main" / "AndroidManifest.xml")
+    declared = "SCHEDULE_EXACT_ALARM" in manifest.read_text(encoding="utf-8")
     page = _page()
-    assert "releases/latest" in page
-    assert "ai-assistant-0.13.apk" not in page, "钉死文件名的链接下一次发版就腐烂"
+    denial = re.search(r"不(获取|申请)(精确|精准)闹钟", page)
+    assert "精准闹钟" in page, "官网对这件事一个字不提了：那句承诺悄悄消失也是谎"
+    assert bool(denial) is (not declared), (
+        f"清单声明了精准闹钟权限={declared}，官网却在说"
+        f"「{denial.group(0) if denial else '（没有否认）'}」：两处得说同一件事")
+
+
+def test_the_android_button_downloads_through_our_own_endpoint():
+    """点「安卓版」要直接落盘，而不是把人丢到 GitHub 页面上自己找那颗按钮。
+
+    页面里不许留任何带版本号的资产名：下一次发版它就腐烂（这条判据从原来那条
+    "指向 releases/latest" 的锁继承下来，换了方向但换了理由——现在指向的是我们自己的
+    代理端点，版本号那件事全部留在服务端那份 10 分钟缓存里判断）。
+    """
+    page = _page()
+    button = re.search(r'<a[^>]*class="btn[^"]*"[^>]*href="([^"]+)"[^>]*>\s*安卓版', page)
+    assert button, f"找不到安卓版那颗按钮：{page[:200]}"
+    assert button.group(1) == "/site/android.apk", f"按钮指向 {button.group(1)}，不是我们自己的下载端点"
+    assert not re.search(r"ai-assistant-[0-9][\d.]*\.apk", page), "页面里出现了带版本号的资产名"
+    assert "github.com/abonla599/ai-assistant" in page, "源码入口还在，别顺手把它也删了"
 
 
 def test_the_page_never_states_a_version_number():
@@ -181,7 +230,9 @@ def test_scripts_are_same_origin_only():
     不该出现在一个自己托管的官网上。
     """
     page = _page()
-    assert 'src="/site/site.js"' in page, "交互脚本要走自己的 /site 前缀"
+    # 水印后缀见 tests/test_asset_versioning.py；这条只管"脚本从哪来"，把 ?v= 剥掉再看。
+    srcs = [s.split("?")[0] for s in re.findall(r'src="([^"]+)"', page)]
+    assert "/site/site.js" in srcs, "交互脚本要走自己的 /site 前缀"
     for bad in ("<script src=\"http", "<script src='http", "import(", "onclick=",
                 "onload=", "addEventListener(\"click\",window."):
         assert bad not in page, f"外部依赖或内联事件处理器：{bad}"
@@ -214,9 +265,10 @@ def test_four_real_screenshots_are_present_and_small():
 def test_only_the_first_screenshot_loads_eagerly():
     """四张实拍合计约 500 KB。一起下载的话，首屏那次绘制是在给三张看不见的图让路。
 
-    轮播的图横向摆在 `overflow:hidden` 的轨道里，浏览器始终不认为它们"快滚进视口"，
-    所以 `loading="lazy"` 单独用会翻车：翻到第二张时是个空壳（实测过）。正确的形状是
-    HTML 里先 lazy 让路、`load` 之后由 site.js 提升成 eager——两头都要钉住。
+    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余三张 `loading="lazy"`。
+    轮播时代还要在 JS 里把它们提升成 eager——轨道是 `overflow:hidden`，浏览器始终
+    不认为它们"快滚进视口"，光加 lazy 翻过去就是空壳。现在四张摆在正常网格里，
+    滚动到才下载这件事交回给浏览器原生行为，那段提升代码跟着轮播一起删了。
     """
     import re
     imgs = re.findall(r"<img\b[^>]*>", _page())
@@ -225,9 +277,6 @@ def test_only_the_first_screenshot_loads_eagerly():
         f"首屏那张没有提到高优先：{imgs[0][:70]}"
     for tag in imgs[1:]:
         assert 'loading="lazy"' in tag, f"后面那张在抢首屏带宽：{tag[:70]}"
-    js = _js()
-    assert 'img.loading = "eager"' in js, \
-        "缺了首屏后的 eager 提升：这三张会永远停在未下载，翻过去就是空壳"
 
 
 def test_no_placeholder_left_in_shots():
@@ -236,23 +285,26 @@ def test_no_placeholder_left_in_shots():
 
 
 def test_image_claim_always_carries_the_vision_qualifier():
-    """「图片」只许出现在带视觉限定的那一行里。
+    """提到"能看图"的那一行，必须带视觉限定。
 
-    读图这件事取决于当前模型有没有视觉,不是产品开关:一旦页面上出现一句
-    光秃秃的"发图片它就能读",来的人就会照着做然后发现读不出来。上一轮是靠
-    人眼盯住的,这条把它变成断言——把那句限定删掉,这里立刻红。
-    扫描版 PDF 那条在「当前未开启」节里,它自己就是否定句,不算数。
+    读图取决于当前模型有没有视觉，不是产品开关：一旦页面上出现一句光秃秃的
+    "发图片它就能读"，来的人就会照着做然后发现读不出来。上一轮是靠人眼盯住的，
+    这条把它变成断言——把那句限定删掉，这里立刻红。
+    触发词在 2026-09-22 跟着文案扩了一次：措辞从"图片"改成"截图/识图"，要求没变，
+    但守卫盯的词得跟着换，否则它检查的是一个页面上已经不存在的词。
+    扫描版 PDF 那条在「当前未开启」节里，它自己就是否定句，不算数。
     """
     page = _page()
     cut = page.find('<section id="not-now">')
     assert cut != -1, "没有「当前未开启」那一节"
     for lineno, line in enumerate(page[:cut].splitlines(), 1):
-        if "图片" in line or "拍照" in line:
+        if any(w in line for w in ("图片", "拍照", "截图")):
             assert "视觉" in line, (
-                f"页面第 {lineno} 行提到「图片/拍照」却没有视觉限定,"
+                f"页面第 {lineno} 行提到看图却没有视觉限定,"
                 f"这句会被读成无条件能读图：{line.strip()[:90]}"
             )
-    assert "图片" in page[:cut], "整页不再提图片——那这条守卫该跟着改,不是默默放行"
+    assert any(w in page[:cut] for w in ("图片", "截图", "识图")), \
+        "整页不再提任何「能看图」的说法——那这条守卫该跟着改,不是默默放行"
 
 
 # ---------- 5. 打包：spec 里没列目录,冻结版就没有这一页 ----------
@@ -292,18 +344,26 @@ def test_calculator_card_states_it_uses_a_tool():
 
 # ---------- 7. 轮播与主题切换：交互也得有红线 ----------
 
-def test_carousel_shows_all_four_shots_and_can_be_stopped():
-    """四张实拍收进一个轮播，但自动播的东西必须能停（WCAG 2.2.2）——
-    一个停不下来的自动轮播，对手动操作页面的人是障碍，不是设计。"""
+def test_all_four_shots_are_visible_at_once():
+    """四张实拍一次全铺，且页面上没有任何东西在自己动。
+
+    2026-09-22 改判：原来是轮播（一次一张 + 前后键 + 指示点 + 自动播 + 横滑）。
+    他的问题是"怎么就只剩下一张图片了"——那不是 bug，是轮播的定义，但一个四张静态
+    截图的展示位需要访客去翻页、还需要"自动播必须能停"这条无障碍要求，本身就说明
+    这套机器是多余的。现在桌面四列、手机两列。
+    判据跟着换：四张都在这一节里、不许再有轮播挂载点，且 site.js 里不许出现
+    setInterval——没有自动播，才轮到不要求暂停键。
+    """
     page = _page()
     cut = page.find('<section id="shots"')
     assert cut != -1, "没有截图那一节"
     block = page[cut:page.find("</section>", cut)]
     for name in ("register", "chat", "memory", "settings"):
-        assert f"/site/img/{name}.jpg" in block, f"{name}.jpg 没进轮播"
-    assert "data-carousel" in block, "轮播要有自己的挂载点，脚本靠它找元素"
-    assert 'aria-label="上一张"' in block and 'aria-label="下一张"' in block
-    assert 'aria-label="暂停轮播"' in block, "自动轮播缺暂停键"
+        assert f"/site/img/{name}.jpg" in block, f"{name}.jpg 没进这一节"
+    assert "data-carousel" not in block, "轮播又回来了：四张实拍不需要翻页"
+    assert 'aria-label="暂停轮播"' not in block, "没有自动播就不该有暂停键"
+    assert "setInterval" not in _js(), "site.js 里出现了定时器——页面在自己动"
+    assert "repeat(4" in _css(), "宽屏下没有排成四列，等于还是只看得见一两张"
 
 
 def test_theme_toggle_exists_and_dark_is_the_default():
@@ -431,20 +491,24 @@ def test_no_probe_check_can_hang_forever():
 
 
 def test_the_site_screenshots_stay_opaque():
-    """官网那四张实拍不许再被压成半透明。
+    """官网那四张实拍不许被压成半透明。
 
-    他第一次在手机上看这块的反馈是"完全看不到"：轨道窄，相邻两张会露边，而
-    `.slide:not(.is-active)` 被压到 .28，四张里三张是 ghost，整块读起来像没加载。
-    图片是内容不是装饰层——轮播本来就靠 translateX 把别的张推出视口，淡出是多余的。
+    轮播时代给非当前张压到 .28 + scale(.93)，手机上轨道窄、相邻两张会露边，四张里
+    三张是 ghost，整块读起来像没加载。他第一次看这块的反馈就是"完全看不到"。
+    图片是内容不是装饰层。轮播删掉后 `.slide` 那组选择器跟着没了，所以这里改成扫
+    任何提到 `.shot` 或 `.phone` 的规则——下一条 `html.js .slide` 那种写法以后换个
+    名字也照样能被抓住。
     """
-    import os
-    from app.web.web_router import SITE_DIR
-    with open(os.path.join(SITE_DIR, "site.css"), encoding="utf-8") as f:
-        css = _strip_css_comments(f.read())
-    for rule in re.finditer(r"html\.js \.slide[^{]*\{([^}]*)\}", css):
-        body = rule.group(1)
-        m = re.search(r"opacity:\s*([0-9.]+)", body)
+    css = _strip_css_comments(_css())
+    checked = 0
+    for rule in re.finditer(r"(?m)^([^{}\n][^{}]*)\{([^}]*)\}", css):
+        sel = rule.group(1)
+        if ".shot" not in sel and ".phone" not in sel:
+            continue
+        checked += 1
+        m = re.search(r"opacity:\s*([0-9.]+)", rule.group(2))
         assert not m or float(m.group(1)) >= 1, f"实拍图又被压透明度了：{rule.group(0).strip()}"
+    assert checked >= 2, f"选择器改名了，这条抓不到任何规则（只扫到 {checked} 条）——跟着改，别让它空转"
 
 
 def _strip_css_comments(css: str) -> str:
@@ -495,3 +559,63 @@ def test_the_packaging_spec_lists_the_version_file(tmp_path):
     spec = (root / "run_backend.spec").read_text(encoding="utf-8")
     assert "'version.txt'" in spec, "spec 不再把构建戳打进包里：冻结版将永远显示不出服务端版本"
     assert "os.path.isfile('version.txt')" in spec, "变成了无条件列项：没有该文件时 PyInstaller 会直接报错"
+
+
+# ---------- 2b. 服务端代取 APK ----------
+
+def _fake_plan(monkeypatch, plan=(None, "模拟：没有快照")):
+    from app.core import releases
+
+    monkeypatch.setattr(releases, "download_plan", lambda: plan)
+    return releases
+
+
+def test_the_apk_route_hands_over_bytes_with_a_save_header(monkeypatch):
+    """一次点击 = 直接落盘。类型与 Content-Disposition 就是"别在浏览器里打开它"。"""
+    releases = _fake_plan(monkeypatch, ({
+        "url": "https://github.com/o/r/releases/download/v0.17/ai-assistant-0.17.apk",
+        "name": "ai-assistant-0.17.apk", "size": 5, "version": "0.17"}, ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"12345", ""))
+
+    res = client.get("/site/android.apk")          # 不带任何凭据：朋友没登录也要能下
+    assert res.status_code == 200, res.status_code
+    assert res.headers["content-type"].startswith("application/vnd.android.package-archive")
+    assert res.headers["content-disposition"] == 'attachment; filename="ai-assistant-0.17.apk"'
+    assert res.content == b"12345"
+    assert res.headers["cache-control"] == "no-cache", "缓存住了就等于让人下到上一版"
+
+
+def test_the_apk_route_falls_back_to_the_release_page(monkeypatch):
+    """拿不到包（没快照、或取字节失败）时退回发布页，而不是回一个 404。
+
+    退这一步不是把用户丢回去自生自灭：按钮原来就在那儿，所以最坏情况等于改动之前。
+    但绝不允许"回 200 空文件"——那是手机上"下载已完成，打开无反应"的形状。
+    """
+    releases = _fake_plan(monkeypatch)
+    res = client.get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307), res.status_code
+    assert res.headers["location"] == releases.RELEASES_PAGE
+
+    _fake_plan(monkeypatch, ({"url": "https://github.com/o/a.apk", "name": "ai-assistant-0.17.apk",
+                             "size": 5, "version": "0.17"}, ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (None, "上游回 404"))
+    res = client.get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307), f"取不到字节却没退回发布页：{res.status_code}"
+    assert res.headers["location"] == releases.RELEASES_PAGE
+
+
+def test_the_apk_route_says_which_layer_failed(monkeypatch, capsys):
+    """失败原因要落在服务日志里，不然线上永远只能猜。
+
+    这台机器的 EXE 是隐藏窗口启动的，stdout 平时没人看得见——所以这条只保证
+    那句 reason 真被打出来了（打印而不是吞进返回值，是这里唯一能被抓到的形状）。
+    """
+    import io
+    import contextlib
+
+    releases = _fake_plan(monkeypatch, (None, "模拟：白名单外的主机"))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        client.get("/site/android.apk", follow_redirects=False)
+    out = buf.getvalue() + capsys.readouterr().out
+    assert "白名单外的主机" in out, f"没把失败原因说出来，只看见一次跳转：{out!r}"

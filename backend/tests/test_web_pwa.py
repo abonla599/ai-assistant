@@ -38,7 +38,7 @@ def test_static_assets_reachable():
     assert not missing, f"缺失静态资源: {missing}"
 
 
-def test_static_assets_must_be_revalidated_not_reused():
+def test_static_assets_declare_their_own_freshness():
     """不发 Cache-Control 的静态资源，等于把改版交给别人的缓存去决定。
 
     2026-09-17 实测：重建并重启后，公网 /app/style.css 仍是 80 分钟前那份旧的
@@ -46,15 +46,21 @@ def test_static_assets_must_be_revalidated_not_reused():
     源站自己没表态，浏览器与边缘就各自按启发式缓存——朋友那边看到的现象是
     "改了没生效"，而这正是本项目最容易被误判成代码坏了的一类形状。
 
-    no-cache 不是"不缓存"：每次使用前必须回源问一次，而 ETag 就是那一次问价，
-    答案通常是 304。ETag 一旦丢了，省下的请求就会变成整份重传，所以两个一起钉。
+    留下来的红线是**每个响应都得自己表态，而且带 ETag**；至于表态成哪一种，是两支：
+    不带水印的资源与 sw.js 回 no-cache（每用一次先问一次，问价的 ETag 在那儿），
+    HTML 与带当下水印的资源各归 tests/test_asset_versioning.py 钉（一笔是 30 秒的
+    窗口，一笔是一年的长缓存），那两条锁改坏了会在那里红，不在这里。
     """
-    for path in ("/app/style.css", "/app/app.js", "/app/sw.js", "/app/", "/admin/"):
+    for path in ("/app/style.css", "/app/app.js", "/app/sw.js", "/admin/admin.css"):
         res = client.get(path)
         assert res.status_code == 200, path
         assert res.headers.get("cache-control") == "no-cache", \
             f"{path} 的 cache-control 是 {res.headers.get('cache-control')!r}"
         assert res.headers.get("etag"), f"{path} 没有 ETag：no-cache 会退化成每次全量重传"
+    for page in ("/app/", "/admin/"):
+        head = client.get(page).headers.get("cache-control")
+        assert head and head != "no-cache" and "max-age=" in head, \
+            f"{page} 的 HTML 缓存口径没表态或退回了 no-cache：重复开门又要整趟回源"
 
 
 def test_frontend_uses_relative_api_paths_only():
@@ -655,8 +661,9 @@ def test_success_erases_the_stale_red_line():
     models = _function_body(js, "loadModels")
     assert re.search(r'\}\s*else\s*\{\s*setStatus\(""\);', models), \
         "拿到可用模型之后没人擦那句红的"
-    # 反向：真没模型时那句实话必须还在，两分支按角色分开措辞也是
-    assert "请联系管理员配置模型服务" in models and "设置 → 模型服务" in models, \
+    # 反向：真没模型时那句实话必须还在。两分支按角色分流：管理员配共享，
+    # 普通用户现在也能在同一页用自己的 API Key 添加"我的模型"（或联系管理员）。
+    assert "联系管理员" in models and "设置 → 模型服务" in models and "API Key" in models, \
         "把实话一起擦掉了：零模型时用户该看见一句真话"
 
 
@@ -696,7 +703,7 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
         assert end > 0
         return html[start:end + len(close)]
 
-    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文条数"), ("exportBtn", "导出对话")):
+    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文预算"), ("exportBtn", "导出对话")):
         assert "data-admin-only" not in row_of(el_id), \
             f"{el_id} 那一行标了 data-admin-only：普通用户没有{what}的能力，而且不会报错"
     prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
@@ -706,22 +713,58 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
 
 
 def test_the_identity_list_is_the_only_source_of_credentials():
-    """本机身份清单是凭据的唯一出处：老键与 pref 之外的读取一律不许存在。
+    """方案 C：凭据根本不进 JS——清单只记"谁"，会话住在 httpOnly Cookie 里。
 
-    `api.js` 原先绕过 pref 直接读 localStorage 的 accessToken。多身份之后那就是
-    第二个事实来源——清单切到 B 而请求头还是 A，正是本项目为跨用户泄露付过一次
-    账的那个形状（见 [[ai-assistant-memory-cross-user-leak]]）。
+    这条锁原先钉的是"清单是凭据的唯一出处"（api.js 绕过 pref 读老键 = 第二个事实
+    来源，见 [[ai-assistant-memory-cross-user-leak]]）。Cookie 化之后问题的形状变了：
+    清单里根本不许有凭据，api.js 也不许再拼 Authorization——"界面是 B 请求头是 A"
+    那种漂移在浏览器自动附带 Cookie 的世界里，唯一的防法就是让 JS 从头到尾没有
+    明文可拼。这里钉的是明文不许回流：
+    - api.js 不读任何令牌来源（pref.token、老键），显式声明凭 Cookie 走；
+    - 明文的唯一消费口是 adopt，且必须发生在写进清单**之前**；
+    - 老键 accessToken 只剩迁移那一处的宿命：读一次、无条件扫清；
+    - 升级函数把清单里残留的 token 字段删干净。
     """
     js, api = _js(), _js("api.js")
     assert 'localStorage.getItem("accessToken")' not in api, \
-        "api.js 还在绕过 pref 读令牌：清单和它一旦漂移，界面是 B 而请求头是 A"
-    assert "pref.token" in api, "api.js 改从 pref 取凭据"
-    # 老键只能出现在迁移那一处
+        "api.js 又去读老键了：那是 JS 可见明文的入口"
+    assert "pref.token" not in api, "api.js 又从清单取凭据：明文回到了 JS 手里"
+    assert "credentials: \"same-origin\"" in api, "api.js 没显式声明请求靠同源 Cookie 走"
+    assert "X-CSRF" in api, "api.js 不安全方法没带 CSRF 声明头"
+    assert "function adopt(" in api, "凭据收编口没了：登录回来的明文无处安放"
+    # 老键只能出现在迁移那一处（读一次 + 清单一处删名）
     assert js.count('"accessToken"') <= 2, "accessToken 这个键名出现在两处以上：迁移没做完"
     assert "function migrateLegacyIdentity()" in js, "没有一次性的老键迁移"
     body = _function_body(js, "migrateLegacyIdentity")
     for gone in ("accessToken", "userId", "sessionId"):
         assert gone in body, f"迁移没处理老键 {gone}"
+    assert "token: res.token" not in js, "清单条目又要把明文写回去了"
+    ab = _function_body(js, "afterAuth")
+    assert "API.adopt(res.token)" in ab, "登录成功没把明文收编成 Cookie"
+    assert ab.index("API.adopt") < ab.index("addIdentity"), \
+        "明文先落了清单才收编：中间躺着的那段时间就是泄露窗口"
+    up = _function_body(js, "upgradeIdentitiesToCookie")
+    assert "delete x.token" in up, "升级没把老清单里的明文洗掉"
+
+
+def test_every_api_method_the_pages_call_is_actually_exported():
+    """页面脚本里出现过的每个 API.<name>，必须真的在 api.js 的导出对象里。
+
+    断的那侧（调用）一直有锁，导出这侧没人看——adopt 就是"定义写了、导出漏了"：
+    文件照常加载、别的按钮照常好用，只有注册/登录的成功路径在手机上炸出
+    "API.adopt is not a function"（2026-09-23 v0.19 首发实测）。这正是本仓最怕的
+    "线看起来接完了其实没接"那一类，所以断的是两侧集合的差，不是某个名字。
+    """
+    api_src = _js("api.js")
+    block = re.search(r"return \{(.*?)\n  \};", api_src, re.S)
+    assert block, "api.js 的导出对象形状变了，这条锁要跟着改"
+    exported = set(re.findall(r"^\s*([A-Za-z][A-Za-z0-9]*)\s*[:(,]", block.group(1), re.M))
+    used = set(re.findall(r"\bAPI\.([A-Za-z][A-Za-z0-9]*)",
+                          _js("app.js", "shell.js", "layers.js", "markdown.js")))
+    missing = used - exported
+    assert not missing, (
+        f"这些 API 方法被页面调用却没被导出，手机上是运行期 'not a function'：{sorted(missing)}")
+
 
 
 def test_the_current_identity_always_resolves_to_someone():
@@ -737,17 +780,22 @@ def test_the_current_identity_always_resolves_to_someone():
 
 
 def test_switching_clears_the_view_before_it_refills_it():
-    """切换必须按 换指针 → 清屏 → 重取 的顺序，且清屏要覆盖那 7 样。
+    """方案 C 的切换 = 预填登录面；"换指针→清屏→重取"的旧静默换人已死。
 
-    顺序反了会出现"用 A 的视图去渲染 B 的数据"；漏一项就是屏幕上还挂着上一个人的
-    对话——用户据此判断「账号之间记忆共享」，哪怕服务端根本没共享。
+    旧锁钉的是切换三步的顺序——那是清单握着明文、能静默换 Cookie 年代的契约。
+    现在 JS 没有其他人的凭据，会话还是 A 的时候把 currentId 指向 B，B 的偏好
+    （lastSessionId/provider）就会被写进一次 A 的操作里——跨用户写就是当年那笔
+    账的形状。所以这里反过来钉：switchTo 不许碰指针、不许自取身份，只许把
+    登录表单递到人面前；真换人之后的清屏仍由 afterAuth 负责。
     """
     js = _js()
     sw = _function_body(js, "switchTo")
-    assert sw.index("setCurrent(") < sw.index("resetViewForIdentity()") < sw.index("await loadWho()"), \
-        "切换的顺序不对：必须换指针、清屏、再重取"
+    assert "setCurrent(" not in sw, "switchTo 还抢跑换指针：会话是 A 的，偏好却写进 B 的清单"
+    assert "loadWho()" not in sw, "switchTo 还想静默自取身份：它手里已经没有能换会话的东西"
+    assert 'showAuth("login")' in sw, "切换没把人引到登录表单"
+    assert '$("authUser").value' in sw, "切换没预填他的名字"
     assert "controller.abort()" in sw, "切走时没掐断正在输出的回答"
-    # 注册/登录成功也是换人：从设置里添加第二个账户时，屏幕上正挂着第一个人的对话。
+    # 注册/登录成功才是真换人：从设置里添加第二个账户时，屏幕上正挂着第一个人的对话。
     # 只靠 restore() 那句"没有指针就清空"兜是运气，这里要它显式清。
     assert "resetViewForIdentity()" in _function_body(js, "afterAuth"), \
         "afterAuth 换人不清屏"
@@ -1183,18 +1231,171 @@ def test_register_and_me_wrappers_match_the_backend_contract(client, enforced):
 
 
 
-def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
-    """providers 转管理员之后，普通用户点进「模型服务」就是一个 403。
+def test_quick_model_switch_chip_is_wired_end_to_end():
+    """发送框旁的快速切换模型芯片：HTML 有位置、默认收起、点击走 Layers、
+    选择即写服务端「我的默认」——四段缺一半，功能就是假的。
 
-    约定是一条属性（data-admin-only）+ JS 里一处统一开关，而不是散落的 if：
-    以后新加管理员专属控件只要带上这条属性就自动纳入，不必再改 app.js，也
-    不会"改了三处漏一处"。
+    这条锁钉的是跨文件契约（HTML 结构 × app.js 渲染 × API 封装），单看任何
+    一个文件都自洽，拼起来才成立，正是最容易在重构中被悄悄拆散的形状。
+    """
+    html = _html()
+    js = _js()
+    api = _js("api.js")
+
+    # 1) 芯片在输入脚、发送键之前，且默认 hidden（清单没回来前不许闪空芯片）
+    foot = html[html.index('class="input-foot"'):html.index("</form>")]
+    assert 'id="modelChip"' in foot, "芯片没放进输入脚"
+    assert foot.index('id="modelChip"') < foot.index('id="sendBtn"'), \
+        "芯片排到了发送键后面（与参考设计相反）"
+    chip_tag = re.search(r'<button[^>]*id="modelChip"[^>]*>', html).group(0)
+    assert "hidden" in re.search(r'class="([^"]*)"', chip_tag).group(1), \
+        "芯片默认可见：冷启动会闪一个没有名字的胶囊"
+    assert 'id="modelMenu"' in html, "弹单容器没进 HTML"
+
+    # 2) 渲染与切换：芯片随 renderModelSelect 一起刷，选择走服务端偏好
+    sel_body = _function_body(js, "renderModelSelect")
+    assert "renderModelChip()" in sel_body, "设置页下拉/清单刷新没带着芯片一起更新"
+    chip_body = _function_body(js, "renderModelChip")
+    assert "usable" in chip_body and "currentProvider()" in chip_body, \
+        "芯片没有按可用清单与当前口径渲染"
+    switch_body = _function_body(js, "switchModel")
+    assert "setMyDefaultProvider" in switch_body and "pref.provider" in switch_body, \
+        "切换没同步服务端「我的默认」或没落本机"
+    assert 'Layers.open("modelMenu"' in _function_body(js, "setModelMenu"), \
+        "弹单没走让位层栈（返回键会对不上界面）"
+
+    # 3) API 封装存在（前端调的名字必须真在 api.js 里）
+    assert "setMyDefaultProvider" in api
+
+
+_CTX_TOKEN_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const w = (n) => "词".repeat(n);
+const msgs = [
+  { role: "user", content: w(100) },
+  { role: "assistant", content: w(100) },
+  { role: "user", content: w(100) },
+];
+const huge = [
+  { role: "user", content: "开场" },
+  { role: "user", content: "最后一条特别长：" + w(900) },
+];
+const out = {
+  cjk4: ctx.estimateTokens("你好世界"),
+  ascii8: ctx.estimateTokens("abcdabcd"),
+  empty: ctx.estimateTokens(""),
+  full250: ctx.truncateWithin(msgs, 250).map((m) => m.role),
+  tight120: ctx.truncateWithin(msgs, 120).map((m) => m.role),
+  lastAlwaysKept: ctx.truncateWithin(huge, 100).map((m) => m.role),
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_context_length_is_displayed_and_budgeted_in_tokens():
+    """「上下文长度」从"条"换成 token 预算（缩写 k）——用户点名要的刻度。
+
+    显示是 k、读数走新键、截断按预算、老设备有迁移：四段是一条跨文件契约，
+    任何一段掉回"条"，用户看到的预算就是假的。
+    """
+    html = _html()
+    js = _js()
+
+    m = re.search(r'<b id="ctxVal">\d+</b>/<span id="ctxCap">\d+</span>k', html)
+    assert m, "上下文长度没有按「预算/上限k」显示（形如 8/64k）"
+    row = html[m.start():html.index("</div>", m.start())]
+    assert "条" not in row, "k 之外还挂着「条」：两套刻度同时出现在一行里"
+    assert "携带上下文条数" not in html
+    range_tag = re.search(r'<input[^>]*id="ctxRange"[^>]*>', html).group(0)
+    assert "上限随所选模型" in range_tag
+    assert 'min="2"' in range_tag and 'max="64"' in range_tag, "滑杆还停在旧量程"
+
+    assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
+    ob = _function_body(js, "outbound")
+    assert "contextTokensK" in ob and "truncateWithin(" in ob, "发送历史没按 token 预算截"
+    assert "modelCapK()" in ob, "发送预算没对模型上限取 min：界面收敛不是唯一防线"
+    assert "estimateTokens" in _function_body(js, "truncateWithin")
+    boot = _function_body(js, "boot")
+    assert "migrateContextPref()" in boot, "老设备的条数设置没在开机时换算"
+    assert "contextTokensK" in _function_body(js, "migrateContextPref")
+
+
+def test_context_cap_follows_the_selected_model_end_to_end():
+    """「随所选模型自动取上限」是一条从存储到滑杆的链，断在哪一环界面都是假的。
+
+    后端：_validate 与 catalog 都过 normalize_max_context_k（老记录兜底 64）；
+    表单：provCtxK 有进有出；界面：renderModelSelect 刷完必重画上下文行，
+    而量程只认 modelCapK 一个出处。前端读的后端字段名由源码对源码钉死。
+    """
+    js = _js()
+    html = _html()
+    import app.core.providers as providers
+    import app.main as main
+
+    assert "max_context_k" in inspect.getsource(providers.normalize_max_context_k)
+    assert "max_context_k" in inspect.getsource(providers.ProviderStore.catalog), \
+        "catalog 不再把上限带给前端：模型档案成哑字段"
+    assert "max_context_k" in inspect.getsource(providers.ProviderStore._public)
+    assert "max_context_k" in main.ProviderRequest.model_fields, "API 不收这个字段，表单填了也白填"
+
+    cap = _function_body(js, "modelCapK")
+    assert "max_context_k" in cap and "currentProvider()" in cap, "封顶读的不是当前模型"
+    sync = _function_body(js, "syncCtxRow")
+    assert "modelCapK()" in sync and 'range.max' in sync and "ctxCap" in sync
+    assert "pref.contextTokensK > cap" in sync, "超限的旧预算没被收敛，显示与实发会分叉"
+    assert "state.providers.length" in sync, "清单未就绪就改写 pref：冷启动会误砍大模型的设置"
+    assert "syncCtxRow()" in _function_body(js, "renderModelSelect"), \
+        "切模型/刷清单没重画上下文行"
+
+    assert 'id="provCtxK"' in html
+    draft = _function_body(js, "providerDraftFromForm")
+    assert "provCtxK" in draft and "max_context_k" in draft, "表单的值进不了草稿"
+    assert "provCtxK" in _function_body(js, "openProviderForm"), "编辑不回显上限"
+
+
+def test_token_estimate_and_budget_truncation_behavior():
+    """node 真跑纯函数：估算口径与"最后一条必带、往前放不下就停"是行为契约。
+
+    "中文一字≈1 token、其余≈4字符1个"和截断的停止规则，文本断言读不出对错——
+    口径错半档，用户设的 8k 就是系统性偏大/偏小的预算，必须拿运行时说话。
+    """
+    import json, shutil, subprocess, tempfile
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    src = "\n".join(_fn_text(_js(), n) for n in ("estimateTokens", "truncateWithin"))
+    d = Path(tempfile.mkdtemp(prefix="ctx-token-js-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(_CTX_TOKEN_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["cjk4"] == 4 and out["ascii8"] == 2 and out["empty"] == 0, \
+        f"估算口径变了：{out}"
+    assert out["full250"] == ["assistant", "user"], "预算够两条却收了别的形状"
+    assert out["tight120"] == ["user"], "预算只够最后一条时多收了（会 400）"
+    assert out["lastAlwaysKept"] == ["user"], "超长的那条当前问题必须仍然被携带"
+
+
+def test_admin_only_surfaces_are_marked_in_html_and_swept_by_role():
+    """管理员专属控件靠一条属性（data-admin-only）+ JS 里一处统一收口，而不是散落的 if。
+
+    v0.21 起「模型服务」入口和页体对所有人开放（普通用户在那里配"我的模型"），
+    不再属于管理员专属；这一页里唯一还收着的特权入口是"添加共享模型服务"那颗
+    按钮。契约随之改向：addSharedBtn 必须带属性，providers 三件套必须**不**带——
+    谁把它们重新标记回去，就等于把普通用户的入口又锁进 403。
     """
     html = _html()
     js = _js()
     marked = _ids_with_attr(html, "data-admin-only")
-    assert {"navProviders", "rowProviders", "paneProviders"} <= marked, \
-        f"模型服务的入口或页体没标出来：{sorted(marked)}"
+    assert "addSharedBtn" in marked, \
+        f"「添加共享模型服务」没标成管理员专属：{sorted(marked)}"
+    assert not ({"navProviders", "rowProviders", "paneProviders"} & marked), \
+        f"模型服务入口又被锁回管理员专属了：{sorted(marked)}"
     assert 'querySelectorAll("[data-admin-only]")' in js, "app.js 没有统一按属性收口"
     sweep = _function_body(js, "applyRole")
     assert re.search(r'classList\.toggle\("hidden"', sweep), "收口没有真的隐藏元素"
@@ -1280,15 +1481,16 @@ def test_memory_stats_is_queried_only_for_admins():
 def test_a_stale_token_does_not_read_like_a_first_run():
     """401 有两种，糊成一句就把人支使去填一个已经填对的框。
 
-    本机压根没存过令牌 = 首启，该引导他注册；存过却被拒 = 管理员撤销或轮换过，
-    再说"请填写口令"就是让人反复重试同一个废令牌。
+    本机压根没记过任何人 = 首启，该引导他注册；记着人却被服务端拒 = 管理员撤销
+    或轮换过会话，再让他"重试刚才的口令"就是把人往废会话上反复按。
+    （方案 C 起分叉判据是"清单里有没有人"，不是"有没有令牌"——JS 没有令牌可看。）
     """
     js = _js()
     body = _function_body(js, "needsAuth")
     assert "需要访问口令" not in js, "旧的合并文案还在，两种 401 仍是一句话"
     assert re.search(r"err\.status\s*[!=]==\s*401", body), "needsAuth 只该管 401：403 是身份够了、角色不够"
     assert "403" not in body
-    assert re.search(r'pref\.token', body), "未按本机是否已有令牌分叉"
+    assert re.search(r'currentEntry\(', body), "未按本机记不记得人分叉（方案 C：JS 没有令牌可看）"
     assert "失效" in body and "注册" in body, "两条分支的措辞都得在场"
 
 
@@ -1297,7 +1499,7 @@ def test_registration_locks_its_button_while_the_request_is_in_flight():
 
     第二下拿回的是"该用户名已存在"（`auth.py` 里那句实话，措辞换过一次：从前写作"用户名
     已被占用"）或一次多余的 401：界面于是把一个已经成功的
-    人标成红色失败，两次调用还一起抢 pref.token 的写入与
+    人标成红色失败，两次调用还一起抢会话落地（adopt→addIdentity）与
     loadWho→loadServerData→renderMessages 的顺序。约定跟 send() 守 state.streaming
     一模一样——进门先挡、解锁放在 finally（失败也必须解，否则一次网络抖动就把唯一
     的入口按死到刷新页面为止），并且凭据一落地就把它清出输入框。
@@ -1422,7 +1624,7 @@ def test_a_background_401_while_the_layer_is_up_keeps_what_you_typed():
     assert 'if ($("authModal").classList.contains("hidden")) showAuth(' in code, \
         ("needsAuth 在弹层已经开着的时候还重走 showAuth：那条路经过 setAuthMode → "
          "clearAuthCredentials，人正在敲的密码会被一条不相干的后台 401 抹掉")
-    assert re.search(r"^  setStatus\(pref\.token", code, re.M), \
+    assert re.search(r"^  setStatus\(currentEntry\(", code, re.M), \
         ("setStatus 不在 needsAuth 的顶层：它被嵌进了某个 if 里，于是「弹层已经开着」那一种 "
          "401 连状态条那一句都不再更新——这里要的是只重弹不重说话")
     assert code.index("setStatus(") < code.index("showAuth("), \
@@ -1597,19 +1799,6 @@ def test_export_asks_the_server_for_a_downloadable_url():
 
 
 # ---------- Task 4：原生壳桥的适配层（shell.js） ----------
-
-
-def test_the_bridge_surface_is_locked_to_eight_methods():
-    """桥的方法只加不减不改语义；名字漂了老壳会静默少功能，所以锁成语料。
-
-    兼容性是单向钉死的（spec §7）：新壳带新方法没人管，但 shell.js 一旦改了调用名，
-    老壳上那些方法就调不到了——而**不会报错**，只会静默少一项功能。
-    语料走 _js()（先剥注释）：把真调用删掉、原地留一句含方法名的注释就能骗过 in 判断。
-    """
-    src = _js("shell.js")
-    for name in ("capabilities", "setOwner", "scheduleReminder", "cancelReminder",
-                 "listReminders", "pendingShares", "readShareChunk", "consumeShare"):
-        assert src.count(name) >= 1, f"shell.js 里找不到桥方法 {name}"
 
 
 def test_shell_degrades_without_the_bridge():
@@ -2261,22 +2450,38 @@ def test_the_card_animation_has_a_reduced_motion_escape():
 _SHELL_JS_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
 const src = fs.readFileSync(process.argv[2], "utf8");
-const mode = process.argv[3];              // ok | undefined | null | none
+const mode = process.argv[3];              // ok | undefined | null | none | flip | later-null
 const calls = [];
 const replies = {
-  capabilities: JSON.stringify({ shell: 1, update: 1, version: "0.17" }),
+  capabilities: JSON.stringify({ shell: 1, update: 1, version: "0.17", notifications: 0,
+                                 exactAlarms: 0 }),
   listReminders: "[]", pendingShares: "[]", checkUpdate: '{"ok":true}',
   setOwner: '{"ok":true}', scheduleReminder: '{"ok":true}',
   cancelReminder: '{"ok":true}', readShareChunk: '{"b64":""}', consumeShare: '{"ok":true}',
+  openSettings: '{"ok":true}',
 };
+let capsCount = 0;
+function capsReply() {
+  capsCount += 1;
+  if (mode === "flip") {
+    // 第 3 次起"用户已经在系统那一页里把通知打开了"：加载时那次 + 驱动里两次
+    return JSON.stringify({ shell: 1, update: 1, version: "0.17",
+                            notifications: capsCount >= 3 ? 1 : 0, exactAlarms: 0 });
+  }
+  if (mode === "later-null") return capsCount === 1 ? replies.capabilities : "null";
+  return replies.capabilities;
+}
 function bridge() {
   if (mode === "none") return undefined;                 // ① 对象压根没注入
   return new Proxy({}, { get(t, name) {
     if (typeof name !== "string") return undefined;
     return function () {
       calls.push(name + "/" + arguments.length);
-      if (name === "capabilities" && mode === "undefined") return undefined;   // ② 派发没匹配上
-      if (name === "capabilities" && mode === "null") return "null";           // ③ 被 origin 拒
+      if (name === "capabilities") {
+        if (mode === "undefined") return undefined;      // ② 派发没匹配上
+        if (mode === "null") return "null";              // ③ 被 origin 拒
+        return capsReply();
+      }
       return replies[name];
     };
   }});
@@ -2290,9 +2495,13 @@ const sandbox = {
 sandbox.window.AssistantShell = bridge();
 vm.createContext(sandbox);
 const out = vm.runInContext(src + "\n;(function(){ SHELL.setOwner('u'); SHELL.listReminders();"
-  + " SHELL.pendingShares(); SHELL.checkUpdate();"
-  + " return { present: SHELL.present, diag: SHELL.diagnostic() }; })()", sandbox);
-process.stdout.write(JSON.stringify({ present: out.present, diag: out.diag, calls: calls }));
+  + " SHELL.pendingShares(); SHELL.checkUpdate(); SHELL.openSettings('alarms');"
+  + " const a = SHELL.capabilities().notifications;"
+  + " const b = SHELL.capabilities().notifications;"
+  + " return { present: SHELL.present, diag: SHELL.diagnostic(), capsA: a, capsB: b }; })()",
+  sandbox);
+process.stdout.write(JSON.stringify({ present: out.present, diag: out.diag, calls: calls,
+                                      capsA: out.capsA, capsB: out.capsB }));
 """
 
 
@@ -2324,12 +2533,14 @@ def _run_shell_js(mode: str) -> dict:
 
 
 def test_zero_arg_bridge_methods_are_called_with_no_arguments():
-    """Java 侧不收参数的四个方法，JS 就必须一个参数都不传。
+    """Java 侧不收参数的那些方法，JS 就必须一个参数都不传。
 
     多传一个空串的代价不是报错，是**整个壳在页面上凭空消失**：桥按"方法名 + 参数表"
     去找 Java 方法，找不到就回 undefined，JSON.parse 抛错被 catch 咽成 null，
     present=false，于是界面和手机浏览器长得一模一样。2026-09-22 真机第一次装 v0.17
     就是这个表现——而它在此之前一直只在 JVM 单测里"通过"。
+    下面这份名单对着 ShellBridge.java 的签名核过；方法名有没有漏接由
+    test_android_shell.py 那条派生锁管，这里只管参数个数。
     """
     out = _run_shell_js("ok")
     calls = out["calls"]
@@ -2337,7 +2548,34 @@ def test_zero_arg_bridge_methods_are_called_with_no_arguments():
         assert f"{name}/0" in calls, (
             f"{name}() 在 Java 侧不收参数，JS 却传了（实际记录：{calls}）")
     assert "setOwner/1" in calls, f"收一个参数的那个反而没传：{calls}"
+    assert "openSettings/1" in calls, f"openSettings 收一段 JSON，JS 却没带参数：{calls}"
     assert out["present"] is True, f"桥一切正常时 present 必须是 true：{out}"
+
+
+def test_capabilities_is_re_asked_rather_than_served_from_a_load_time_snapshot():
+    """capabilities() 每次现问：权限是能在页面开着的时候被改掉的。
+
+    假想场景就是这一版要修的那件事：提醒页那一行显示"没授权"，用户点「去设置」进去打开，
+    回到应用——如果这一行读的是加载时那份快照，它会继续显示"没授权"，而这一次它是错的。
+    "改了没生效"在本项目历史上被误判成代码坏了不止一次，所以这条不能靠读源码判定：
+    快照与现问在文本上可以长得一样（都写 capabilities()），只有运行时知道答案。
+    """
+    out = _run_shell_js("flip")
+    assert out["present"] is True, out
+    assert out["capsA"] == 0, f"桥已经回了 1 之前那次读到的就不是 0：{out}"
+    assert out["capsB"] == 1, f"第二次问还是旧值——那是快照不是现问：{out}"
+
+
+def test_a_failed_re_ask_falls_back_to_the_snapshot_instead_of_vanishing():
+    """现问失败时退回加载时那份，而不是把那一行抹掉。
+
+    方向要分清：capabilities() 现问是为了"别把已改的显示成旧的"，不是为了"桥偶尔没应答
+    就把整行撤掉"。后者会让设置里那一行忽有忽无，而"上一眼还有"是本仓最难复查的证词。
+    """
+    out = _run_shell_js("later-null")
+    assert out["present"] is True, f"桥应答了一次就不该被判定为无桥：{out}"
+    assert out["capsA"] == 0 and out["capsB"] == 0, \
+        f"现问失败时要退回加载时那份，别回一个空对象让整行消失：{out}"
 
 
 def test_the_bridge_diagnostic_names_which_layer_failed():
@@ -2377,3 +2615,805 @@ def test_the_bridge_diagnostic_reaches_the_page_only_when_there_is_no_bridge():
     assert "SHELL.diagnostic()" in body, "填进去的不是桥记录的那份"
     assert "SHELL.present" in body, "没有按有没有壳决定露不露：有桥时也会挂着排查信息"
     assert "textContent" in body and "innerHTML" not in body, "诊断文字来自桥，不许走 innerHTML"
+
+
+_RENDER_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+class El {
+  constructor(tag) {
+    this.tag = tag; this.kids = []; this.dataset = {}; this.attrs = {};
+    this.className = ""; this.textContent = ""; this.onclick = null;
+  }
+  appendChild(c) { this.kids.push(c); return c; }
+  append(...cs) { cs.forEach((c) => this.kids.push(c)); }
+  setAttribute(k, v) { this.attrs[k] = v; }
+}
+function dump(el, out) {
+  if (el.textContent) out.push(el.textContent);
+  el.kids.forEach((k) => dump(k, out));
+  return out;
+}
+function buttons(el, out) {
+  if (el.onclick) out.push(el);
+  el.kids.forEach((k) => buttons(k, out));
+  return out;
+}
+const openCalls = [];
+const statuses = [];
+const SHELL = {
+  openSettings(target) {
+    openCalls.push(target);
+    return (SC.openReply !== undefined) ? SC.openReply : { ok: true };
+  },
+};
+function setStatus(text, isErr) { statuses.push((text || "") + (isErr ? "!" : "")); }
+const sandbox = {
+  SC,
+  document: { createElement: (t) => new El(t) },
+  SHELL, setStatus, console, JSON, Math, String, Number, Array, Object, Date, Boolean,
+};
+vm.createContext(sandbox);
+const driver = "\n;(function(){ return { card: reminderStatusCard(SC.caps),"
+  + " hist: (SC.reminders || []).map(fmtFiredHistory) }; })()";
+const out = vm.runInContext(src + driver, sandbox);
+const textsBefore = dump(out.card, []);
+buttons(out.card, []).forEach((b) => b.onclick());
+process.stdout.write(JSON.stringify({
+  texts: textsBefore,
+  afterClick: dump(out.card, []),
+  clicks: openCalls,
+  statuses: statuses,
+  hist: out.hist,
+  role: out.card.dataset.role || "",
+}));
+"""
+
+
+def _run_render_js(scenario: dict) -> dict:
+    """在 node 里真跑 app.js 的 reminderStatusCard / fmtFiredHistory，读回渲染出来的文字。
+
+    为什么不走 `_js()` 那把尺子做文本断言：这一屏要钉的三件事全是"给定这几种输入，
+    屏幕上出现哪句话"。文本断言只能证明那句话**在文件里**，而把 `pair[1] ? ok : bad`
+    改成 `pair[1] ? bad : ok`（或者反过来把 undefined 当成 0）在文本上一字未改，
+    症状却是"已授权的显示成没授权"和"老壳被说成从没响过"——两种都是说谎。
+    渲染用的 DOM 是假的，被执行的**判定与文字选择**是仓库那一份。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    snippet = "\n".join(_fn_text(_js(), n) for n in
+                        ("reminderStatusCard", "fmtFiredHistory", "fmtReminderAt"))
+    d = Path(tempfile.mkdtemp(prefix="render-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_RENDER_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_the_status_row_has_three_states_not_two():
+    """1 / 0 / 这个键压根没有是三种情况，画成三种话；把"读不到"画成"没授权"是说谎。
+
+    v0.17 及更早的壳不报 notifications 与 exactAlarms。如果那一行把缺键当成 0，
+    老壳用户看到的是"没授权"——而他真去设置里翻一遍会发现本来就是开着的。
+    这一版修的就是"看不见的状态"，别再造一个新的看不见的状态。
+    """
+    granted = _run_render_js({"caps": {"notifications": 1, "exactAlarms": 1}})
+    denied = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0}})
+    old = _run_render_js({"caps": {"shell": 1, "update": 1, "version": "0.17"}})
+
+    assert any("已授权" in t for t in granted["texts"]), granted
+    assert any("能准点" in t for t in granted["texts"]), granted
+    assert any("没授权" in t for t in denied["texts"]), denied
+    assert any("省电" in t for t in denied["texts"]), denied
+    assert not any("没授权" in t or "能准点" in t for t in old["texts"]), \
+        f"老壳不报这两个键，那一行却给了结论：{old['texts']}"
+    assert any("读不到" in t for t in old["texts"]), old
+
+
+def test_clicking_go_to_settings_does_not_flip_the_row_itself():
+    """点「去设置」只负责把那一页递出去，不改这一行的字。
+
+    改完权限回到应用才是状态该变的时刻（由 visibilitychange 现问）。在这里当场翻绿，
+    等于把"用户可能根本没开"显示成"已经开了"——那一行从此不可信，而它是这一版唯一的依据。
+    壳回 ok:false 时要把话说出来，别静默。
+    """
+    out = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0}})
+    assert out["clicks"] == ["notifications", "alarms"], out["clicks"]
+    assert out["afterClick"] == out["texts"], f"点一下自己就把状态改了：{out}"
+    assert out["statuses"] == [], out["statuses"]
+
+    refused = _run_render_js({"caps": {"notifications": 0, "exactAlarms": 0},
+                              "openReply": {"ok": False, "error": "bad-reply"}})
+    assert refused["statuses"], "那一页没递出去，屏幕上却一个字都没说"
+
+
+def test_the_history_text_distinguishes_never_fired_from_an_old_shell():
+    """firedAt/missed 缺键时一个字都不说；两个键都在且都是 0 才说"到点还没响过"。
+
+    老壳的 listReminders 里没有这两个键。把它们当成 0 会显示成"还没响过"——那恰好是
+    这一版要回答的那个问题，答错了比不答更糟，因为它读起来像查过了。
+    """
+    out = _run_render_js({"caps": {}, "reminders": [
+        {"title": "旧壳那条"},
+        {"title": "没响过", "firedAt": 0, "missed": 0},
+        {"title": "响过又丢过", "firedAt": 1758450000000, "missed": 3},
+    ]})
+    assert out["hist"][0] == "", f"老壳没这两个键，却给出了结论：{out['hist']!r}"
+    assert "还没响过" in out["hist"][1], out["hist"]
+    assert "上次发出" in out["hist"][2] and "3 次到点没发出" in out["hist"][2], out["hist"]
+
+
+def test_the_status_card_names_itself_so_the_page_can_refresh_only_it():
+    """卡片自己带着身份：从系统那一页回来时只换这一张，不整页重画。
+
+    整页重画会连带清掉他刚打进表单却没点"添加"的那句提醒。身份写在 dataset 上而不是
+    "页面里第一个 .set-card"那种位置约定——下一个人往前面加一张卡片，位置就变了，
+    而那种错法不会报错，只会让他刷不回来。
+    """
+    out = _run_render_js({"caps": {"notifications": 1, "exactAlarms": 1}})
+    assert out["role"] == "reminder-status", out["role"]
+
+
+_LAYERS_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const ops = JSON.parse(process.argv[3]);
+const stale = JSON.parse(process.argv[4] || "[]");
+
+const hidden = [];      // which layer's hide() actually ran, in order
+const flow = [];        // what the stack asked history to do: push / replace / go / exit
+const snaps = [];       // labelled checkpoints the Python side asserts on
+
+const entries = [{ layers: stale.slice() }];
+let idx = 0, pending = false, rec = false;
+const lay = (s) => (((s || {}).layers) || []).join(",");
+const copy = (s) => ((((s || {}).layers) || []).slice());
+const note = (v) => { if (rec) flow.push(v); };
+const history = {
+  get state() { return entries[idx]; },
+  // 照抄浏览器的两处行为：pushState 丢掉"当前位置之后"的前进记录，go() 只留下一个
+  // 待交付的 popstate。前一条不模仿，"关掉中间那一层再开一层"就会拿到一份假历史。
+  pushState(s) {
+    entries.splice(idx + 1);
+    entries.push({ layers: copy(s) });
+    idx = entries.length - 1;
+    note("push:" + lay(s));
+  },
+  replaceState(s) { entries[idx] = { layers: copy(s) }; note("replace:" + lay(s)); },
+  go(d) {
+    const t = idx + d;
+    if (t < 0 || t >= entries.length) { note("go-dropped:" + d); return; }
+    idx = t; pending = true; note("go:" + d);
+  },
+};
+
+const sandbox = { JSON, console, Array, Object, Math, Error };
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const L = sandbox.makeLayerStack(history);
+rec = true;                                          // 构造时那次 replaceState 不计入流水
+
+function spy(id, bad) {
+  return function () { hidden.push(id); if (bad) throw new Error("close refused"); };
+}
+
+for (const op of ops) {
+  const k = op[0];
+  if (k === "open") L.open(op[1], spy(op[1], op[2] === "bad"));
+  else if (k === "close") L.close(op[1]);
+  else if (k === "closeTop") { if (op[1] === "detached") { const f = L.closeTop; f(); } else L.closeTop(); }
+  else if (k === "flush") { if (pending) { pending = false; L.reconcile(history.state); } }
+  else if (k === "back") {                            // 返回键：浏览器自己走一步并派发 popstate
+    if (idx === 0) note("exit");
+    else { idx -= 1; pending = false; L.reconcile(entries[idx]); }
+  } else if (k === "snap") {
+    snaps.push({ at: op[1], depth: L.depth(), top: String(L.top()), hidden: hidden.slice() });
+  } else throw new Error("unknown op: " + k);
+}
+process.stdout.write(JSON.stringify({
+  hidden, flow, snaps, depth: L.depth(), top: String(L.top()),
+  entries: entries.map((e) => (e && e.layers) || []),
+}));
+"""
+
+
+def _run_layers_js(ops: list, stale: list = None) -> dict:
+    """在 node 里真跑仓库那份 layers.js：按 ops 脚本操作一个假的 history，回收执行流水。
+
+    判据只能问运行时。这一节的锁全是"返回键按下去到底退掉了哪一层"——读源码看得出写法
+    对不对，看不出**多步回退只派发一次 popstate**、**开一层时让位层该被换掉而不是压上去**
+    这两条行为，而那两条正是这次改动的全部难点。流水（flow）是逐字比对的：多一条、少一条、
+    顺序换了都红，这样"绿"只有一种解释。
+
+    与 _run_shell_js 同理，这里不经过 _js()：那把尺子剥注释，而要被执行的是磁盘上那份
+    原文件，且读文件的是 node 不是本函数。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    harness = Path(tempfile.mkdtemp(prefix="layers-js-")) / "harness.cjs"
+    harness.write_text(_LAYERS_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(harness), str(STATIC / "layers.js"),
+         json.dumps(ops), json.dumps(stale or [])],
+        capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def _snaps(out: dict) -> dict:
+    return {s["at"]: s for s in out["snaps"]}
+
+
+def test_the_back_key_closes_one_layer_at_a_time():
+    """这次改动的验收标准本身：按一层、再按一层，最后一按才退应用。
+
+    原来是一按就退桌面：壳写的是 canGoBack() ? goBack() : 退，而页面这些层从不产生
+    历史条目，所以 canGoBack() 恒假。hidden 记"哪一层的收尾真跑了"，depth 记"栈里还剩
+    几层"，两个都要——只看 hidden 会漏掉"层没退但界面关了"，只看 depth 会漏掉
+    "层退了却没人关界面"。flow 逐字比对，第三条"exit"钉的是已拍的栈底行为。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"], ["snap", "开着两层"],
+        ["back"], ["snap", "第一次按"], ["back"], ["snap", "第二次按"],
+        ["back"], ["snap", "第三次按"],
+    ])
+    s = _snaps(out)
+    assert s["开着两层"]["depth"] == 2, s["开着两层"]
+    assert s["第一次按"]["hidden"] == ["setPage"], "头一下该只退掉最上面那层（二级页回列表）"
+    assert s["第二次按"]["hidden"] == ["setPage", "settings"], "第二下才该关设置弹层"
+    assert s["第三次按"]["depth"] == 0, s["第三次按"]
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "exit"], \
+        f"历史操作对不上（多一条就是多按一次才有反应）：{out['flow']}"
+
+
+def test_a_drawer_yields_to_the_page_it_navigates_to():
+    """从侧栏点进设置是"换页"，不是"叠一层"：历史条目被替换，深度不涨。
+
+    压上去会怎样：栈成了 [侧栏, 设置]，而"关掉侧栏"只能往回退——那一退把刚打开的设置
+    一起退掉，症状是"点了记忆，界面闪一下又回到聊天"。所以让位这一档走 replaceState。
+    flow 里没有 push:settings,setPage 是这条的牙：把让位分支删掉，那个 push 立刻出现。
+    """
+    out = _run_layers_js([
+        ["open", "sidebar"], ["open", "settings"], ["snap", "从侧栏进了设置"],
+        ["back"], ["snap", "退掉设置"], ["back"],
+    ])
+    s = _snaps(out)
+    assert s["从侧栏进了设置"]["hidden"] == ["sidebar"], "侧栏没让位：它正挡在设置前面"
+    assert s["从侧栏进了设置"]["depth"] == 1, "设置被压到侧栏上面了，返回键要按两次才回聊天"
+    assert out["flow"] == ["push:sidebar", "replace:settings", "exit"], out["flow"]
+    assert out["entries"] == [[], ["settings"]], f"历史条目对不上：{out['entries']}"
+    assert s["退掉设置"]["depth"] == 0, "关掉设置就该回到聊天，中间不该再有一层「只退侧栏」"
+
+
+def test_closing_a_layer_below_the_top_rewinds_in_one_popstate_top_down():
+    """关中间那一层 = 往回走 N 步，而 N 步只派发一次 popstate。
+
+    所以 reconcile 必须按"目标链"整体对齐、从最上面往下收，不能假设一次只退一层。
+    收的顺序是相机→二级页→设置：hideCamera 要停摄像头轨，反过来的话指示灯要等到
+    下一次返回才灭（"效果晚了一拍"也算效果没了）。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"], ["open", "camera"], ["snap", "三层"],
+        ["close", "settings"], ["flush"], ["snap", "一次回退之后"],
+    ])
+    s = _snaps(out)
+    assert s["三层"]["depth"] == 3, s["三层"]
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "push:settings,setPage,camera", "go:-3"], \
+        f"没走一次多步回退：{out['flow']}"
+    assert s["一次回退之后"]["hidden"] == ["camera", "setPage", "settings"], out["flow"]
+    assert s["一次回退之后"]["depth"] == 0, "一次 popstate 只收了一层：剩下两层永远关不掉"
+
+
+def test_reopening_an_existing_layer_rewinds_instead_of_stacking():
+    """已经开着的层再开一次：回到它那一层，不产生第二条历史；已在最上层则什么都不做。
+
+    设置里两个二级页之间来回切就是"最上层"那一档——调用方自己把 DOM 改完了，栈再记
+    一条就等于"看一眼角色设定"之后要多按一次返回。逐字比对的 flow 是唯一能同时钉住
+    "该有一次 go:-1"和"不该有第二次 push"的写法。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage"],
+        ["open", "settings"], ["flush"], ["snap", "重开底下那层"],
+        ["open", "settings"], ["snap", "重开最上层"],
+    ])
+    s = _snaps(out)
+    assert s["重开底下那层"]["hidden"] == ["setPage"], s["重开底下那层"]
+    assert s["重开最上层"]["depth"] == 1, "第二次 open 压出了第二层设置"
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "go:-1"], \
+        f"重开的那两次动了多余的历史操作（每多一条就是白吃一次返回）：{out['flow']}"
+
+
+def test_closing_a_layer_that_is_not_open_costs_nothing():
+    """没开过的层去关它：不能真的往回走一步。
+
+    这条是"同一层被关两次"的兜底（设置里那行改密码就是先 closeSettings 再点别的）。
+    多退的那一步发生在用户看不见的地方，症状是"返回键按一次，跳回刚才那个页面"。
+    """
+    out = _run_layers_js([["open", "settings"], ["close", "camera"], ["snap", "还是设置"]])
+    assert out["flow"] == ["push:settings"], f"关一层却动了历史：{out['flow']}"
+    assert out["depth"] == 1 and out["top"] == "settings", out
+
+
+def test_a_stale_history_entry_does_not_open_a_layer_that_is_not_there():
+    """刷新之后历史条目还在，界面却是全新的：构造时那一次 replaceState 把它抹平。
+
+    少了这一步，栈里凭空有"设置"这一层而屏上没有——返回键头一下什么都没发生，要按
+    两下才关掉一个根本没开的弹层。这类"第一下没反应"最容易被当成手机卡。
+    """
+    out = _run_layers_js([["snap", "刚加载"], ["back"]], stale=["settings", "setPage"])
+    assert out["snaps"][0]["depth"] == 0, "拿着旧的 state 建栈：返回键头一下会空按"
+    assert out["entries"][0] == [], f"当前那条历史没被重置：{out['entries']}"
+    assert out["flow"] == ["exit"], f"重置之后栈底就该是栈底：{out['flow']}"
+
+
+def test_a_layer_that_refuses_to_close_does_not_wedge_the_back_key():
+    """某一层的收尾自己抛错，不能把返回键整个卡死。
+
+    hide 里要碰 DOM、要停摄像头轨，抛错不是假想。去掉那个 try 之后异常从 popstate
+    监听里逃出去，栈与历史从这一刻起永久错位——此后每次返回都只退半层。所以要一路
+    退到目标（depth 归零）才算修好：抛出异常的那层必须先摘掉再往下收。
+    """
+    out = _run_layers_js([
+        ["open", "settings"], ["open", "setPage", "bad"],
+        ["close", "settings"], ["flush"], ["snap", "一次回退之后"],
+    ])
+    assert out["snaps"][0]["hidden"] == ["setPage", "settings"], out["snaps"][0]
+    assert out["snaps"][0]["depth"] == 0, "抛错的那层没被摘掉：它把剩下的高度永远占住了"
+    assert out["flow"] == ["push:settings", "push:settings,setPage", "go:-2"], out["flow"]
+
+
+def test_closeTop_survives_being_handed_over_as_a_callback():
+    """`const f = Layers.closeTop; f()` 必须照常工作：Esc 那条路就是这么挂上去的。
+
+    写成 closeTop() { this.close(...) } 的话，脱离 this 的调用直接 TypeError，
+    而手机上没有控制台——Esc 从此没反应，返回键却一切正常。中间那次 flush 是
+    popstate：closeTop 只朝历史发一个请求，收界面的是回退之后那一条路。
+    """
+    out = _run_layers_js([["open", "settings"], ["closeTop", "detached"],
+                          ["flush"], ["snap", "脱离 this"]])
+    assert out["snaps"][0]["hidden"] == ["settings"], out["snaps"][0]
+    assert out["depth"] == 0, out
+    assert out["flow"] == ["push:settings", "go:-1"], out["flow"]
+
+
+def test_the_page_loads_the_stack_before_any_layer_code_runs():
+    """layers.js 要在 app.js 之前加载，而且要真的挂进外壳清单。
+
+    app.js 顶层就调 makeLayerStack()，脚本顺序写反得到的是 ReferenceError——整页 JS
+    一起停摆，症状是"手机上一片空白"，比返回键失灵严重得多。sw.js 少一行则是离线时
+    外壳缺这一块，网络一断就开不回来。
+    """
+    html = _html()
+    at_layers, at_app = html.find('src="layers.js"'), html.find('src="app.js"')
+    assert at_layers >= 0, "index.html 根本没加载 layers.js"
+    assert at_app >= 0, "index.html 里没有 app.js？"
+    assert at_layers < at_app, "layers.js 排在了 app.js 后面：app.js 顶层那次调用会直接抛错"
+    js = _js()
+    assert "makeLayerStack(window.history)" in js, "没建栈：返回键还是原来那副样子"
+    assert 'addEventListener("popstate"' in js and "Layers.reconcile(" in js, \
+        "没接 popstate：界面只在按 × 时收，历史条目却一路涨"
+    assert '"layers.js"' in _js("sw.js"), "sw.js 的外壳清单里少了它：离线打开时层栈整个丢失"
+
+
+def test_every_layer_is_closed_by_the_stack_and_only_by_it():
+    """每层的"收起"在源码里只能出现一次，而且必须是被 open() 注册进栈的那一个。
+
+    四段写死的 classList 各数一次出现次数：多出来的一处就是第二个执行者，它关掉界面
+    却不退历史——历史里从此多一层，返回键要按两下才关一层。注册那一半（open 的第二
+    个参数）钉的是反方向：只把 close 接上、open 没登记 hide，被返回键收掉的层就没人关
+    （层从栈里消失了，DOM 还挂着）。
+    """
+    js = _js()
+    for needle in ('$("settings").classList.add("hidden")',
+                   '$("cameraModal").classList.add("hidden")',
+                   '$("attachMenu").classList.add("hidden")',
+                   '$("sidebar").classList.remove("open")'):
+        assert js.count(needle) == 1, f"{needle} 在 app.js 里出现 {js.count(needle)} 次：只许栈收的那一处"
+    for call in ('Layers.open("settings", hideSettings)',
+                 'Layers.open("setPage", showSetList)',
+                 'Layers.open("camera", hideCamera)',
+                 'Layers.open("attachMenu", hideAttachMenu)',
+                 'Layers.open("sidebar", hideSidebar)'):
+        assert call in js, f"这一层没把收起的手法登记进栈：{call}"
+    for name, lid in (("closeSettings", "settings"), ("closeSetPage", "setPage"),
+                      ("closeCamera", "camera"), ("closeSidebar", "sidebar")):
+        assert f'Layers.close("{lid}")' in _js_fn(js, name), f"{name}() 没走栈：它关的是界面不是历史"
+    assert 'Layers.close("attachMenu")' in _js_fn(js, "setAttachMenu"), \
+        "附件菜单的关法没走栈：它一关，历史里就多一条没人负责的条目"
+
+
+def test_the_camera_button_does_not_close_the_menu_it_came_from():
+    """点「拍照」时，收掉附件菜单的必须是栈（让位），不是那颗按钮自己。
+
+    顺序在这里是要命的：关是 history.go(-1)（异步交付），开是 pushState（同步）。
+    同一拍里先请求回退再压新条目，落点就不是"拍照"那条——从这一刻起返回键与界面对不上，
+    而对不上的那一拍用户什么也看不见。
+    """
+    js = _js()
+    handler = _handler_of(js, "pickCamera")
+    assert "openCamera" in handler, f"拍照那颗按钮没接上开层：{handler}"
+    assert "setAttachMenu" not in handler, \
+        f"按钮自己关了菜单：异步回退紧跟着一次 push，历史会错位：{handler}"
+
+
+def test_escape_takes_the_same_single_path_as_the_back_key():
+    """Esc 只许调 closeTop()，不许自己点名该关哪一层。
+
+    点名就是第二个执行者，而且它一定落后于现实：这次新增的两档（设置里的二级页、改走栈
+    的相机）都没进原来那串 if，Esc 对它们一概不理而返回键管——两条路从那天起行为不同，
+    下次改层的人只会去改"看起来对的那条"。
+    """
+    js = _js()
+    at = js.index('document.addEventListener("keydown"')
+    body = _up_to_matching_brace(js[js.index("{", at):])
+    assert "Layers.closeTop()" in body, f"Esc 没接到层栈上：{body}"
+    for named in ("closeSettings", "closeSidebar", "closeCamera", "setAttachMenu",
+                  "cameraModal"):
+        assert named not in body, f"Esc 还在自己点名该关哪一层（{named}）：它与返回键成了两套真相"
+
+
+def test_the_update_card_stays_out_of_the_stack():
+    """底部那张卡片不进层栈，而且理由要能被机器查到。
+
+    它的"今天不再问"只该由他自己按掉。进了栈，"被别的层顶掉"也算收起，日期戳就被偷偷
+    写上——在今天剩下的时间里再也不问，而他根本没看到第二眼。所以：没有
+    Layers.open("update")，让位层名单里也没有它；收尾仍然是那两颗按钮。
+    """
+    js = _js()
+    assert 'Layers.open("update"' not in js, "卡片进栈了：被顶掉也会写下「今天问过了」"
+    assert 'const YIELDS = ["sidebar", "attachMenu"]' in _js("layers.js"), \
+        "让位层名单改了：这条锁与 app.js 里那段理由必须同时改，否则注释与代码各说一遍"
+    assert "hideUpdateSheet" in _handler_of(js, "updateLaterBtn"), "「稍后」不再走那份收尾：日期戳没人写"
+
+
+# ---------- 首屏的串行网络链（2026-09-22：打开网页版到看见对话界面） ----------
+
+_BOOT_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const realFns = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+const PREAMBLE = `
+const flow = [];
+const statuses = [];
+let inflight = 0, peak = 0;
+const state = { messages: [], sessions: [], providers: [], me: { role: "user" } };
+const pref = { sessionId: SC.sessionId || "", provider: "p1" };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function beat(tag, ms, failStatus) {
+  flow.push("start:" + tag);
+  inflight += 1; if (inflight > peak) peak = inflight;
+  await wait(ms);
+  inflight -= 1;
+  if (failStatus) { flow.push("fail:" + tag); const e = new Error(tag + " boom"); e.status = failStatus; throw e; }
+  flow.push("end:" + tag);
+}
+function setStatus(text, isErr) { statuses.push((text || "") + (isErr ? "!" : "")); }
+function needsAuth(err) { flow.push("needsAuth:" + err.status); return err.status === 401; }
+function currentProvider() { return SC.hasProvider === false ? null : { id: "p1" }; }
+// 三个假叶子：只照抄真函数对外可见的那一处副作用（loadModels 拿到可用模型会
+// setStatus("") 擦掉旧红字），因为本轮要钉的正是"批次里谁最后写状态条"。
+async function loadModels() { await beat("models", SC.modelsMs, SC.modelsFail); setStatus("", false); }
+async function loadSessions() { await beat("sessions", SC.sessionsMs, SC.sessionsFail); }
+async function ensureSession() { flow.push("call:ensureSession"); }
+const API = {
+  async getSession(id) {
+    await beat("getSession", SC.historyMs, SC.historyFail);
+    return { messages: SC.messages || [] };
+  },
+  async fileBlobUrl(id) {
+    flow.push("start:file:" + id);
+    inflight += 1; if (inflight > peak) peak = inflight;
+    await wait((SC.fileMs || {})[id] || 5);
+    inflight -= 1;
+    if ((SC.fileFail || []).indexOf(id) >= 0) { flow.push("fail:file:" + id); throw new Error("thumb 404"); }
+    flow.push("end:file:" + id);
+    return "blob:" + id;
+  },
+};
+async function drive() {
+  if (SC.entry === "hydrate") {
+    const atts = SC.atts || null;
+    let threw = null;
+    try { await hydrateImageUrls(atts); } catch (e) { threw = String((e && e.message) || e); }
+    return { flow: flow, statuses: statuses, peak: peak, threw: threw,
+      urls: (atts || []).map((a) => (a.url === undefined ? null : a.url)) };
+  }
+  let threw = null, thrownStatus = null;
+  flow.push("begin");
+  try { await loadServerData(); }
+  catch (e) { threw = String((e && e.message) || e); thrownStatus = (e && e.status) || null; }
+  flow.push("settle");
+  return { flow: flow, statuses: statuses, peak: peak, threw: threw,
+    thrownStatus: thrownStatus, messages: state.messages.length, pointer: pref.sessionId };
+}
+`;
+
+const sandbox = { setTimeout, console };
+vm.createContext(sandbox);
+const script = "const SC = " + JSON.stringify(SC) + ";\n" + PREAMBLE + "\n" + realFns + "\ndrive()";
+const done = vm.runInContext(script, sandbox);
+done.then((r) => process.stdout.write(JSON.stringify(r)),
+          (e) => { console.error(e); process.exit(2); });
+"""
+
+
+def _fn_text(js: str, name: str) -> str:
+    """`async function name(...) { ... }` 整段，**带 async 前缀**。
+
+    _js_fn() 从 `function` 关键字起切，async 被切在外面——直接拿去执行会得到一个
+    含 await 的非 async 函数，node 报的是语法错，而错话会说成"harness 自己坏了"，
+    看不出是被测代码的形状变了。
+    """
+    text = _js_fn(js, name)
+    at = js.index(f"function {name}(")
+    return ("async " + text) if js[:at].endswith("async ") else text
+
+
+def _run_boot_js(scenario: dict) -> dict:
+    """在 node 里真跑仓库那份 loadServerData / restore / hydrateImageUrls。
+
+    为什么必须真跑：这次改的东西**读源码读不出结论**。"三路之间没有 await"只说明
+    写法，不说明行为——`Promise.all` 一个 reject 就立刻返回、剩下两路还在改 state
+    却再没人等，那形状在文本上完全合规，症状却是本仓最贵的那一类（界面空着且不报错）。
+    只有运行时能回答"到底谁等谁、坏一路时另外两路跑没跑完、状态条最后是谁写的"。
+    叶子（loadModels/loadSessions/ensureSession/API）在这里是假的，因为真叶子要整个
+    DOM 和整个后端；被执行的**控制流**是仓库那一份，逐字取自 _js()。
+
+    与 _run_shell_js / _run_layers_js 同理：读文件的是 node，不是本函数；交给 node 的
+    那段函数文本经 _js() 那把尺子（剥注释），执行不受影响。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    js = _js()
+    snippet = "\n".join(_fn_text(js, n) for n in
+                        ("hydrateImageUrls", "restore", "loadServerData"))
+    d = Path(tempfile.mkdtemp(prefix="boot-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_BOOT_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def _at(out: dict, tag: str) -> int:
+    assert tag in out["flow"], f"{tag} 压根没发生：{out['flow']}"
+    return out["flow"].index(tag)
+
+
+def test_the_three_boot_reads_go_out_at_the_same_time():
+    """开门那三趟（models / sessions / 历史）并发发出去，第四趟（建会话）仍排最后。
+
+    flow 是逐字的时间线：串行的写法是 start:models,end:models,start:sessions,…，
+    并发才是三个 start 连在一起。peak==3 是"同一刻在途三条"的第二种说法（万一有人
+    把排队藏进 helper 里，顺序看不出来，同时在途数瞒不住）。
+    第二趟跑的是"本机没有指针"那一路：ensureSession 必须排在 models 与 sessions 两个
+    end 之后——它读 currentProvider()（loadModels 纠正过的 pref.provider）和
+    state.sessions（loadSessions 的结果），这两样没回来就建会话，会拿错模型、
+    或把清单里已有的那条再建一遍。restore 在那一路不发请求（没指针），所以三个 start
+    只有两个，这正好也是"没指针就别多发一枪"的口径。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "sessionsMs": 30,
+                        "historyMs": 20,
+                        "messages": [{"role": "user"}, {"role": "assistant"}]})
+    assert out["threw"] is None, out
+    assert out["flow"][1:4] == ["start:models", "start:sessions", "start:getSession"], \
+        f"三路不是同时发出去的：{out['flow']}"
+    assert out["peak"] == 3, f"同一刻在途的不是三条（退回串行就只剩一条）：{out['peak']}"
+    assert out["messages"] == 2, f"历史读回来了却没落进 state：{out}"
+
+    fresh = _run_boot_js({"modelsMs": 40, "sessionsMs": 20})
+    assert fresh["flow"][-2:] == ["call:ensureSession", "settle"], fresh["flow"]
+    for end in ("end:models", "end:sessions"):
+        assert _at(fresh, "call:ensureSession") > _at(fresh, end), \
+            f"建会话抢在 {end} 前面了：那一趟读的还是空清单"
+
+
+def test_an_existing_pointer_skips_creating_a_session():
+    """本机已经有指针时不该多发那一枪 POST——省一趟隧道，也省得把已有会话重置成空。
+
+    ensureSession 的判据 `!pref.sessionId` 由 loadServerData 在批次**之后**才评：
+    那时 restore() 已经跑完，它可能因为服务端回 404 把指针归零了（见 test_a_pointer_…），
+    所以"要不要新建"用的不是开机那一刻的本机值，而是查过历史之后的值。
+    """
+    kept = _run_boot_js({"sessionId": "s-1", "modelsMs": 10, "sessionsMs": 10,
+                         "historyMs": 10, "messages": [{"role": "user"}]})
+    assert "call:ensureSession" not in kept["flow"], kept["flow"]
+    assert kept["messages"] == 1 and kept["pointer"] == "s-1", kept
+
+
+def test_a_failed_boot_read_waits_for_the_others_before_it_reports():
+    """并行之后最贵的一种坏法：一路先失败，另外两路还在跑却没人等——boot 拿着半空的
+    状态渲染完，晚到的历史填进 state 时已经没人重画，界面就"安静地空着"。
+
+    所以这里等的是 Promise.allSettled（全部落定）而不是 Promise.all（第一个坏消息）。
+    判据是时间线的形状：settle 必须是**最后一格**——换成 Promise.all，fail:models
+    一落地（这一路故意最快）settle 就挤到中间去，end:sessions / end:getSession 掉在
+    它后面，这条红。历史那一路照样写进了 state（不回滚：谁坏了说谁，其余照旧露出来）；
+    抛给 boot 的那个 reason 是**按数组顺序**的第一个失败（第二趟：sessions 先在时间里
+    坏掉，报的仍是 models，与旧的串行行为一致），于是 needsAuth(e) 那个唯一出口原样不动。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 5, "modelsFail": 503,
+                        "sessionsMs": 40, "historyMs": 30,
+                        "messages": [{"role": "user"}, {"role": "assistant"}]})
+    assert out["flow"][-1] == "settle", f"有请求掉在 settle 之后：{out['flow']}"
+    assert "end:sessions" in out["flow"] and "end:getSession" in out["flow"], out["flow"]
+    assert _at(out, "end:getSession") < _at(out, "settle"), out["flow"]
+    assert out["messages"] == 2, f"另一路失败却把已读回的历史丢了：{out}"
+    assert out["thrownStatus"] == 503 and "models" in out["threw"], out
+
+    both = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "modelsFail": 503,
+                         "sessionsMs": 5, "sessionsFail": 500, "historyMs": 10})
+    assert both["thrownStatus"] == 503, \
+        f"报的是**时间上**第一个坏消息，不是数组顺序那个：{both['thrownStatus']}"
+
+
+def test_a_broken_history_read_still_leaves_its_error_line_on_the_screen():
+    """历史读失败时那句红字必须是**最后**写下的，否则等于什么都没发生。
+
+    并发之后状态条是谁后回来谁抢：loadModels 成功时要 setStatus("") 擦掉上一轮的旧
+    红字，如果 restore 在自己的 catch 里就地写"会话加载失败"、而 models 慢一步回来，
+    那句实话就被擦掉了——症状正是"聊天区空着、也不报错"。所以 restore 只把错交出来，
+    写由 loadServerData 在三路都落定之后做。这里故意让历史最快（5ms）、models 最慢
+    （40ms）：谁在批内就地写，谁就红。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 40, "sessionsMs": 20,
+                        "historyMs": 5, "historyFail": 500})
+    assert out["threw"] is None, f"restore 不该把失败抛出去（那会盖过别的路的实话）：{out}"
+    assert out["statuses"] and out["statuses"][-1].startswith("会话加载失败"), \
+        f"最后写在状态条上的不是那句实话：{out['statuses']}"
+    assert "" in out["statuses"], f"loadModels 那句擦除没发生，测例自己坏了：{out['statuses']}"
+
+
+def test_a_pointer_the_server_no_longer_knows_still_becomes_a_new_chat():
+    """指针指的会话在服务端没了：归零指针、清屏、按"新对话"补一条——不许留一句错误。
+
+    404 这一路跨过了并发的那个边界："要不要新建"发生在批次之后，restore 的 404 处理
+    才顺得下来。少这一步，用户守着一个空聊天区，发送键点下去还在往那个已经不存在的
+    id 上写。状态条上只该有 loadModels 那句擦除（""），没有任何红色错误。
+    """
+    out = _run_boot_js({"sessionId": "gone", "modelsMs": 10, "sessionsMs": 10,
+                        "historyMs": 10, "historyFail": 404})
+    assert out["threw"] is None and out["statuses"] == [""], out
+    assert out["pointer"] == "" and out["messages"] == 0, out
+    assert _at(out, "call:ensureSession") > _at(out, "fail:getSession"), \
+        "补建新会话抢在\"这条指针已经作废\"之前：它建完立刻又被下一句归零"
+
+
+def test_a_401_from_the_history_read_still_reaches_the_auth_exit():
+    """401 仍然走 needsAuth 那道出口，而不是被并发改成一句普通红字。
+
+    boot 的那个出口决定"露登录层还是露外壳"，几路失败都得汇到它那儿。restore 把错误
+    对象交出来（不自己吞掉也不自己写条），needsAuth 由批次之后统一调一次。
+    """
+    out = _run_boot_js({"sessionId": "s-1", "modelsMs": 10, "sessionsMs": 10,
+                        "historyMs": 5, "historyFail": 401})
+    assert "needsAuth:401" in out["flow"], out["flow"]
+    assert not [s for s in out["statuses"] if s.startswith("会话加载失败")], out["statuses"]
+
+
+def test_history_thumbnails_are_fetched_at_once_and_land_on_their_own_row():
+    """N 张图 = N 趟串行往返那段（每趟 300~430ms）改成同时发，但每张仍写自己那条 url。
+
+    延迟是**反序**的（a1 最慢、a3 最快）：并发时到达顺序与请求顺序相反，而三条 url
+    必须还是各归各的——"先收齐再整批赋同一个值"那种写法在这里就红了。
+    三个 start 连排管"没排队"，peak==3 管"不是靠嵌套回调装出来的并发"。
+    """
+    out = _run_boot_js({"entry": "hydrate", "atts": [
+        {"kind": "image", "id": "a1"}, {"kind": "image", "id": "a2"},
+        {"kind": "image", "id": "a3"}], "fileMs": {"a1": 30, "a2": 20, "a3": 10}})
+    assert out["flow"][:3] == ["start:file:a1", "start:file:a2", "start:file:a3"], out["flow"]
+    assert out["peak"] == 3, out
+    assert out["urls"] == ["blob:a1", "blob:a2", "blob:a3"], \
+        f"到达顺序反了就把 url 串错了（每张必须落回自己那条）：{out}"
+    assert out["threw"] is None, out
+
+
+def test_one_broken_thumbnail_costs_only_that_thumbnail():
+    """原来那句 catch 的语义是"这一张取不到就只显示文件名"，不许变成"整批放弃"。
+
+    a2 抛错，a1/a3 仍各自拿到 url、函数本身不 reject：catch 挂在每张自己的链上。
+    把 catch 挪到整批（Promise.all 外面套一个 try），这一条立刻红——那次的代价不是
+    少一张图，是历史里所有缩略图一起没了而没人说话。
+    """
+    out = _run_boot_js({"entry": "hydrate", "fileFail": ["a2"], "fileMs": {"a2": 5},
+                        "atts": [{"kind": "image", "id": "a1"}, {"kind": "image", "id": "a2"},
+                                 {"kind": "image", "id": "a3"}]})
+    assert out["threw"] is None, f"一张坏图把整批带崩了：{out}"
+    assert out["urls"] == ["blob:a1", None, "blob:a3"], \
+        f"坏的那一张连累了别人（或它自己没被跳过）：{out}"
+
+
+def test_hydration_still_asks_only_for_missing_images():
+    """非图片、已经有 url 的、以及压根没有附件的历史：一枪都不该发。
+
+    这条与并发无关，是原来 if 里那半句的语义——重排成 filter/map 时最容易顺手把条件
+    丢掉，症状是每次切会话都把已有的图重新下载一遍（走隧道就是几百毫秒一张）。
+    """
+    out = _run_boot_js({"entry": "hydrate", "atts": [
+        {"kind": "text", "id": "t1"}, {"kind": "image", "id": "a2", "url": "blob:cached"},
+        {"kind": "image", "id": "a3"}]})
+    assert [f for f in out["flow"] if f.startswith("start:file:")] == ["start:file:a3"], out["flow"]
+    assert out["urls"] == [None, "blob:cached", "blob:a3"], out
+    empty = _run_boot_js({"entry": "hydrate"})
+    assert empty["threw"] is None, f"没有附件的历史直接把整次 restore 带崩了：{empty['threw']}"
+    assert empty["flow"] == [] and empty["urls"] == [], empty
+
+
+def test_the_boot_chain_does_not_slip_back_into_one_await_per_request():
+    """文本锁兜底：跑不了 node 的机器上（那几条会 skip）也得能抓住"退回串行"。
+
+    行为锁管"并发得真成立"，这把尺子管"三路之间不许再横着放 await、状态条不许有人
+    在批内就地写"。判的是 _js()（已剥注释），所以"把 await 藏回注释里"喂不绿它。
+    """
+    js = _js()
+    body = _function_body(js, "loadServerData")
+    for name in ("loadModels", "loadSessions", "restore"):
+        assert f"await {name}()" not in body, f"{name}() 又变成单独一等"
+    marks = [body.index(f"{n}(") for n in ("loadModels", "loadSessions", "restore")]
+    assert "await" not in body[min(marks):max(marks)], \
+        "三路之间横着 await：写在同一个数组里也是排队"
+    assert "Promise.allSettled" in body, "退回 Promise.all 了：一路失败就没人等其余两路"
+    assert re.search(r"\bthrow\b", body), "没人把失败交回 boot 那个 needsAuth 出口"
+    assert body.index("Promise.allSettled") < body.index("ensureSession"), \
+        "建会话不再排最后：它读的是这三路的产物"
+    assert "会话加载失败" in body, "restore 交出来的错误没人写了（空聊天区 + 一句实话那条）"
+
+    hy = _function_body(js, "hydrateImageUrls")
+    assert "Promise.all" in hy and "await API.fileBlobUrl" not in hy, "缩略图又一张张 await 了"
+    assert hy.count("await") == 1, f"每张图自己 await 一次就是串行：{hy}"
+    assert "setStatus" not in _function_body(js, "restore"), \
+        "restore 又在批内就地写状态条：慢一步回来的 loadModels 会把它擦掉"
+
+
+def test_a_stale_page_kicks_itself_once_and_only_once():
+    """HTML 允许晚 30 秒，代价由这段兜：旧骨架配新脚本时自己跳一次，跳完就停。
+
+    三条一起钉，因为漏哪一条症状都不一样：
+    - 判据不许在"任何一边拿不到"时瞎跳（没登录、或这份 HTML 是上一次部署留下的，
+      压根没有 window.__ASSETS__）——那会让人反复回到登录页；
+    - 问的那一个文件必须是刻意不缓存的 `sw.js`，问 `/app/` 等于问缓存要答案；
+    - 已经为"服务端那一版"跳过一次就不许再跳，否则对不上就一直跳，比原来的空白页更糟。
+    """
+    js = _js()
+    stale = _function_body(js, "staleBuild")
+    assert "Boolean(local)" in stale and "Boolean(server)" in stale, \
+        "判据不再要求两边都有值：拿不到版本信息的时候它会瞎跳"
+    assert "!==" in stale, "两边相等也算旧：那每次开页面都要重载一次"
+
+    check = _function_body(js, "checkBuild")
+    assert 'fetch("sw.js' in check, "不问 sw.js 了：改问一个会被缓存的东西，等于问缓存要答案"
+    assert 'cache: "no-store"' in check, "没关缓存：这一问可能又拿回旧的那一份"
+    assert "res.text()" in check, "响应不按文本读：正则取不到水印，对账静默失效"
+    assert "const V = " in check, "读的不是 sw.js 里那一个水印：它换了写法就悄悄不匹配了"
+    assert "jumped === live" in check, "没有止损点：对不上就一直重载"
+    assert "location.replace" in check, "跳不动了：旧页面还是留在屏幕上"
+
+    boot = _function_body(js, "boot")
+    assert "checkBuild(window.__ASSETS__)" in boot, \
+        "boot 不再对账：改版后那 30 秒的旧页面没人管了"

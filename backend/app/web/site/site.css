@@ -69,7 +69,6 @@ html[data-theme="dark"] {
   --cta: linear-gradient(115deg,#2fbf8f 0%,#2fae95 42%,#6c7bff 100%);
   --cta-ink: #062518;
   --seam: linear-gradient(90deg,rgba(47,191,143,0),rgba(47,191,143,.45) 22%,rgba(108,123,255,.4) 55%,rgba(47,191,143,0));
-  --sheen: rgba(255,255,255,.42);
   color-scheme: dark;
 }
 html[data-theme="light"] {
@@ -100,7 +99,6 @@ html[data-theme="light"] {
   --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
   --cta-ink: #ffffff;
   --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
-  --sheen: rgba(255,255,255,.6);
   color-scheme: light;
 }
 /* 脚本没跑起来时（禁用 JS、或首帧前）也按系统偏好选色，别硬吃深色。
@@ -133,7 +131,6 @@ html[data-theme="light"] {
     --cta: linear-gradient(115deg,#0a7d5e 0%,#0b7a76 52%,#5566f0 100%);
     --cta-ink: #ffffff;
     --seam: linear-gradient(90deg,rgba(15,157,118,0),rgba(15,157,118,.28) 22%,rgba(85,102,240,.22) 55%,rgba(15,157,118,0));
-    --sheen: rgba(255,255,255,.6);
     color-scheme: light;
   }
 }
@@ -187,15 +184,6 @@ body::after {
   background-image: var(--grain); background-size: 180px 180px;
   opacity: var(--grain-a);
 }
-
-/* ---------- 阅读进度 ---------- */
-.progress {
-  position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 40;
-  transform: scaleX(0); transform-origin: 0 50%; will-change: transform;
-  background: linear-gradient(90deg, var(--brand), var(--brand-3) 45%, var(--brand-2));
-  box-shadow: 0 0 14px var(--glow);
-}
-html:not(.js) .progress { display: none; }   /* 没脚本就没有数值，别留一根空杠 */
 
 h1, h2, h3 { margin: 0; font-weight: 700; line-height: 1.22; text-wrap: balance; }
 h1, h2 { letter-spacing: -.022em; }
@@ -296,7 +284,9 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 
 /* ---------- 首屏 ---------- */
 .hero, section, footer { max-width: var(--maxw); margin: 0 auto; padding: 56px 20px; }
-.hero { padding-top: 84px; padding-bottom: 64px; position: relative; }
+/* hero 的下边距单独收小：它和下一节的 padding-top 会叠在一起，
+   两条各 44~64px 时首屏正文下面就是一条读起来像"内容没加载"的空带 */
+.hero { padding-top: 84px; padding-bottom: 28px; position: relative; }
 /* 标题后面那团光：负 z 让它待在文字之下、氛围光之上。
    宽度用 left/right 撑在 hero 自己的盒子里，不用 116vw——窄屏下 vw 会把光斑
    顶出视口，多出来的那几十像素就是手机上的横向抖动。 */
@@ -306,20 +296,6 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
   background: radial-gradient(58% 52% at 50% 42%, var(--glow) 0%, var(--glow-0) 70%);
   opacity: .95;
 }
-.eyebrow {
-  display: inline-flex; align-items: center; gap: 8px; margin: 0 0 18px; padding: 6px 14px 6px 11px;
-  font-size: var(--step--1); letter-spacing: .08em; color: var(--brand);
-  background: linear-gradient(120deg, color-mix(in srgb, var(--brand) 18%, transparent), color-mix(in srgb, var(--brand-2) 12%, transparent));
-  border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent);
-  border-radius: var(--radius-pill); box-shadow: inset 0 1px 0 var(--hairline);
-}
-.eyebrow::before {
-  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
-  background: radial-gradient(circle at 35% 35%, var(--brand-3), var(--brand));
-  box-shadow: 0 0 10px var(--glow);
-  animation: pulse 3.6s var(--ease) infinite alternate;
-}
-@keyframes pulse { from { opacity: .55; transform: scale(.86); } to { opacity: 1; transform: scale(1.06); } }
 .lede { font-size: var(--step-1); color: var(--ink-soft); max-width: 26em; margin: 0 0 30px; line-height: 1.7; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; }
 .btn {
@@ -338,29 +314,16 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
   box-shadow: inset 0 1px 0 var(--hairline), var(--lift);
 }
 .btn:active { transform: translateY(0); }
-/* 主 CTA：渐变底慢慢走位（呼吸），另加一道掠光。两者都是纯装饰，动画关掉不影响文字 */
 .btn.primary {
-  background: var(--cta); background-size: 220% 220%; background-position: 8% 50%;
+  background: var(--cta);
   border-color: color-mix(in srgb, var(--brand) 70%, transparent);
   color: var(--cta-ink);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 10px 30px -12px var(--glow);
-  animation: cta-drift 12s var(--ease) infinite alternate;
-}
-@keyframes cta-drift {
-  from { background-position: 6% 42%; }
-  to   { background-position: 96% 60%; }
-}
-.btn.primary::after {
-  content: ""; position: absolute; inset: 0; z-index: -1; opacity: .45;
-  background: linear-gradient(100deg, rgba(255,255,255,0) 26%, var(--sheen) 46%, rgba(255,255,255,0) 66%);
-  background-size: 240% 100%; background-position: 190% 0;
-  transition: background-position var(--dur-3) var(--ease);
 }
 .btn.primary:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.32), 0 16px 40px -14px var(--glow); }
-.btn.primary:hover::after { background-position: -70% 0; }
 .note { color: var(--ink-soft); font-size: var(--step--1); max-width: var(--measure); }
 
-/* ---------- 区块：编号眉标 + 玻璃卡片 ---------- */
+/* ---------- 区块：玻璃卡片 ---------- */
 section { position: relative; }
 section > p { max-width: var(--measure); }
 section:nth-of-type(even) { background: var(--band); max-width: none; }
@@ -371,18 +334,6 @@ section:nth-of-type(even)::before, section:nth-of-type(even)::after {
 }
 section:nth-of-type(even)::before { top: 0; }
 section:nth-of-type(even)::after { bottom: 0; }
-/* 眉标是纯 CSS 计数器：没有 JS 也在，且不往 HTML 里塞装饰文字 */
-section { counter-increment: sec; }
-section > h2 { display: flex; align-items: baseline; gap: 12px; }
-section > h2::before {
-  content: counter(sec, decimal-leading-zero);
-  flex: 0 0 auto; font-size: var(--step--1); font-weight: 600; letter-spacing: .1em;
-  font-variant-numeric: tabular-nums; color: var(--brand);
-  padding: 4px 10px; border-radius: var(--radius-pill);
-  background: linear-gradient(140deg, color-mix(in srgb, var(--brand) 20%, transparent), color-mix(in srgb, var(--brand-2) 14%, transparent));
-  border: 1px solid color-mix(in srgb, var(--brand) 24%, transparent);
-  box-shadow: inset 0 1px 0 var(--hairline);
-}
 .cards {
   list-style: none; padding: 0; margin: 0; display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -394,12 +345,6 @@ section > h2::before {
   box-shadow: inset 0 1px 0 var(--hairline), var(--card-shadow);
   transition: transform var(--dur-2) var(--ease-out), border-color var(--dur-2), box-shadow var(--dur-2) var(--ease-out);
 }
-.cards li::after {
-  /* 追光：位置由 site.js 写进 --mx/--my，鼠标在哪儿光就在哪儿。默认值保证 JS 不在时也像个正常 hover */
-  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-  background: radial-gradient(200px 200px at var(--mx, 50%) var(--my, 0%), var(--glow), var(--glow-0) 62%);
-  opacity: 0; transition: opacity var(--dur-2) var(--ease);
-}
 @supports ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
   .cards li { backdrop-filter: blur(10px) saturate(140%); -webkit-backdrop-filter: blur(10px) saturate(140%); }
 }
@@ -408,9 +353,8 @@ section > h2::before {
   border-color: color-mix(in srgb, var(--brand) 45%, var(--line));
   box-shadow: inset 0 1px 0 var(--hairline), var(--lift), 0 0 0 1px color-mix(in srgb, var(--brand) 12%, transparent);
 }
-.cards li:hover::after { opacity: 1; }
 .cards p { margin: 0; color: var(--ink-soft); font-size: var(--step--1); line-height: 1.85; max-width: 40em; }
-/* 三步上手：编号自己数（CSS counter，不靠 JS、不占文案），圆牌和区块眉标同一套语气 */
+/* 三步上手：编号自己数（CSS counter，不靠 JS、不占文案），圆牌用同一套语气 */
 .steps { list-style: none; padding-left: 0; counter-reset: st; display: grid; gap: 14px; max-width: var(--measure); }
 .steps li { position: relative; padding-left: 48px; line-height: 1.85; counter-increment: st; }
 .steps li::before {
@@ -425,61 +369,29 @@ section > h2::before {
 }
 footer ul { padding-left: 20px; }
 
-/* ---------- 轮播 ---------- */
-/* 无 JS 时四张竖排全露出来；脚本一跑就加 html.js 换成单张切换。 */
-.carousel { margin-top: 8px; position: relative; }
-/* 光斑收在机身周围，不铺满整节：浅色下铺满就是一块蓝渍 */
-.carousel::before {
-  content: ""; position: absolute; z-index: -1; pointer-events: none;
-  inset: 10% 20% 24%;
-  background: radial-gradient(46% 46% at 50% 46%, var(--bloom), var(--glow-0) 72%);
+/* ---------- 实拍：四张一次全铺 ---------- */
+/* 原来是轮播：一次一张，配前后键、指示点、自动播、横滑、键盘。四张静态实拍没有
+   非藏起来不可的理由，那套机器反而要多养一段 JS 和一条「自动播必须能停」的无障碍
+   要求。现在桌面四列、手机两列，一眼看全，也没有任何东西在自己动。 */
+.shots {
+  margin-top: 8px; display: grid; gap: 26px 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.stage { display: grid; gap: 18px; justify-items: center; }
-.slide { margin: 0; text-align: center; }
+@media (min-width: 760px) {
+  .shots { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 30px 18px; }
+}
+.shot { margin: 0; text-align: center; }
 figcaption { font-size: var(--step--1); color: var(--ink-soft); margin-top: 14px; letter-spacing: .01em; }
-/* clamp 而不是 min：min(240px, 62vw) 在窄视口里会一路缩到看不见，手机外框得有下限。
-   margin auto 是补的：外框是块级 div，text-align:center 管不着它，
-   不写这句机身贴左、说明文字居中，两条中线对不上。 */
+/* 外框跟着格子收缩、最宽 262px；margin auto 是必须的：外框是块级 div，
+   text-align:center 管不着它，不写这句机身和说明文字两条中线对不上。 */
 .phone {
-  width: clamp(176px, 62vw, 262px); aspect-ratio: 9 / 19.5; border-radius: 34px; overflow: hidden;
+  width: min(100%, 262px); aspect-ratio: 9 / 19.5; border-radius: 34px; overflow: hidden;
   padding: 5px; margin: 0 auto;
   border: 1px solid color-mix(in srgb, var(--brand) 16%, var(--line));
   background: linear-gradient(158deg, color-mix(in srgb, var(--ink) 26%, transparent), color-mix(in srgb, var(--surface) 70%, transparent) 38%, color-mix(in srgb, var(--ink) 14%, transparent));
   box-shadow: var(--shadow), inset 0 1px 0 var(--hairline);
-  transition: box-shadow .55s var(--ease-out), transform .55s var(--ease-out);
 }
 .phone img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 29px; }
-.controls { display: none; align-items: center; justify-content: center; gap: 10px; margin-top: 22px; }
-.dots { display: flex; gap: 8px; align-items: center; }
-
-/* 边缘那道 mask 试过又删了：Blink 下它会把整个 stage 连内容一起遮没
-   （实拍区直接空白），而离屏那张本来就已经被 opacity 压到 .28，不需要再羽化。 */
-/* 位移切页而不是原生滚动：overflow:hidden 之下 scroll-snap 是死属性，留着只会
-   让下一个人以为这块能手滑。触摸横滑由 site.js 监听 touch 实现。 */
-html.js .stage { grid-auto-flow: column; grid-auto-columns: 100%; display: flex; overflow: hidden;
-  transition: transform .55s var(--ease-out); }
-/* 实拍图一律不透明。原来给非当前张压到 .28 + scale(.93) 是想做"两侧淡出"，
-   但手机上轨道窄、相邻两张会露边，四张里三张是半透明的，整块看着就像没加载出来
-   ——他第一次在手机上看就是这个反馈。轮播本来就靠 translateX 把别的张推到视口外，
-   淡不淡出都不影响"当前这张"，所以直接取消：图片是内容，不是装饰层。 */
-html.js .slide { flex: 0 0 100%; }
-html.js .slide.is-active { opacity: 1; transform: none; }
-html.js .slide.is-active .phone { box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--brand) 20%, transparent), inset 0 1px 0 var(--hairline); }
-html.js .slide:not(.is-active) img { pointer-events: none; }
-html.js .controls { display: flex; }
-/* 指示点：热区 26x44，看得见的 9px 小药丸交给 ::before。
-   直接给 button 写 9x9 是手机上按不中的——热区比视觉大不丢人，按不到才丢人。 */
-.dot { position: relative; width: 26px; height: 44px; padding: 0; border: 0; background: none;
-  display: grid; place-items: center; cursor: pointer; }
-.dot::before { content: ""; width: 9px; height: 9px; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--ink) 22%, transparent);
-  box-shadow: inset 0 1px 0 var(--hairline);
-  transition: width var(--dur-2) var(--ease-out), background-color var(--dur-2), box-shadow var(--dur-2); }
-.dot:hover::before { background: color-mix(in srgb, var(--ink) 45%, transparent); }
-.dot[aria-selected="true"]::before {
-  width: 26px; background: linear-gradient(90deg, var(--brand), var(--brand-2));
-  box-shadow: 0 0 12px var(--glow);
-}
 
 /* ---------- 滚动渐显 ---------- */
 html.js .reveal { opacity: 0; transform: translateY(16px); }
@@ -541,8 +453,8 @@ footer::before {
 /* ---------- 窄屏与降低动效 ---------- */
 @media (max-width: 420px) {
   .hero, section, footer { padding: 44px 16px; }
+  .hero { padding-bottom: 24px; }
   .cards li { padding: 18px; }
-  section > h2 { gap: 9px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -554,7 +466,6 @@ footer::before {
        那比不动更糟——先把迭代次数钉死，再把它们整个关掉，只留静态渐变。 */
     animation-iteration-count: 1 !important;
   }
-  html::before, body::before, .btn.primary, .eyebrow::before { animation: none !important; }
+  html::before, body::before { animation: none !important; }
   html.js .reveal { opacity: 1; transform: none; transition: none !important; }
-  html.js .stage, html.js .slide { transition: none !important; }
 }

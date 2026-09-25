@@ -138,3 +138,69 @@ def test_both_chat_paths_omit_the_tools_key_when_there_are_no_tools():
     assert "if self.tools_schema:" in pipeline, "非流式又无条件传 tools 了"
     assert "if tools:" in streaming, "流式那条的守卫被改掉了"
     assert 'tool_choice' in pipeline and 'tool_choice' in streaming
+
+
+# ---------- 4. 搜索源探测问的是哪一件事（2026-09-22 换源时改的口径） ----------
+
+def test_the_search_probe_asks_the_same_question_the_tool_answers(monkeypatch):
+    """探测必须调工具用的那个函数，不能自己另算一份"通不通"。
+
+    原来探的是 `socket.create_connection(host, 443)`——那是比"工具能用"弱得多的一条判据：
+    TCP 连得上不代表源站肯给结果、更不代表我们解析得出来。换成爬搜索结果页之后这条
+    分叉一定会出现（TCP 永远绿，页面结构一改就静默变空），症状正是本文件开头写的那件
+    事：模型看见工具、调用它、拿回一句空话再硬答。
+    """
+    from app.tools import web_search
+
+    def stale():
+        availability._state["value"] = None
+        availability._state["checked_at"] = 0.0
+
+    def verdict():
+        # 读 _state 而不是 search_reachable()：本文件那条 autouse 夹具把这个读者钉成了
+        # 恒真（其余用例只关心注册表怎么筛），而这里要验的恰恰是探测自己算出了什么。
+        # 公开读者的那条路另有 test_web_search_follows_the_probe 在钉。
+        return availability._state["value"]
+
+    stale()
+    monkeypatch.setattr(web_search, "search", lambda *a, **k: [])
+    availability._refresh()
+    assert verdict() is False, "源解析不出结果，探测还说通"
+
+    stale()
+    monkeypatch.setattr(web_search, "search",
+                        lambda *a, **k: [{"title": "t", "url": "https://e/x", "snippet": "s"}])
+    availability._refresh()
+    assert verdict() is True, "源明明给得出结果，探测说不通"
+    assert availability.REFRESH_SECONDS >= 600, \
+        f"每 {availability.REFRESH_SECONDS}s 去敲一次源站，探测本身变成了流量源"
+
+
+def test_the_probe_does_not_keep_its_own_copy_of_the_source_list(monkeypatch):
+    """**反向锁**：availability.py 里不许再出现自己连网络的代码，也不许留着旧源域名。
+
+    探测口径改完之后，`SEARCH_PROBE_ENDPOINTS` 与 `socket` 就是第二份真相：它记着
+    "我们用什么搜索"，而真正决定这件事的是 web_search.SEARCH_URL。留着的那天，
+    换源的人只会去改 web_search，探测则继续对着一个早就不用的域名点头。
+    """
+    src = Path(__file__).resolve().parents[1].joinpath("app/tools/availability.py").read_text(encoding="utf-8")
+    for gone in ("socket.create_connection", "duckduckgo", "SEARCH_PROBE_ENDPOINTS", "import socket"):
+        assert gone not in src, f"探测里还留着自己那一套：{gone}"
+
+
+def test_a_real_successful_search_postpones_the_next_probe(monkeypatch):
+    """用户真搜成功一次 = 源此刻是好的，别再为这件事去敲源站。
+
+    没有这一条，探测就是"每 15 分钟一次 + 与用量无关"的空转：闲置的服务也在替所有
+    用户攒请求量，而这台机器的出口 IP 是和朋友们共用的。
+    """
+    from app.tools import web_search
+
+    calls = []
+    monkeypatch.setattr(web_search, "search", lambda *a, **k: calls.append(1) or [])
+    availability._state["value"] = None
+    availability._state["checked_at"] = 0.0
+    availability.note_search_ok()
+    assert availability._state["value"] is True, "记的是这次成功，不是默认值"
+    availability._refresh()
+    assert not calls, f"刚成功过一次还是又去探了一遍：{len(calls)} 次"

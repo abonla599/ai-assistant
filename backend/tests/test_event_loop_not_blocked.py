@@ -48,6 +48,12 @@ NETWORK_BOUND_ENDPOINTS = [
     "/v1/uploads/{upload_id}/file",
     # 反馈：全表扫消息 + 整份 feedback.json 读写 + chroma 逐条改权重 + 再整读一遍分析
     "/v1/feedback",
+    # 官网代取 APK：一次点击要朝 GitHub 搬一百来 KB（超时上限 20s），
+    # 写成 async 就是拿整台服务换这一个下载。
+    "/site/android.apk",
+    # 壳「检查更新」的透传端点：与 /v1/release/latest 共用同一份快照，
+    # 缓存过期那次请求同样会朝 GitHub 走一趟（上限 5s）。
+    "/v1/update/info",
 ]
 
 # 上游卡住的模拟时长，与 /health 的容忍上限。上限比"循环被占住"的任何形状低一个
@@ -187,3 +193,131 @@ def test_nobody_turns_off_certificate_verification_process_wide():
 
     src = Path(__file__).resolve().parents[1].joinpath("app/main.py").read_text(encoding="utf-8")
     assert "_create_unverified_context" not in src, "全局关掉证书校验的那行又回来了"
+
+
+def _real_stream_chat():
+    """拿回真的 `stream_chat`：conftest 的 autouse 夹具把它换成了测试桩。
+
+    reload 用真函数覆盖那个模块属性；端点走的是 `streaming.stream_chat(...)`，在调用时
+    查名字，所以覆盖之后跑的就是产品里那段生成器。别的用例各自拿自己的夹具补丁。
+    """
+    import importlib
+
+    import app.core.streaming as mod
+
+    importlib.reload(mod)
+    return mod
+
+
+def test_a_stalled_search_does_not_freeze_the_loop(monkeypatch):
+    """搜索是本仓第一个"会自己发网络请求的工具"，所以把它放回两种驱动方式下各跑一次。
+
+    为什么不是再加一条静态锁：`stream_chat` 必须是同步生成器那条已经由
+    test_stream_body_iterator_is_sync_so_starlette_threadpools_it 钉着，改成 async 当场就红。
+    这条钉的是**症状**：一次慢搜索（最坏走满源层超时）期间，事件循环还得能干活。
+
+    同一个生成器跑两遍，只有一遍是生产里的形状：
+      线程池驱动（Starlette 对同步生成器做的事）→ 循环照常跳；
+      在循环上直接 next()（谁把它改成 async 生成器之后的形状）→ 循环整个冻住。
+    第二遍是这条锁自己的"不许恒真"检查：要是连在循环上 next() 都跳得动，那这个计数器
+    根本没在量东西，上面那条绿也说明不了任何事。
+    """
+    import asyncio
+    import threading
+    import types
+
+    from starlette.concurrency import iterate_in_threadpool
+
+    from app.tools import web_search as ws
+
+    mod = _real_stream_chat()
+    started = threading.Event()
+
+    def slow_search(query, max_results=3):
+        started.set()
+        time.sleep(STALL_SECONDS)
+        return [{"title": "标题", "url": "https://ex/x", "snippet": "摘要"}]
+
+    monkeypatch.setattr(ws, "search", slow_search)
+
+    def _chunk(content=None, tool_call=None):
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                delta=types.SimpleNamespace(content=content, tool_calls=tool_call))],
+            usage=None)
+
+    def _tool_call():
+        fn = types.SimpleNamespace(name="web_search", arguments='{"query": "西安 天气"}')
+        return [types.SimpleNamespace(index=0, id="call_1", function=fn)]
+
+    class _Completions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:                       # 第一轮：模型要调工具
+                return iter([_chunk(tool_call=_tool_call())])
+            return iter([_chunk(content="答完了")])    # 第二轮：只回文本，生成器收尾
+
+    # 每次 build_client 都给一个新的 _Completions：计数器必须是"每遍各一次"，
+    # 否则第二遍驱动拿到的是 calls=2，直接回文本、根本不调工具，那条"不许恒真"
+    # 的检查就成了空测（我第一次就是这么写错的）。
+    monkeypatch.setattr(mod, "build_client",
+                        lambda provider: types.SimpleNamespace(
+                            chat=types.SimpleNamespace(completions=_Completions())))
+
+    def _make_gen():
+        return mod.stream_chat(
+            "deepseek-chat", [{"role": "user", "content": "查天气"}],
+            tools=[{"type": "function", "function": {"name": "web_search"}}])
+
+    async def drive(with_threadpool):
+        """用指定方式把生成器抽干，同时数事件循环在此期间跳了多少拍。"""
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        async def on_the_loop(gen):          # 回归形状：next() 直接压在循环上
+            out = []
+            it = iter(gen)
+            while True:
+                await asyncio.sleep(0)
+                try:
+                    out.append(next(it))
+                except StopIteration:
+                    return out
+
+        gen = _make_gen()
+        # iterate_in_threadpool 在 starlette 0.40 里是 async **generator** 函数，
+        # 调它得到的是异步生成器而不是协程，所以两边都包一层抽干它的协程。
+        async def via_threadpool():
+            async for _ in iterate_in_threadpool(gen):
+                pass
+
+        pump = asyncio.ensure_future(via_threadpool() if with_threadpool
+                                     else on_the_loop(gen))
+        tick = asyncio.ensure_future(ticker())
+        await asyncio.sleep(0.6)             # 此刻搜索应该正陷在 sleep 里
+        seen = ticks
+        await pump
+        tick.cancel()
+        return seen
+
+    started.clear()
+    off_loop = asyncio.run(drive(True))
+    assert started.is_set(), "前提没成立：搜索根本没被调到，整段是空测"
+    assert off_loop >= 5, (
+        f"工具在线程池里跑，循环却只跳了 {off_loop} 拍：慢搜索把事件循环占住了，"
+        f"这就是线上 524 的形状")
+
+    started.clear()
+    on_loop = asyncio.run(drive(False))
+    assert started.is_set(), "前提没成立：第二种驱动方式没走到搜索"
+    assert on_loop < 5, (
+        f"在事件循环上直接 next() 也只跳了 {on_loop} 拍，说明这个计数器不成立，"
+        "上面那条断言就成了空锁——换个量法")

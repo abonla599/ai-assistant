@@ -104,12 +104,18 @@ class _TaskStore(dict):
     """
 
     def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        _flush()
+        # 改表与落盘必须在同一把锁里（审查 #12）：_flush 持锁遍历 items()，
+        # 旧写法改表却在锁外——两个编排线程同时"放进存储"，正读表的那个
+        # 就能撞上 dictionary changed size during iteration。锁是 RLock，
+        # _flush 再进一次不成问题。
+        with _lock:
+            super().__setitem__(key, value)
+            _flush()
 
     def __delitem__(self, key):
-        super().__delitem__(key)
-        _flush()
+        with _lock:
+            super().__delitem__(key)
+            _flush()
 
 
 task_store = _TaskStore()
@@ -127,6 +133,9 @@ def _write_unlocked() -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        # replace 原子不等于落盘：fsync 之后 replace，重启恢复才有真材实料。
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -173,11 +182,13 @@ def tasks_of(user_id: str) -> List[Task]:
 
 
 def delete_task(task_id: str) -> bool:
-    """删除任务"""
-    if task_id in task_store:
-        del task_store[task_id]
-        return True
-    return False
+    """删除任务。检查与删除同一把锁里做：分开的话，两个人同时删一个任务，
+    后一个会在 `del` 上撞 KeyError——那是一个把 True/False 说成崩溃的形状。"""
+    with _lock:
+        if task_id in task_store:
+            del task_store[task_id]
+            return True
+        return False
 
 
 restore()

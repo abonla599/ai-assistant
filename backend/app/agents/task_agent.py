@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # backend 目录
 import json
 from app.core.llm_client import get_llm_response
 from app.tools.executor import execute_tool
+from app.tools.registry import is_available
 
 class TaskAgent:
     """
@@ -35,9 +36,13 @@ class TaskAgent:
 
     def _run_fallback(self, task: str) -> str:
         """降级方案：用纯文本提示，让模型决定是否调用工具（基于规则）"""
+        # 清单按可用性过滤，和给原生 tool_calls 那条路同一个口径
+        # （get_available_tools_schema）。旧写法直接遍历全量注册表：依赖不可用时
+        # schema 里没它、提示词里却写着它，模型照样调、照样拿错误，再凭错误硬编答案。
         tool_descriptions = "\n".join([
             f"- {name}: {info['description']}"
             for name, info in self.tools.items()
+            if is_available(info)
         ])
 
         prompt = f"""你是一个智能助手，可以使用以下工具完成任务。

@@ -3,14 +3,19 @@
 
 const $ = (id) => document.getElementById(id);
 
-/* ---------------- 本机身份清单 ----------------
- * 一台机器上可能同时记着几个人的令牌（设置 → 切换账户）。清单是凭据的唯一出处：
- * pref.token / pref.userId / pref.sessionId / pref.provider 都只是"当前那一条"的
- * 派生读取，写只能走 addIdentity / setCurrent / dropIdentity 三个入口。
+/* ---------------- 本机身份清单（方案 C：只记"谁"，不记"凭什么"） ----------------
+ * 一台机器上可能同时记着几个人（设置 → 账户）。清单条目只是显示与偏好用的人名册
+ * （userId/username/role/lastSessionId/providerId），**不含任何凭据明文**：运行时的
+ * 会话身份是服务端签发的 httpOnly Cookie，JS 读不到、也替不了它换人。
+ * 直接后果两条，都是方案 C 明说的代价：
+ * - 换到清单里的另一个人 = 重新登录一次（switchTo 只是把登录表单预填好）；
+ * - 移除一个非当前的人 = 只忘掉这台机器上他的名字，服务端他那枚令牌无从代撤销。
+ * pref.sessionId / pref.provider 都只是"当前那一条"的派生读取，写只能走
+ * addIdentity / setCurrent / dropIdentity 三个入口。
  *
- * 刻意不给老代码留一份 accessToken 镜像：那会出现"界面写着 B、请求头带着 A"，
- * 而本项目已经为跨用户泄露付过一次账。跟机器走的偏好（theme/temperature/
- * contextWindow）与按会话走的 persona 都保持原样——会话 id 全局唯一，键名自带归属。
+ * 老版本（Bearer 头时代）留在 localStorage 里的明文由 upgradeIdentitiesToCookie
+ * 一次性洗掉：当前那位的那一枚会先被 adopt 成 Cookie（升级不掉线），其余的连同
+ * 键名一起蒸发。
  */
 const IDENTITY_CAP = 5;
 const ID_KEY = "identities", CURRENT_KEY = "currentId";
@@ -19,7 +24,9 @@ function readIdentities() {
   let raw;
   try { raw = JSON.parse(localStorage.getItem(ID_KEY) || "[]"); }
   catch (e) { return []; }          // 手改坏的 JSON 不该把 app 锁死：当没记过人
-  return Array.isArray(raw) ? raw.filter((x) => x && x.userId && x.token) : [];
+  // 判据不再要 x.token：方案 C 的条目本来就不存凭据。老清单里残留的明文由
+  // upgradeIdentitiesToCookie 在启动时统一洗掉。
+  return Array.isArray(raw) ? raw.filter((x) => x && x.userId) : [];
 }
 
 function saveIdentities(list) { localStorage.setItem(ID_KEY, JSON.stringify(list)); }
@@ -48,37 +55,42 @@ function patchCurrent(fields) {
 function setCurrent(userId) { localStorage.setItem(CURRENT_KEY, userId); }
 
 function addIdentity(res) {
+  // res 里可能有 token（登录/注册响应体），这里**一个字都不落**：清单只记"谁"。
+  // adopt 已在 afterAuth 里把那枚明文换成了 httpOnly Cookie，明文到此为止。
   const list = readIdentities().filter((x) => x.userId !== res.user_id);
   list.push({ userId: res.user_id, username: res.username || "", role: res.role || "user",
-              token: res.token, lastSessionId: "", providerId: "",
+              lastSessionId: "", providerId: "",
               addedAt: new Date().toISOString() });
   setCurrent(res.user_id);
   while (list.length > IDENTITY_CAP) {
     const oldest = list.slice().sort((a, b) =>
       (a.addedAt || "").localeCompare(b.addedAt || ""))[0];
     list.splice(list.indexOf(oldest), 1);
-    // 顶掉别人时的撤销是尽力而为：它不该挡住一次刚刚成功的登录。
-    // 用户主动"移除"走 dropIdentity，那条必须撤销成功才算删掉。
-    if (oldest.token) API.logout(oldest.token).catch(() => {});
+    // 顶号只忘本机：明文早就不在 JS 手里，替他撤销服务端会话这件事做不到了。
+    // 兜底在服务端——每人令牌总数封顶（auth.MAX_SESSION_TOKENS）加管理员撤销。
   }
   saveIdentities(list);
 }
 
-/** 移除 = 先让服务端作废他那一枚，再删本机条目。
- *  顺序反了会出现"看起来删掉了但那枚令牌还能用"，比没删更糟。 */
+/** 移除 = 忘掉这台机器上的人。
+ *  当前这个人多一步真撤销：让服务端作废会话 Cookie 里那枚，再把 Cookie 本身刮掉。
+ *  非当前的人只能忘本机——JS 早就不碰他的凭据明文，服务端那一枚只能靠
+ *  总数封顶与管理员撤销收尾（方案 C 的既成代价，写在文件头那段里）。 */
 async function dropIdentity(userId) {
   const hit = readIdentities().find((x) => x.userId === userId);
   if (!hit) return true;
-  try {
-    await API.logout(hit.token);
-  } catch (e) {
-    /* 401/403 是"服务器本来就不认这枚令牌"（账号被管理员删过、或被轮换过）：
-       撤销要达到的目的已经达成，本机条目照删。其余失败（断网、5xx）留着条目——
-       那种情况下令牌可能还活着，"看起来删掉了但那枚还能用"比没删更糟。
-       判据只看 HTTP 状态：文案会被服务端改，状态码不会。 */
-    if (e.status !== 401 && e.status !== 403) {
-      setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
-      return false;
+  if ((currentEntry() || {}).userId === userId) {
+    try {
+      await API.logout();
+    } catch (e) {
+      /* 401/403 是"服务器本来就不认这枚会话"（账号被管理员删过、或被轮换过）：
+         撤销要达到的目的已经达成，本机条目照删。其余失败（断网、5xx）留着条目——
+         那种情况下会话可能还活着，"看起来删掉了但那枚还能用"比没删更糟。
+         判据只看 HTTP 状态：文案会被服务端改，状态码不会。 */
+      if (e.status !== 401 && e.status !== 403) {
+        setStatus("没能退出那个账号：" + e.message + "；他还留在这台机器的清单里", true);
+        return false;
+      }
     }
   }
   saveIdentities(readIdentities().filter((x) => x.userId !== userId));
@@ -91,18 +103,50 @@ function touchIdentity(me) {
   if (me) patchCurrent({ username: me.username, role: me.role });
 }
 
-/** 一次性的老键迁移：多身份之前这台机器只记着一个人。 */
+/** 一次性的老键迁移：多身份之前这台机器只记着一个人。
+ *  方案 C 之后它的职责多一条：accessToken 这个键现在是**要洗掉的明文**，
+ *  无论清单迁没迁过，它都不许活过这一次启动。 */
 function migrateLegacyIdentity() {
   const token = localStorage.getItem("accessToken");
-  if (!token || localStorage.getItem(ID_KEY)) return;
-  const entry = { userId: localStorage.getItem("userId") || "manual",
-                  username: "", role: "user", token,
-                  lastSessionId: localStorage.getItem("sessionId") || "",
-                  providerId: localStorage.getItem("provider") || "",
-                  addedAt: new Date().toISOString() };
-  saveIdentities([entry]);
-  setCurrent(entry.userId);
+  if (token && !localStorage.getItem(ID_KEY)) {
+    const entry = { userId: localStorage.getItem("userId") || "manual",
+                    username: "", role: "user",
+                    lastSessionId: localStorage.getItem("sessionId") || "",
+                    providerId: localStorage.getItem("provider") || "",
+                    addedAt: new Date().toISOString() };
+    saveIdentities([entry]);
+    setCurrent(entry.userId);
+  }
   ["accessToken", "userId", "sessionId", "provider"].forEach((k) => localStorage.removeItem(k));
+}
+
+/** 一次性升级到方案 C：把清单与老键里所有凭据明文洗出本机。
+ *
+ *  Bearer 头的年代里清单条目带 token 字段——那是躺在 localStorage 里谁都能读的
+ *  会话凭据。升级路径只有一条正确的：当前那位的那枚先 adopt 成 httpOnly Cookie
+ *  （人不掉线、也不逼他重打密码），其余的连同键名一起删——非当前那位的明文
+ *  本来就不该再被任何请求头带上场，留着只有泄露价值。adopt 失败（口令已被撤销）
+ *  同样删：拿一枚废令牌换一次"看起来在线"是自欺。
+ *  跑完这条之后，全机任何存储里都不再存在凭据明文，这是本函数的唯一判据。
+ */
+async function upgradeIdentitiesToCookie() {
+  migrateLegacyIdentity();
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(ID_KEY) || "[]"); }
+  catch (e) { raw = []; }
+  if (!Array.isArray(raw)) raw = [];
+  const cur = currentEntry();
+  let dirty = false;
+  for (const x of raw) {
+    if (x && typeof x.token === "string" && x.token) {
+      if (cur && x.userId === cur.userId) {
+        try { await API.adopt(x.token); } catch (e) { /* 废令牌：删得理直气壮 */ }
+      }
+      delete x.token;
+      dirty = true;
+    }
+  }
+  if (dirty) saveIdentities(raw.filter((x) => x && x.userId));
 }
 
 const pref = {
@@ -112,17 +156,16 @@ const pref = {
   set sessionId(v) { patchCurrent({ lastSessionId: v || "" }); },
   get temperature() { return Number(localStorage.getItem("temperature") || 0.7); },
   set temperature(v) { localStorage.setItem("temperature", String(v)); },
-  get contextWindow() { return Number(localStorage.getItem("contextWindow") || 10); },
-  set contextWindow(v) { localStorage.setItem("contextWindow", String(v)); },
+  get contextTokensK() { return Number(localStorage.getItem("contextTokensK") || 8); },
+  set contextTokensK(v) { localStorage.setItem("contextTokensK", String(v)); },
   get theme() {
     const saved = localStorage.getItem("theme");
     if (saved) return saved;
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   },
   set theme(v) { localStorage.setItem("theme", v); },
-  /* 令牌与 userId 不再是两个独立的键，它们是清单里当前那一条的两个字段。 */
-  get token() { return (currentEntry() || {}).token || ""; },
-  set token(v) { patchCurrent({ token: v || "" }); },
+  /* 方案 C 起 pref 不再有 token 这一项——运行时凭据是 httpOnly Cookie，
+   * JS 既读不到也不该想读。userId 仍是清单字段，只是"这台机器记着谁"。 */
   get userId() { return (currentEntry() || {}).userId || ""; },
   persona(sessionId) { return localStorage.getItem("persona:" + sessionId) || ""; },
   setPersona(sessionId, text) {
@@ -144,6 +187,8 @@ const state = {
   filter: "",
   memoryQuery: "",
   editingProvider: null,
+  editingScope: null,     // "admin"=改共享条目（管理员面）| "mine"=我的模型 | null=表单没开
+  myDefault: null,        // /v1/me/providers 报的"我的默认"，服务端持久化那份
   me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
 };
 
@@ -167,21 +212,79 @@ function fmtSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-function truncate(list) {
-  const n = Math.max(2, pref.contextWindow);
-  return list.slice(-n).map((m) => ({ role: m.role, content: m.content }));
+/* token 估算：中日韩一个字≈一个 token，其余约四个字符一个。
+   是估算不是分词器——目的只有一个：让"上下文长度"用模型的真实刻度说话，
+   而不是"一句很长的话"和"一个空洞"都算一条。 */
+function estimateTokens(text) {
+  const s = String(text || "");
+  const cjk = (s.match(/[\u2e80-\u9fff\uf900-\ufaff\uff01-\uff60]/g) || []).length;
+  return cjk + Math.ceil((s.length - cjk) / 4);
+}
+
+/* 按 token 预算从最近一条往回收：最后一条永远带上（它就是本轮要回答的话），
+   往前遇到塞不下的就到此为止——不回头丢中间，那会把对话剪成读不懂的碎片。 */
+function truncateWithin(list, budgetTokens) {
+  const out = [];
+  let used = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(list[i].content) + 4;   // +4：role/包装的固定开销
+    if (out.length && used + cost > budgetTokens) break;
+    out.unshift({ role: list[i].role, content: list[i].content });
+    used += cost;
+  }
+  return out;
+}
+
+/* 老键存的是"条数"（2..40 条）。条和 token 不是一个刻度，就地按一条≈0.5k 换算
+   写进新键；换算只发生一次，之后读数只走 contextTokensK。 */
+function migrateContextPref() {
+  if (localStorage.getItem("contextTokensK") !== null) return;
+  const old = Number(localStorage.getItem("contextWindow") || 0);
+  if (old > 0) {
+    localStorage.setItem("contextTokensK",
+      String(Math.min(60, Math.max(2, Math.round(old / 2)))));
+  }
+}
+
+/* 当前模型允许把预算拖到多远（K token）：读模型档案的 max_context_k。
+   后端 catalog/_public 已过一遍归一，这里拿到的必是数字；清单还没回来
+   （冷启动、未登录）时兜到 64，与服务端缺省同一口径。 */
+function modelCapK() {
+  const p = currentProvider();
+  return (p && p.max_context_k) || 64;
+}
+
+/* 设置里的「上下文长度」行：滑杆量程、步长与 `预算/上限` 显示随当前模型重画。
+   清单在手才允许把超限的旧预算收敛写回——冷启动时上限还只是兜底值，
+   那时就改写会把 256k 模型的设置误砍成 64。 */
+function syncCtxRow() {
+  const known = state.providers.length > 0;
+  const cap = Math.max(2, modelCapK());
+  const range = $("ctxRange");
+  range.max = cap;
+  range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
+  if (known && pref.contextTokensK > cap) pref.contextTokensK = cap;
+  range.value = pref.contextTokensK;
+  $("ctxVal").textContent = pref.contextTokensK;
+  $("ctxCap").textContent = cap;
 }
 
 function outbound() {
-  const msgs = truncate(state.messages.filter((m) => m.content && !m.transient));
   const persona = pref.persona(pref.sessionId);
+  const reserve = persona ? estimateTokens(persona) + 4 : 0;
+  // 读数时再对模型上限取一次 min：syncCtxRow 的收敛可能还没跑过（刚切完模型、
+  // 或这份 pref 是别的设备带来的大值），别指望界面刷新当唯一防线。
+  const budgetK = Math.min(pref.contextTokensK, modelCapK());
+  const msgs = truncateWithin(
+    state.messages.filter((m) => m.content && !m.transient),
+    Math.max(500, budgetK * 1000 - reserve));
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
 }
 
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
- *  - 本机压根没存过令牌：首启，该注册一个账号；
- *  - 存了却被服务端拒：管理员撤销或轮换过，或这台机器换了人。
+ *  - 本机压根没记过任何人：首启，该注册一个账号；
+ *  - 记着人却被服务端拒：管理员撤销或轮换过会话，或这台机器换了人。
  * 两种都要把首屏凭据层挡在面前——它就在眼前，不必再去「设置」里找入口。
  * 403 不走这里：那是"身份是真的、角色不够"，换凭据没有用。
  *
@@ -192,19 +295,30 @@ function outbound() {
  */
 function needsAuth(err) {
   if (!err || err.status !== 401) return false;
-  setStatus(pref.token
-    ? "登录已失效：本机令牌已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
+  // 判据从"本机有没有令牌"换成"本机记不记得人"：方案 C 下 JS 没有令牌可看。
+  setStatus(currentEntry()
+    ? "登录已失效：本机会话已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
     : "还没有登录：用用户名和密码登录，或注册一个", true);
-  if ($("authModal").classList.contains("hidden")) showAuth(pref.token ? "login" : "register");
+  if ($("authModal").classList.contains("hidden")) showAuth(currentEntry() ? "login" : "register");
   return true;
 }
+
+/* ---------------- 层栈：返回键与 Esc ----------------
+ * 系统的返回键和键盘的 Esc 从这里走同一条路：退掉最上面那一层（实现见 layers.js）。
+ * 每个界面自己负责"显示"，关闭只由栈在 popstate 里执行一次。所以规矩是：
+ * 开一层调 openX()，收一层调 closeX()（它只是朝历史发一个请求），而 hideX() 是那段
+ * 纯 DOM 的收尾、由栈来调。按钮里直接 classList.add("hidden") 就是让历史比屏幕上
+ * 多出一层——症状是"返回要按两下才关一层"，正是本仓最恨的"效果没了但不报错"。
+ */
+const Layers = makeLayerStack(window.history);
+window.addEventListener("popstate", (e) => Layers.reconcile(e.state));
 
 /* ---------------- 首屏凭据层 ----------------
  * 登录与注册共用一张表单：注册只是多走一步——第一步定用户名与密码，第二步留三道
  * 找回题的答案。找回密码在同一层里换另一张表单（recoverForm），谁都不该是第二个弹窗。
  * 全程锁住按钮：手机双击会发出第二个 POST，注册那枪在第二下只会拿回"该用户名已存在"
  * （auth.py 里那句实话，界面把它落在用户名那一格下面），把已经成功的人显示成失败，
- * 还会两次一起抢 pref.token 与渲染顺序。
+ * 还会两次一起抢会话落地（adopt→addIdentity）与渲染顺序。
  */
 let authMode = "login";
 let regStep = 1;
@@ -519,11 +633,14 @@ async function submitRecovery() {
 
 function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden"); }
 
-/** 拿到令牌之后的固定动作：落地凭据、重取身份与数据、收起这层。
+/** 拿到令牌之后的固定动作：明文当场收编成 httpOnly Cookie、落地人名册、重取身份
+ *  与数据、收起这层。adopt 是全页面对 res.token 唯一的一次消费——它失败就等
+ *  失败，让异常冒到调用处：没有 Cookie 的"登录成功"是假的，绝不能继续渲染。
  *  boot 那一次是在没有凭据的状态下跑的，模型清单与会话列表全是 401，不重跑就得
  *  叫用户手动刷新一次页面才算登录成功。 */
 async function afterAuth(res) {
-  addIdentity(res);                 // 落地凭据并把这个人设为当前身份
+  await API.adopt(res.token);       // 凭据落地 = 换 Cookie；明文到此为止
+  addIdentity(res);                 // 只记名字进来并把这个人设为当前身份，不记凭什么
   SHELL.setOwner(res.user_id);      // 告诉壳"现在是谁"：没这一步他看见的提醒是空集
   resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
@@ -579,9 +696,6 @@ function applyRole() {
      都不值这一行的信息量 */
   $("userAvatar").textContent = name ? name[0] : "·";
   syncSetIdentity();
-  // 正停在管理员专属的二级页时角色没了：退回一级列表，别对着一个必然 403 的表单站着。
-  if (!admin && !$("setPages").classList.contains("hidden")
-      && document.querySelector('.set-page[data-page="providers"]:not(.hidden)')) showSetList();
 }
 
 /* ---------------- 模型服务 ---------------- */
@@ -596,12 +710,13 @@ async function loadModels() {
 
   const usable = state.providers.filter((p) => p.usable);
   if (!usable.length) {
-    // 「模型服务」是管理员面：把普通用户推进那个页签，他只会对着 403 站着。
+    // 没有可用模型时两条路都通：管理员配全站共享，普通用户也能在同一个页面
+    // 用自带 key 添加"我的模型"。所以不再把普通用户挡在页外，只给指路的一句话。
     if (isAdmin()) {
       setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
       openSettings("providers");
     } else {
-      setStatus("服务端还没有可用的模型，请联系管理员配置模型服务", true);
+      setStatus("还没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加，或联系管理员配置", true);
     }
   } else {
     setStatus("");      // 有模型可用了：那句"没有服务"到此为止
@@ -639,6 +754,64 @@ function renderModelSelect() {
     sel.appendChild(opt);
   });
   sel.value = pref.provider;
+  renderModelChip();
+  syncCtxRow();   // 模型清单/当前模型变了，上下文行的量程与「/上限」跟着变
+}
+
+/* ---------------- 发送框旁的快速切换模型 ----------------
+ * 芯片显示"当前会用哪个"（currentProvider 口径，与发送时真正用的一致），
+ * 点开是纵向弹单：只列 usable 的，标出「共享/我的模型」，当前项打 ✓。
+ * 选择即生效：本机 pref.provider 立刻换，服务端「我的默认」同步写一份
+ * （存失败不反悔——localStorage 仍是这台设备的答案，与设置页下拉同一口径）。 */
+function renderModelChip() {
+  const usable = state.providers.filter((p) => p.usable);
+  const chip = $("modelChip");
+  if (!usable.length) {
+    hideModelMenu();
+    chip.classList.add("hidden");
+    return;
+  }
+  chip.classList.remove("hidden");
+  const cur = currentProvider();
+  $("modelChipName").textContent = cur ? cur.name : "选择模型";
+  const menu = $("modelMenu");
+  menu.innerHTML = "";
+  usable.forEach((p) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    const isCur = !!cur && p.id === cur.id;
+    if (isCur) b.classList.add("current");
+    const name = document.createElement("span");
+    name.textContent = (isCur ? "✓ " : "") + p.name;
+    const sub = document.createElement("span");
+    sub.className = "mm-sub";
+    sub.textContent = p.shared ? "共享" : "我的模型";
+    b.append(name, sub);
+    b.onclick = () => switchModel(p.id);
+    menu.appendChild(b);
+  });
+}
+
+function switchModel(id) {
+  setModelMenu(false);
+  if (id === pref.provider) return;
+  pref.provider = id;
+  API.setMyDefaultProvider(id).catch(() => {});
+  setStatus("");
+  renderModelSelect();   // 芯片与设置页下拉一起跟上，别留一份旧渲染
+}
+
+function setModelMenu(open) {
+  if (!open) { Layers.close("modelMenu"); return; }
+  $("modelMenu").classList.remove("hidden");
+  $("modelChip").classList.add("open");
+  Layers.open("modelMenu", hideModelMenu);
+}
+
+function hideModelMenu() {
+  $("modelMenu").classList.add("hidden");
+  $("modelChip").classList.remove("open");
 }
 
 function serverDefaultProvider() {
@@ -657,10 +830,15 @@ function currentProvider() {
 }
 
 async function loadProviders() {
-  const data = await API.providers();
-  const list = $("providerList");
-  list.innerHTML = "";
-  (data.providers || []).forEach((p) => list.appendChild(providerRow(p)));
+  const data = await API.myProviders();
+  const admin = isAdmin();
+  const shared = $("sharedProvList");
+  shared.innerHTML = "";
+  (data.shared || []).forEach((p) => shared.appendChild(providerRow(p, admin ? "admin" : "shared")));
+  const mine = $("myProvList");
+  mine.innerHTML = "";
+  (data.mine || []).forEach((p) => mine.appendChild(providerRow(p, "mine")));
+  state.myDefault = data.default || null;
   $("presetRow").innerHTML = "";
   Object.entries(data.presets || {}).forEach(([key, preset]) => {
     const b = document.createElement("button");
@@ -671,14 +849,22 @@ async function loadProviders() {
   });
 }
 
-function providerRow(p) {
+/* 一行的可操作性由 scope 决定，而不是由"看起来像谁的"决定：
+   shared = 别人的/站级的共享条目，普通用户只读；
+   admin  = 同一条共享条目，管理员拿 /v1/providers 那面全权管理；
+   mine   = 这个人自己的私有条目，走 /v1/me/providers。
+   ★「我的默认」人人可点（含共享条目）——它写的是这个人的偏好，不动别人的配置。 */
+function providerRow(p, scope) {
   const el = document.createElement("div");
   el.className = "prov";
 
   const pm = document.createElement("div");
   pm.className = "pm";
   const b = document.createElement("b");
-  b.textContent = p.label + (p.is_default ? "（默认）" : "");
+  let suffix = "";
+  if (p.is_default && scope !== "mine") suffix += "（全站默认）";
+  if (state.myDefault === p.id) suffix += "（我的默认）";
+  b.textContent = p.label + suffix;
   const s = document.createElement("span");
   s.textContent = `${p.model} · ${p.base_url} · ${p.api_key_masked || "未填密钥"}`;
   pm.append(b, s);
@@ -698,37 +884,56 @@ function providerRow(p) {
     btn.onclick = fn;
     return btn;
   };
-  ops.append(
-    mk("✎", "编辑", () => openProviderForm(p)),
-    mk("★", "设为默认", async () => {
+  const reload = () => Promise.all([loadProviders(), loadModels()]);
+  if (scope !== "shared") {
+    ops.append(
+      mk("✎", "编辑", () => openProviderForm(p, scope)),
+      mk("⚡", "测试连通", async () => {
+        const box = $("provTestResult");
+        box.textContent = "测试中…";
+        try {
+          const r = scope === "admin" ? await API.testProvider(p.id) : await API.testMyProvider(p.id);
+          box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
+        } catch (e) { box.textContent = "❌ " + e.message; }
+      })
+    );
+  }
+  if (p.has_key) {
+    ops.append(mk("★", "设为我的默认", async () => {
+      try { await API.setMyDefaultProvider(p.id); }
+      catch (e) { /* 服务端存不住也要本机先生效：localStorage 是那台设备的答案 */ }
+      pref.provider = p.id;
+      await reload();
+      renderModelSelect();
+    }));
+  }
+  if (scope === "admin") {
+    ops.append(mk("◎", "设为全站默认", async () => {
       await API.setDefaultProvider(p.id);
-      await Promise.all([loadProviders(), loadModels()]);
-    }),
-    mk("⚡", "测试连通", async () => {
-      const box = $("provTestResult");
-      box.textContent = "测试中…";
-      try {
-        const r = await API.testProvider(p.id);
-        box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
-      } catch (e) { box.textContent = "❌ " + e.message; }
-    }),
-    mk("×", "删除", async () => {
+      await reload();
+    }));
+  }
+  if (scope !== "shared") {
+    ops.append(mk("×", "删除", async () => {
       if (!confirm(`删除「${p.label}」？`)) return;
-      await API.deleteProvider(p.id);
-      await Promise.all([loadProviders(), loadModels()]);
-    })
-  );
+      if (scope === "admin") await API.deleteProvider(p.id);
+      else await API.deleteMyProvider(p.id);
+      await reload();
+    }));
+  }
 
   el.append(pm, tag, ops);
   return el;
 }
 
-function openProviderForm(p) {
+function openProviderForm(p, scope) {
   state.editingProvider = p.id;
+  state.editingScope = scope;
   $("provId").value = p.id;
   $("provLabel").value = p.label;
   $("provBase").value = p.base_url;
   $("provModel").value = p.model;
+  $("provCtxK").value = p.max_context_k || "";
   $("provVision").checked = !!p.supports_vision;
   $("provKey").value = "";
   $("provKey").placeholder = p.api_key_masked ? `已设置（${p.api_key_masked}），留空则不修改` : "填入 API Key";
@@ -736,15 +941,28 @@ function openProviderForm(p) {
   $("provForm").classList.remove("hidden");
 }
 
+function openBlankProviderForm(scope) {
+  state.editingProvider = null;
+  state.editingScope = scope;
+  $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
+  $("provKey").value = ""; $("provModel").value = ""; $("provCtxK").value = ""; $("provVision").checked = false;
+  $("provKey").placeholder = "填入 API Key";
+  $("provTestResult").textContent = "";
+  $("provForm").classList.remove("hidden");
+  $("provLabel").focus();
+}
+
 function fillFormFromPreset(preset) {
   if (!state.editingProvider) $("provLabel").value = preset.label;
   $("provBase").value = preset.base_url;
   $("provModel").value = preset.model;
+  if (preset.max_context_k != null) $("provCtxK").value = preset.max_context_k;
   $("provVision").checked = !!preset.supports_vision;
 }
 
 function closeProviderForm() {
   state.editingProvider = null;
+  state.editingScope = null;
   $("provForm").classList.add("hidden");
 }
 
@@ -755,18 +973,31 @@ function providerDraftFromForm() {
     base_url: $("provBase").value.trim(),
     api_key: $("provKey").value.trim(),
     model: $("provModel").value.trim(),
+    // 留空 → undefined → 服务端归一为缺省 64；判据（钳 1..10000）只写后端一处。
+    max_context_k: Number($("provCtxK").value) || undefined,
     supports_vision: $("provVision").checked,
     is_default: false,
   };
+}
+
+/* 新条目默认落"我的模型"：表单从哪个按钮打开，保存就走哪一面。
+   编辑共享条目只有管理员能进入表单（行上的 ✎ 只画给 admin），所以
+   scope=admin 的编辑必然对得上 /v1/providers 的管理员要求。 */
+function providerScopeIsMine() {
+  return (state.editingScope || "mine") !== "admin";
 }
 
 async function saveProvider(ev) {
   ev.preventDefault();
   const draft = providerDraftFromForm();
   const box = $("provTestResult");
+  const mine = providerScopeIsMine();
   try {
     if (state.editingProvider) {
-      await API.updateProvider(state.editingProvider, draft);
+      if (mine) await API.updateMyProvider(state.editingProvider, draft);
+      else await API.updateProvider(state.editingProvider, draft);
+    } else if (mine) {
+      await API.addMyProvider(draft);
     } else {
       await API.addProvider(draft);
     }
@@ -782,7 +1013,9 @@ async function testProviderDraft() {
   const box = $("provTestResult");
   box.textContent = "测试中…";
   try {
-    const r = await API.testProviderDraft(providerDraftFromForm());
+    const r = providerScopeIsMine()
+      ? await API.testMyProviderDraft(providerDraftFromForm())
+      : await API.testProviderDraft(providerDraftFromForm());
     box.textContent = (r.ok ? "✅ " : "❌ ") + r.detail;
   } catch (e) {
     box.textContent = "❌ " + e.message;
@@ -874,12 +1107,21 @@ function updateSendEnabled() {
   $("sendBtn").disabled = !state.streaming && !(text || state.pending.length);
 }
 
+/* 图片预览并发取（2026-09-22）。原先是 `for (const a of atts) { a.url = await ... }`：
+ * 一张一张排队，历史里有 N 张图就是 N 趟串行往返，每趟走隧道实测 300~430ms，
+ * 十条带图的历史光缩略图就要三秒多——这段等待和它锁住的 restore() 一起算在
+ * 「打开网页到看见对话界面」那条链上。
+ * 并发之后仍然保持的两条老语义，一条都不许松：
+ * ① 每张图各自把结果写回**自己那条** a.url（不是先收齐再整批赋同一个值）；
+ * ② catch 挂在每张图自己的链上、而不是整批上，所以坏一张只少一张缩略图，
+ *    其余的照旧落地，整个函数也永远不会因为某一张 404 而 reject——
+ *    「取不到就只显示文件名」说的是那一张，不是那一批。 */
 async function hydrateImageUrls(atts) {
-  for (const a of atts || []) {
-    if (a.kind === "image" && !a.url) {
-      try { a.url = await API.fileBlobUrl(a.id); } catch (_) { /* 取不到就只显示文件名 */ }
-    }
-  }
+  const images = (atts || []).filter((a) => a.kind === "image" && !a.url);
+  await Promise.all(images.map((a) => API.fileBlobUrl(a.id).then(
+    (url) => { a.url = url; },
+    () => { /* 取不到就只显示文件名 */ },
+  )));
 }
 
 /* ---------------- 会话侧栏 ---------------- */
@@ -1199,7 +1441,7 @@ async function send(text) {
       setStatus("当前没有可用模型，请在「设置 → 模型服务」中配置", true);
       openSettings("providers");
     } else {
-      setStatus("当前没有可用模型，请联系管理员配置模型服务", true);
+      setStatus("当前没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加模型，或联系管理员配置", true);
     }
     return;
   }
@@ -1326,19 +1568,21 @@ async function sendFeedback(index, rating, btn) {
 }
 
 /* ---------------- 设置弹层 ----------------
- * 一级是分组列表，二级页在同一个弹层内换 view（不新开一层：手机上两层弹层
- * 意味着人不知道自己按哪个 × 才能出去）。openSettings 不再挑"默认页签"——
- * 列表本身就是入口，没有"落在哪一页"这回事了。
+ * 一级是分组列表，二级页在同一个弹层内换 view（不新开一张弹层：手机上两层弹层
+ * 意味着人不知道自己按哪个 × 才能出去）。二级页**不进弹层的 DOM 层级，但要进层栈**——
+ * 返回键该先退回列表、再关弹层，而不是直接把整个设置关掉。
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
                     persona: "角色设定", memory: "长期记忆", reminders: "提醒" };
 
 function openSettings(page) {
   $("settings").classList.remove("hidden");
+  Layers.open("settings", hideSettings);
   showSetList();
   if (page) openSetPage(page);
 }
-function closeSettings() { $("settings").classList.add("hidden"); }
+function hideSettings() { $("settings").classList.add("hidden"); }
+function closeSettings() { Layers.close("settings"); }
 
 function showSetList() {
   $("setPages").classList.add("hidden");
@@ -1346,13 +1590,6 @@ function showSetList() {
 }
 
 function openSetPage(name) {
-  // 模型服务这一面对普通用户全是 403：入口平时已被 applyRole 收走，这里是第二道，
-  // 免得别处（快捷键、角色切换后的旧状态）把他推进一个只会报错的表单。
-  if (name === "providers" && !isAdmin()) {
-    setStatus("模型服务只能由管理员配置，请联系管理员", true);
-    showSetList();
-    return;
-  }
   const page = document.querySelector(`.set-page[data-page="${name}"]`);
   if (!page) { showSetList(); return; }
   $("setPageTitle").textContent = SET_PAGES[name];
@@ -1360,24 +1597,27 @@ function openSetPage(name) {
   $("setPages").classList.remove("hidden");
   document.querySelectorAll(".set-page")
     .forEach((p) => p.classList.toggle("hidden", p !== page));
+  Layers.open("setPage", showSetList);
   if (name === "providers") loadProviders();
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
   if (name === "reminders") renderReminders($("paneReminders"));
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
+function closeSetPage() { Layers.close("setPage"); }
 
-/** 账户页的两处回显。令牌输入框在管理员的「模型服务」页里，所以这一页
- *  没打开时也要能把它填上——值统一从 pref 取，不做第二份。 */
+/** 账户页的两处回显。
+ *  方案 C 起这里**不再回填任何令牌**——输入框只进不出：它的值只会被 adopt
+ *  用掉一次，页面没有任何一处能把当前会话的凭据再读出来（读不出来才叫 httpOnly）。 */
 function syncConnPane() {
-  $("tokenInput").value = pref.token;
   $("whoInfo").textContent = state.me
     ? `当前身份：${state.me.username}（${isAdmin() ? "管理员" : "普通用户"}）`
     : "未登录";
 }
 
-/** 账户页：这台机器上认识谁。当前那条打一个标记，其余每人一个「退出」。
- *  退出走 dropIdentity(userId)——它带的是**那个人**的令牌，不需要先切过去。 */
+/** 账户页：这台机器上认识谁。当前那条打一个标记，其余每人一个「删除」。
+ *  删除当前这个人会真撤销他的会话；删除别人只是把他从本机名册忘掉（方案 C 的
+ *  既成代价，见文件头）。切换 = 预填他的名字去登录，不再是一键静默换人。 */
 function renderAccounts() {
   const box = $("accountList");
   box.innerHTML = "";
@@ -1392,7 +1632,7 @@ function renderAccounts() {
       name.textContent = x.username || x.userId;
       const tag = document.createElement("span");
       tag.className = "set-val";
-      tag.textContent = x.userId === here ? "当前" : (x.stale ? "需要重新登录" : "");
+      tag.textContent = x.userId === here ? "当前" : "";
       row.append(name, tag);
       /* 当前这一行两颗按钮都不给：换人不需要按钮（已经是这个人），
          而"删除"落在自己身上只会把正在用的会话打断——误触的代价不对称。 */
@@ -1597,6 +1837,10 @@ function offerUpdate(info) {
   sheet.classList.add("show");
 }
 
+/* 纯 DOM 的收尾，**不进层栈**：这张卡是一次提示不是一个界面，所以"被别的层顶掉"不能
+   等同于"他已经表过态了"。日期戳只在他自己按了两颗按钮之一（或链接跳走）时写——
+   这就是它不登记历史的原因：一进栈，"收起"就多了一条没有用户意图的路，而那条路会顺手
+   把"今天不再问"给记上。栈底的返回键因此直接退应用，与设置里那条规矩一致。 */
 function hideUpdateSheet() {
   const sheet = $("updateSheet");
   if (sheet) { sheet.classList.add("hidden"); sheet.classList.remove("show"); }
@@ -1606,6 +1850,65 @@ function hideUpdateSheet() {
 // ☰ 打开侧栏时补弹一次：只复用内存里那份，绝不重复发请求。
 function reofferUpdate() {
   if (updateSeen) offerUpdate(updateSeen);
+}
+
+/** 一条提醒"到底响过没有"。firedAt 与 missed 是两回事，所以分着说：前者是"通知发出去了"
+ *  （人看没看见网页不知道），后者是"到点了但没发出去"。
+ *  老壳这两个键压根没有（undefined）→ 一个字都不说。那是"读不到"，不是"没响过"，
+ *  把没查过的事说得像查过，比不答更糟——而这一屏的全部意义就是让这句话可信。 */
+function fmtFiredHistory(r) {
+  const fired = r ? r.firedAt : undefined, lost = r ? r.missed : undefined;
+  if (typeof fired !== "number" || typeof lost !== "number") return "";
+  const parts = [];
+  if (fired) parts.push("上次发出 " + fmtReminderAt(fired));
+  if (lost) parts.push(lost + " 次到点没发出");
+  return parts.length ? parts.join(" · ") : "到点还没响过";
+}
+
+/** 提醒页顶部那一行常驻状态：通知给没给、闹钟排不排得出准点。
+ *  三态（1 / 0 / 这个键压根没有）分开画，因为它们是三句不同的话——v0.17 及更早的壳
+ *  不报这两个键，把它显示成"没授权"就是朝反方向说谎。
+ *  值每次现问（见 shell.js capabilities()），从系统那一页回来时由 visibilitychange 重画。 */
+function reminderStatusCard(caps) {
+  const card = document.createElement("div");
+  card.className = "set-card";
+  card.dataset.role = "reminder-status";   // 只重画这一张时靠它认领，不靠"第一个 .set-card"猜
+  const rows = [
+    ["通知", caps.notifications, "notifications", "已授权", "没授权：到点发不出去"],
+    ["闹钟", caps.exactAlarms, "alarms", "能准点", "没给精准闹钟：可能被省电推迟"],
+  ];
+  let known = 0;
+  rows.forEach((pair) => {
+    if (pair[1] !== 0 && pair[1] !== 1) return;
+    known += 1;
+    const row = document.createElement("div");
+    row.className = "set-row";
+    const lbl = document.createElement("span");
+    lbl.className = "set-lbl";
+    lbl.textContent = pair[0];
+    const val = document.createElement("span");
+    val.className = "set-val";
+    val.textContent = pair[1] ? pair[3] : pair[4];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "set-mini";
+    btn.textContent = "去设置";
+    // 只报"递没递出去"。那一页里改完回来靠 visibilitychange 重画，不在这里当场翻绿——
+    // 点一下就说"已授权"是最容易骗到人的一种假状态。
+    btn.onclick = () => {
+      const r = SHELL.openSettings(pair[2]);
+      if (!r.ok) setStatus("打不开系统那一页，请到系统设置里搜「AI 助手」", true);
+    };
+    row.append(lbl, val, btn);
+    card.appendChild(row);
+  });
+  if (!known) {
+    const note = document.createElement("p");
+    note.className = "pane-note";
+    note.textContent = "这版壳读不到通知与闹钟权限，升级壳后才能看到。";
+    card.appendChild(note);
+  }
+  return card;
 }
 
 /** 提醒页（设置 → 设备 → 提醒）。
@@ -1623,6 +1926,9 @@ function renderReminders(host) {
 
   const items = SHELL.listReminders();
   $("remindersVal").textContent = items.length ? items.length + " 条" : "";
+  // 状态行排在表单之前、且空列表时也在：它回答的是"为什么不响"，一条提醒都没有的时候
+  // 恰恰是最需要它的时刻。
+  host.appendChild(reminderStatusCard(SHELL.capabilities()));
 
   const form = document.createElement("form");
   form.className = "row";
@@ -1679,8 +1985,10 @@ function renderReminders(host) {
     lbl.textContent = r.title || "提醒";
     const val = document.createElement("span");
     val.className = "set-val";
+    const hist = fmtFiredHistory(r);
     val.textContent = fmtReminderAt(r.at)
-      + (r.repeat === "daily" ? " 每天" : r.repeat === "weekly" ? " 每周" : "");
+      + (r.repeat === "daily" ? " 每天" : r.repeat === "weekly" ? " 每周" : "")
+      + (hist ? " · " + hist : "");
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "set-mini set-del";
@@ -1691,6 +1999,20 @@ function renderReminders(host) {
   });
   host.appendChild(card);
 }
+
+/* 从系统那一页（点「去设置」过去的）回到应用时，WebView 不会重新加载页面，那一行还挂着
+   旧权限。这里只换状态这一张卡片、不整页重画：整页重画会连带清掉他刚打进表单却没点
+   "添加"的那句提醒——为了刷新两个权限字丢掉一条正在写的提醒，是拿一个真问题换一个假问题。
+   列表里的"上次发出/几次没发出"不在这里跟：它只在提醒真的到点时变，而那时壳会推一条
+   reminder 事件过来，onShellEvent 会整页重画。 */
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !SHELL.present) return;
+  const page = $("paneReminders");
+  const old = page && page.querySelector('[data-role="reminder-status"]');
+  if (page && old && !page.classList.contains("hidden")) {
+    page.replaceChild(reminderStatusCard(SHELL.capabilities()), old);
+  }
+});
 
 /** 提醒行上的时间：月/日 时:分。跨年的提醒在本产品里没有意义，不值得占这一行。 */
 function fmtReminderAt(ms) {
@@ -1782,57 +2104,45 @@ function resetViewForIdentity() {
   renderSessions();
 }
 
-/** 换到清单里的另一个人：换指针 → 清屏 → 重取。
- *  顺序反了会出现"用 A 的视图渲染 B 的数据"。正在流式输出的那条回答直接掐断，
- *  不弹提示——它与今天刷新页面丢掉的是同半截，不新增语义。 */
+/** 换到清单里的另一个人 = 以他的身份再登录一次。
+ *  方案 C 下这是唯一诚实的做法：会话 Cookie 只装得下一个人，JS 手里也没有他的
+ *  凭据可以静默换——换指针不换会话，就会出现"界面写着 B、Cookie 带着 A"，
+ *  那正是本项目为跨用户泄露付过一次账的形状。所以这里只把登录表单预填好，
+ *  currentId 等 afterAuth 真登录成功再落。 */
 async function switchTo(userId) {
   if (state.switching) return;
   const hit = readIdentities().find((x) => x.userId === userId);
   if (!hit) return;
   state.switching = true;
-  document.querySelectorAll("#accountList .set-row").forEach((r) => { r.style.pointerEvents = "none"; });
   try {
     if (state.controller) state.controller.abort();
     state.controller = null;
     state.streaming = false;
-    setCurrent(userId);
-    SHELL.setOwner(userId);         // 换指针的同时换壳那边的 owner：否则切号后还能看见上一个人的提醒
-    resetViewForIdentity();
     closeSettings();
-    showAuthPending();
-    await loadWho();
-    if (!state.me) {
-      // 他那枚令牌已经不被认了：标出来，让人自己决定重登还是留着。刻意不悄悄退回
-      // 原来那个人——那会让人以为自己是 B。
-      markIdentityStale(userId);
-      showAuth("login");
-      return;
-    }
-    await loadServerData();
-    hideAuth();
-    renderMessages();
-  } catch (e) {
-    if (!needsAuth(e)) setStatus("切换失败：" + e.message, true);
-    hideAuth();
+    showAuth("login");
+    $("authUser").value = hit.username || "";
+    setStatus("换到 " + (hit.username || hit.userId) + " 需要再输一次他的密码（会话凭据不在本机明文里）");
   } finally {
     state.switching = false;
   }
 }
 
-function markIdentityStale(userId) { patchCurrent({ stale: true }); }
-
-/** 退出这台机器：作废当前这一枚，并把这个人从清单里去掉。
- *  只删本机不撤销就是个假动作——那枚令牌在服务端还活着。 */
+/** 退出这台机器：作废当前这一枚会话，并把这个人从清单里去掉。
+ *  只删本机不撤销就是个假动作——Cookie 里那枚在服务端还活着。
+ *  退完之后清单里剩下的人也没有一个是"在线"的：会话只装过刚退掉那位。
+ *  所以不自动指向别人——currentId 决定偏好写进谁的清单，指到一个没登录的人
+ *  身上就是埋雷；只把登录面预填成最新那位的名字，由人自己决定登谁。 */
 async function logoutCurrent() {
   const hit = currentEntry();
   if (!hit) { showAuth("login"); return; }
   if (!await dropIdentity(hit.userId)) return;
-  // 退回谁必须和 currentEntry 的兜底同一条规则：清单的插入顺序里可能躺着已被删除的
-  // 账号，取 [0] 会把人换成一枚死令牌，表现为"登录已失效"但界面还写着原来那个人。
+  resetViewForIdentity();
+  // 挑"最新一条"与 currentEntry 的兜底同一条规则：清单的插入顺序里可能躺着已被
+  // 删除的账号，不排序会预填一个根本不存在的人的名字。
   const rest = readIdentities().slice()
     .sort((a, b) => (b.addedAt || "").localeCompare(a.addedAt || ""));
-  if (rest.length) { setCurrent(rest[0].userId); await switchTo(rest[0].userId); }
-  else { resetViewForIdentity(); showAuth("register"); }
+  if (rest.length) { showAuth("login"); $("authUser").value = rest[0].username || ""; }
+  else showAuth("register");
 }
 
 function emptyItem(text) {
@@ -1915,9 +2225,17 @@ function syncPersonaChip() {
   $("personaVal").textContent = $("personaInput").value.trim() ? "已填写" : "";
 }
 
+/* 附件菜单是一颗气泡：开合都走栈，别处（拍照那一路）靠它排在栈顶时自动让位。 */
 function setAttachMenu(open) {
-  $("attachMenu").classList.toggle("hidden", !open);
-  $("attachBtn").classList.toggle("open", !!open);
+  if (!open) { Layers.close("attachMenu"); return; }
+  $("attachMenu").classList.remove("hidden");
+  $("attachBtn").classList.add("open");
+  Layers.open("attachMenu", hideAttachMenu);
+}
+
+function hideAttachMenu() {
+  $("attachMenu").classList.add("hidden");
+  $("attachBtn").classList.remove("open");
 }
 
 function toggleAttachMenu() {
@@ -1940,6 +2258,7 @@ async function openCamera() {
   $("camRetake").classList.add("hidden");
   $("camUse").classList.add("hidden");
   $("cameraModal").classList.remove("hidden");
+  Layers.open("camera", hideCamera);
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     const reason = "该浏览器不支持网页相机，请使用文件选择器";
@@ -1965,13 +2284,17 @@ async function openCamera() {
   }
 }
 
-function closeCamera() {
+/* 停轨必须跟着"这一层真的收起了"走，而不是跟着某个按钮：权限被拒时的延时关闭、
+   返回键、Esc、点「取消」四条路都得把摄像头指示灯关掉，漏一条就是一直亮着。 */
+function hideCamera() {
   if (cam.stream) {
-    cam.stream.getTracks().forEach((t) => t.stop());   // 必须停轨，否则摄像头指示灯常亮
+    cam.stream.getTracks().forEach((t) => t.stop());
     cam.stream = null;
   }
   $("cameraModal").classList.add("hidden");
 }
+
+function closeCamera() { Layers.close("camera"); }
 
 function shootPhoto() {
   const video = $("camVideo");
@@ -2016,12 +2339,14 @@ async function usePhoto() {
 /* ---------------- 侧栏开合 ---------------- */
 function openSidebar() {
   $("sidebar").classList.add("open"); $("backdrop").classList.add("show");
+  Layers.open("sidebar", hideSidebar);
   /* 他点名的补弹时机：首屏那一弹可能被登录层盖住（.auth 的 z 更高），也可能他正忙着
      打字直接划走了。拉开侧栏是一个"在看界面"的时刻，此时只要内存里已知有新版就再给一次
      机会——注意是 reoffer 而不是 maybeAsk：这里绝不发请求，☰ 一晚上按十次也不多出一次网络。 */
   reofferUpdate();
 }
-function closeSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
+function hideSidebar() { $("sidebar").classList.remove("open"); $("backdrop").classList.remove("show"); }
+function closeSidebar() { Layers.close("sidebar"); }
 
 function autosize(el) {
   el.style.height = "auto";
@@ -2051,6 +2376,10 @@ function bind() {
       return;
     }
     pref.provider = e.target.value;
+    // 本机立刻生效，服务端那份让"我的默认"跟着人走而不是跟着设备走。
+    // 存失败不反悔本次选择：localStorage 仍是这台设备的答案，下次开机再补写。
+    API.setMyDefaultProvider(e.target.value).catch(() => {});
+    renderModelChip();   // 发送框旁的芯片跟着换，别留旧名字
     setStatus("");
   };
   $("exportBtn").onclick = exportCurrent;
@@ -2074,12 +2403,27 @@ function bind() {
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
-  $("pickCamera").onclick = () => { setAttachMenu(false); openCamera(); };
+  // 不给它写 setAttachMenu(false)：附件菜单是"让位层"，openCamera 自己会把它连同
+  // 那条历史一起换掉。这里再关一次就是同一件事的两个执行者——而且关是异步的
+  // （history.go），紧跟着的 pushState 会落错条目，返回键从这一刻起就对不上界面。
+  $("pickCamera").onclick = () => openCamera();
   $("pickImage").onclick = () => { setAttachMenu(false); $("imageInput").click(); };
   $("pickFile").onclick = () => { setAttachMenu(false); $("fileInput").click(); };
   document.addEventListener("click", (e) => {
     const menu = $("attachMenu");
     if (!menu.classList.contains("hidden") && !menu.contains(e.target)) setAttachMenu(false);
+  });
+  // 模型快切芯片：与附件菜单同款纪律——stopPropagation 防"开完立刻被外面点击关掉"，
+  // 点弹单外任意处收起。
+  $("modelChip").onclick = (e) => {
+    e.stopPropagation();
+    setModelMenu($("modelMenu").classList.contains("hidden"));
+  };
+  document.addEventListener("click", (e) => {
+    const menu = $("modelMenu");
+    if (!menu.classList.contains("hidden") && !menu.contains(e.target) && e.target !== $("modelChip")) {
+      setModelMenu(false);
+    }
   });
   $("imageInput").onchange = (e) => pickFiles(e.target);
   $("fileInput").onchange = (e) => pickFiles(e.target);
@@ -2091,7 +2435,7 @@ function bind() {
 
   $("closeSettings").onclick = closeSettings;
   $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };
-  $("setBack").onclick = showSetList;
+  $("setBack").onclick = closeSetPage;
   $("rowAccounts").onclick = () => openSetPage("accounts");
   $("rowProviders").onclick = () => openSetPage("providers");
   $("rowPersona").onclick = () => openSetPage("persona");
@@ -2110,22 +2454,15 @@ function bind() {
   $("rowPassword").onclick = () => { closeSettings(); showAuth(); showAuthView("recover"); };
   $("rowLogout").onclick = logoutCurrent;
 
-  $("addProviderBtn").onclick = () => {
-    state.editingProvider = null;
-    $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
-    $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
-    $("provKey").placeholder = "填入 API Key";
-    $("provTestResult").textContent = "";
-    $("provForm").classList.remove("hidden");
-    $("provLabel").focus();
-  };
+  $("addProviderBtn").onclick = () => openBlankProviderForm("mine");
+  $("addSharedBtn").onclick = () => openBlankProviderForm("admin");
   $("provForm").onsubmit = saveProvider;
   $("provTestBtn").onclick = testProviderDraft;
   $("provCancelBtn").onclick = closeProviderForm;
 
   $("ctxRange").oninput = (e) => {
-    pref.contextWindow = e.target.value;
-    $("ctxVal").textContent = pref.contextWindow;
+    pref.contextTokensK = e.target.value;
+    $("ctxVal").textContent = pref.contextTokensK;
   };
 
   $("memoryAddForm").onsubmit = async (e) => {
@@ -2149,14 +2486,22 @@ function bind() {
     pref.setPersona(pref.sessionId, ""); syncPersonaChip(); setStatus("角色设定已清除");
   };
 
-  $("saveTokenBtn").onclick = () => {
+  $("saveTokenBtn").onclick = async () => {
     const token = $("tokenInput").value.trim();
     if (!token) { setStatus("令牌那一格还是空的", true); return; }
-    // 必须建一条清单条目：pref.token 只改"当前那一条"，一台谁都没记过的机器上
-    // 没有当前条目，直接写就是静默无效。user_id 这里只能先占一个——重启后
-    // loadWho 认出他是谁，touchIdentity 再把名字与角色补上。
-    addIdentity({ user_id: "manual", username: "", role: "user", token });
-    location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
+    $("saveTokenBtn").disabled = true;
+    try {
+      // 手工录入的凭据走 adopt：明文只活过这一次请求头，换回的是 httpOnly Cookie
+      // 与服务端报回的真实身份。旧写法拿 "manual" 占位再等 loadWho 补名字，
+      // 现在不必——adopt 的响应体就是 /v1/auth/me 同形的答案。
+      const me = await API.adopt(token);
+      $("tokenInput").value = "";          // 用完就清出输入框，不留第二眼
+      addIdentity({ user_id: me.user_id, username: me.username, role: me.role });
+      location.reload();   // 令牌换了就是换了人（重跑 boot 会重复绑定事件）
+    } catch (e) {
+      $("saveTokenBtn").disabled = false;
+      setStatus("这枚凭据没被认：" + e.message, true);
+    }
   };
   $("openRegister").onclick = () => { closeSettings(); showAuth("register"); };
   $("authEye").onclick = toggleAuthPass;
@@ -2181,12 +2526,12 @@ function bind() {
   $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };
   renderRecoveryQuestions();
 
+  /* Esc 与手机的返回键是同一个动作：退掉最上面一层。写成两段（各自判断该关哪个）就是
+     两份真相——相机已经改成"关掉那一层时停轨"之后，这里漏掉一层不会报错，只会让
+     指示灯一直亮着。顺序、让位、多步回退全在 layers.js 那一处算。 */
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!$("cameraModal").classList.contains("hidden")) { closeCamera(); return; }
-    closeSettings();
-    closeSidebar();
-    setAttachMenu(false);
+    Layers.closeTop();
   });
 }
 
@@ -2230,10 +2575,14 @@ function setupKeyboardAware() {
 }
 
 /* ---------------- 启动 ---------------- */
+/* 读回这一条指针指向的历史。返回 null = 没什么要交代的；返回一个 Error = "这次没读回
+   历史"，但**不自己写状态条**，交给 loadServerData 在三路都落定之后统一写。
+   理由见那里：并发之后状态条是谁后回来谁抢，自己写就可能被 loadModels 那句
+   setStatus("") 擦掉，症状从"空聊天区 + 一句实话"退化成"空聊天区 + 什么都没有"。 */
 async function restore() {
   // 没有指针不等于"没什么可做的"：那正是上一个人的对话该消失的时刻。
   // 原先这里直接 return，靠"拿旧 id 去 GET 会撞 404"才把消息清掉——那是运气。
-  if (!pref.sessionId) { state.messages = []; return; }
+  if (!pref.sessionId) { state.messages = []; return null; }
   try {
     const full = await API.getSession(pref.sessionId);
     state.messages = (full.messages || []).map((m) => ({
@@ -2241,33 +2590,93 @@ async function restore() {
     }));
     await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   } catch (e) {
-    if (e.status === 404) { pref.sessionId = ""; state.messages = []; }
-    else if (!needsAuth(e)) setStatus("会话加载失败：" + e.message, true);
+    // 指针指的这条会话在服务端已经没有了：归零指针，界面按"新对话"走，不是一句错误。
+    if (e.status === 404) { pref.sessionId = ""; state.messages = []; return null; }
+    return e;
   }
+  return null;
 }
 
-/** 服务端数据的四步：注册成功、令牌变更后都要原样重跑一遍，不能只活在 boot 里。 */
+/** 服务端数据的四步：注册成功、令牌变更后都要原样重跑一遍，不能只活在 boot 里。
+ *
+ * 前三步并发、第四步排最后（2026-09-22：用户报"每次重新打开网页版都要等很久才出
+ * 对话界面"，分段量下来源站本机 /health p50 7ms，慢的是**趟数 × 每趟的隧道往返**，
+ * 单趟 ttfb 300~430ms。旧的写法是 loadModels → loadSessions → restore 一路 await
+ * 一路，光这三趟就是 1 秒左右的纯等待）。
+ *
+ * 并发前逐一查过的先后依赖（结论：三路彼此不相干，只有 ensureSession 真排在后面）：
+ * - loadModels()：输入只有 /v1/models 那个响应；写 state.providers / serverDefault /
+ *   presets，并在本机存的 pref.provider 已不可用时换成服务端默认；读 state.me
+ *   （isAdmin()，零模型时按角色分流提示文案）——那是 loadWho 的产物，loadWho 仍第一。
+ * - loadSessions()：写 state.sessions 并重画侧栏；renderSessions() 读 pref.sessionId
+ *   只为标"当前这一条"，而 pref.sessionId 来自本机存储，在 loadWho 之前就定了。
+ * - restore()：GET 的 id 也来自本机的 pref.sessionId，用不到 loadModels 带回来的
+ *   provider——**这是本轮唯一一处"看起来要等 models、其实不用"**：它写进的
+ *   state.messages 只被 messageNode() 消费，那里读的是 m.role / m.content 和每条
+ *   附件自己的 a.kind / a.url（supports_vision 只出现在模型下拉的文案里，不参与
+ *   渲染判断），三路里没有一处把 providers 喂给它。
+ * - ensureSession()：两处硬依赖留到最后——判据 `!pref.sessionId && currentProvider()`
+ *   里的 currentProvider() 读的是 loadModels 纠正之后的 pref.provider，函数体第一句
+ *   `state.sessions.some(...)` 读的是 loadSessions 的结果。并发就并发在这三步。
+ *
+ * 等的是"全部落定"（Promise.allSettled）而不是"第一个坏消息"（Promise.all）：
+ * Promise.all 一有人 reject 就立刻返回，剩下那几路还在跑却再没人等，boot 会拿着
+ * 半空的状态渲染完，晚到的 restore() 把 state.messages 填上时已经没人重画了——
+ * "会话列表好了、聊天区一直空着、也不报错"就是这么来的。allSettled 让每一路都跑到
+ * 自己的终点，再把第一个失败按数组顺序（models → sessions → restore，与旧串行
+ * 一致）重新抛给 boot 那个 needsAuth(e) 出口：出口只有一个，几路失败都是它。
+ * 已经改写成功的 state 不回滚：谁坏了说谁，其余照旧露出来。 */
 async function loadServerData() {
-  await loadModels();
-  await loadSessions();
-  await restore();
+  const [models, sessions, history] = await Promise.allSettled([
+    loadModels(), loadSessions(), restore(),
+  ]);
+  const lost = history.status === "fulfilled" ? history.value : null;
+  if (lost && !needsAuth(lost)) setStatus("会话加载失败：" + lost.message, true);
+  const first = [models, sessions, history].find((r) => r.status === "rejected");
+  if (first) throw first.reason;
   if (!pref.sessionId && currentProvider()) await ensureSession();
 }
 
+/* HTML 允许缓存 30 秒（backend/app/web/web_router.py 的 PAGE_CACHE），于是"旧页面配
+   新脚本"有一个窗口，症状是缺元素、点了没反应。判断单独成函数，是为了让它在 node 里
+   真跑得起来（tests/test_web_pwa.py 的 _BOOT_JS_HARNESS 同一套路）。
+   缺任何一边都不跳：没登录时拿不到服务端那一版，而这次部署之前留下的旧 HTML 压根没有
+   window.__ASSETS__——那种情况下瞎跳只会把人反复踢回登录页。 */
+function staleBuild(local, server) {
+  return Boolean(local) && Boolean(server) && local !== server;
+}
+
+/* "现在线上是哪一版"问 sw.js：它是全站唯一一个刻意不缓存的文件，内容里就带着当下的
+   水印。排在 boot 最后发，不挡首屏、也不进任何一条等待链。跳过去的那一个地址带上
+   ?b=<水印>，等于换一个没人缓存过的 URL，同时给"下一趟还是旧的"留一个止损点。 */
+function checkBuild(local) {
+  fetch("sw.js?build-check=" + Date.now(), { cache: "no-store" })
+    .then((res) => res.text())
+    .then((text) => {
+      const live = (text.match(/const V = "([^"]+)"/) || [])[1];
+      const jumped = new URLSearchParams(location.search).get("b");
+      if (!staleBuild(local, live) || jumped === live) return;
+      location.replace(location.pathname + "?b=" + encodeURIComponent(live));
+    })
+    .catch(() => { /* 问不到就不动：这一趟不值得让界面变红 */ });
+}
+
 async function boot() {
-  migrateLegacyIdentity();   // 必须排第一：pref 现在从清单读，没迁就等于把有令牌的人当陌生人
+  // 必须排第一：升级（老键/清单里的明文洗成 Cookie）没做完就往下读，等于把
+  // 一个还在线的人当陌生人，或者让旧明文多活一个页面生命周期。
+  await upgradeIdentitiesToCookie();
   applyTheme();
   bind();
   setupKeyboardAware();
   // 壳的事件入口只注册这一次。没有桥时这个数组永远没人推，注册本身无害。
   SHELL.onEvent(onShellEvent);
   updateSendEnabled();
-  $("ctxRange").value = pref.contextWindow;
-  $("ctxVal").textContent = pref.contextWindow;
+  migrateContextPref();
+  syncCtxRow();   // 量程/上限先按兜底画一版，loadModels 后 renderModelSelect 会再校准
   $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
-  /* 第一屏只能是中性层：本机有没有令牌是同步就知道的事，但"这枚令牌还有效吗"
-     必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
+  /* 第一屏只能是中性层：方案 C 起本机连"有没有凭据"都看不见（httpOnly 的本意），
+     "还有效吗"更必须问服务端一趟（走隧道 0.5~2 秒）。原先按有没有令牌分流，存过令牌的人依然
      先看到空聊天外壳加一个空白模型框，等 401 回来才弹层——手机上那个
      「1 → 3 → 2」的闪序就是它。现在不问完不露任何东西。 */
   showAuthPending();
@@ -2285,7 +2694,7 @@ async function boot() {
   // "服务没起来"伪装成"你没登录"——所以那一路露出外壳和上面那句话。
   if (state.me) hideAuth();          /* 令牌有效，含冷启动先盖了中性层那一路 */
   else if (unreachable) hideAuth();
-  else showAuth(pref.token ? "login" : "register");   /* 有令牌却被拒才换登录面；没令牌的仍停在注册 */
+  else showAuth(currentEntry() ? "login" : "register");   /* 记着人却被拒才换登录面；谁的会话都没有的仍停在注册 */
   renderMessages();
   syncPersonaChip();
 
@@ -2297,6 +2706,7 @@ async function boot() {
      报的，不是令牌的属性）。没有桥时 maybeAskUpdate 第一句就 return，浏览器里连一次
      fetch 都不会发出去。 */
   maybeAskUpdate();
+  checkBuild(window.__ASSETS__);
 }
 
 document.addEventListener("DOMContentLoaded", boot);

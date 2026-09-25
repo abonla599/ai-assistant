@@ -15,7 +15,7 @@
   <!-- 未取到管理员身份时只有这一块可见 -->
   <section id="gate" class="hidden">
     <div class="top"><h1>管理员登录</h1></div>
-    <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己那枚会话令牌。它只写进这台浏览器的 localStorage，不进 URL 也不进日志。</p>
+    <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己那枚会话令牌。口令只在这一次请求的头里出现：服务端认下后换发的是浏览器锁定的会话 Cookie，页面脚本与本机存储都拿不到凭据。</p>
     <label class="field" style="margin-top:10px">
       <span>口令</span>
       <input id="pass" type="password" placeholder=".env 里的 ACCESS_TOKEN" autocomplete="off">

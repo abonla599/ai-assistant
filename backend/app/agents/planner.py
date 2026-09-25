@@ -7,7 +7,9 @@ from app.core.llm_client import get_llm_response
 import json
 
 class Planner:
-    def __init__(self, model="deepseek-chat"):
+    def __init__(self, model: str = None):
+        # model 留空 = 走 setDefault 的 provider（口径同 ReActAgent）：
+        # get_llm_response 把 None 当"没有旧式模型名"交给 resolve 兜底。
         self.model = model
 
     def plan(self, goal: str) -> list:

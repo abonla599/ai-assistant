@@ -76,6 +76,14 @@ class SandboxManager:
                 cpu_quota=50000,
                 network_disabled=True,
                 detach=True,
+                # 纵深防护：已有的 mem/cpu 限制管不住进程数与提权。只读根文件系统
+                # + 丢光 capabilities + 禁新特权 + 限进程数，四处一起收口，
+                # 逃逸面才真的窄下来。代码挂载是只读、/home/sandbox/tmp 是 tmpfs，
+                # 正常运行不受影响；用户代码想写别的路径失败是预期行为。
+                read_only=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                pids_limit=64,
                 user="sandbox"
             )
             container.start()

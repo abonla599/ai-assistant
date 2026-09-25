@@ -36,9 +36,9 @@ def _call_args(src: str, open_paren: int) -> str:
 def _strip_java_comments(src: str) -> str:
     """去掉 // 与 /* */ 两种注释，但【尊重字符串字面量】。
 
-    不尊重字符串的话就毁在自家门口：LATEST_URL 的值里那句
-    "https://api.github.com/..." 会被当成注释从 `//` 起整段切掉，
-    于是"全仓只有一处提到 api.github.com"这条锁会因为读不到而永远绿着。
+    不尊重字符串的话就毁在自家门口：ShellEvents 里那个
+    `OPEN_URI_PREFIX = "assistant://open/"` 会被当成注释从 `//` 起整段切掉，
+    于是凡拿剥完的源码去数 URI 形状的地方都会因为读不到而永远绿着。
     注释里的符号也不该算数：把一行注掉不等于把那处调用删了。
     """
     out = []
@@ -235,16 +235,149 @@ def test_bridge_advertises_the_update_capability_the_page_depends_on():
         "capabilities 没报 version：设置那一行就没地方显示装的是哪一版"
 
 
-def test_the_release_endpoint_is_named_exactly_once():
-    """全仓只有一处提到 api.github.com，而且就在 ReleasePlan.LATEST_URL。
+def test_bridge_advertises_the_two_permissions_the_status_row_depends_on():
+    """提醒页那一行读的 notifications / exactAlarms 两个键，判定必须只有 PermissionStatus
+    与 ReminderScheduler 那一处。
 
-    两处地址等于两个事实来源：改一处的时候另一处会安静地继续打老地方。
+    桥里再 checkSelfPermission 一遍是最容易顺手写出的形状（"这里就三行，抄一下快了"），
+    而两份判定的分叉方式永远是"接收器以为能发、界面显示没授权"——两边各自都自洽，
+    只有人对上屏幕时才看见矛盾，这正是本项目最贵的那一类。
     """
-    hits = sorted(p.relative_to(REPO_ROOT).as_posix()
-                  for p in (SHELL_SRC.rglob("*.java"))
-                  if "api.github.com" in _code(p))
-    assert hits == ["android/app/src/main/java/xyz/fenever/assistant/core/ReleasePlan.java"], \
-        f"api.github.com 出现在这些地方：{hits}"
+    bridge = _code(SHELL_BRIDGE)
+    block = bridge[bridge.index("public String capabilities()"):]
+    block = block[:block.index("\n    }")]
+    assert '"notifications"' in block and "PermissionStatus.notificationsGranted" in block, \
+        f"capabilities 没报 notifications，或者它自己判定了一遍：{block}"
+    assert '"exactAlarms"' in block and "ReminderScheduler.exactAllowed" in block, \
+        f"capabilities 没报 exactAlarms，或者它自己判定了一遍：{block}"
+    assert "checkSelfPermission" not in bridge, "桥里自己判权限：那是第二份真相"
+    assert "canScheduleExactAlarms" not in bridge, "桥里自己问闹钟特权：那是第二份真相"
+
+
+def test_a_silent_drop_and_a_fired_reminder_both_leave_a_trace():
+    """到点这一支必须留下证据、且两支都照常推进排期：发出去了记 firedAt，发不出去记 missed。
+
+    以前通知没授权时 ReminderReceiver 直接 return、一笔不记，于是"设过的提醒从来没响过"
+    在屏幕上读不出来——用户只能在手机上翻系统设置猜。这一条锁的是"两支都记账"这个形状，
+    特别是**没有**只剩一句 return 的那一支。
+
+    <p>另一头，没授权那一支以前只记一笔 missed 就 return，不 advance 也不重排——看着像
+    "既然没响成就不该改用户的排期"，实际是把一次性的闹钟消费掉之后再也不排第二轮：
+    daily/weekly 从此变成列表里看得见、重启不管（BootReceiver 只重排 at > now）、授权恢复
+    也不会再响的孤儿，once 更会被别的提醒的每一次广播重复计一笔 missed。现在两支共用同一套
+    骨架，唯一区别就是有没有 notify()——这一条把"没有 notify 的那一支也必须 advance +
+    重排"钉死。
+    """
+    recv = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ReminderReceiver.java")
+    at = recv.index("notificationsGranted")
+    block = recv[at:recv.index("\n        }", at)]
+    assert "markMissed" in block, f"没授权那一支没记 missed（它又变回静默 return 了）：{block}"
+    assert "advance(r, now)" in block, f"没授权那一支没推进排期，daily/weekly 会变成永久孤儿：{block}"
+    assert "ReminderScheduler.schedule" in block, f"没授权那一支没给 daily/weekly 重排：{block}"
+    assert "notify(manager" not in block, "没授权那一支不该发通知，这是两支唯一的区别"
+    assert "markFired" in recv, "发出去的那一支没记 firedAt"
+    assert "notify(manager" in recv, "发通知那一支整条不见了：上面两条断言在空转"
+
+
+def test_notification_permission_check_also_covers_the_master_switch():
+    """notificationsGranted 必须同时问"运行时权限"和"通知总开关"，只问前者是半句谎。
+
+    checkSelfPermission 在 Android 13 以下恒回 GRANTED（那条权限压根不是运行时权限），
+    13 以上也只回答"该不该拦"，不回答"用户后来在系统设置里有没有把本应用的通知关掉"。
+    areNotificationsEnabled() 是唯一跨版本都问对的那一个——漏了它，23–32 上总开关关了
+    这一层还是查不出来，到点 notify() 被系统吞掉，markFired 却照样记"发出"，屏幕上
+    "上次发出 xx:xx"就是一次反着说谎。
+    """
+    src = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "PermissionStatus.java")
+    at = src.index("static boolean notificationsGranted")
+    block = src[at:src.index("\n    }", at)]
+    assert "checkSelfPermission" in block, "运行时权限那一问不能丢：Android 13+ 弹框问的就是它"
+    assert "areNotificationsEnabled" in block, \
+        "只问 checkSelfPermission：13 以下恒真、总开关关了也查不出，这是半个判定"
+
+
+def test_the_bridge_exposes_exactly_the_methods_the_page_calls():
+    """桥面方法的名字只有一份真相：Java 侧的 @JavascriptInterface 与 shell.js 的调用点。
+
+    这条锁替代了原来的"八个方法"存在性断言——那种写法加方法不会红，所以 v0.16 加了
+    checkUpdate 之后那句"八个"散文独自谎了两个版本；而"shell.js 漏接一个方法"这种真事故
+    它同样一声不吭。两边各扫一遍比集合，改名、漏接、壳里加了页面没接的方法三种都当场红。
+    """
+    from tests.test_web_pwa import _js      # JS 那把剥注释的尺子只有一份，不在这里抄第二遍
+    java = _code(SHELL_BRIDGE)
+    exposed = set(re.findall(r"@JavascriptInterface\s+public String\s+(\w+)\s*\(", java))
+    called = set(re.findall(r"\b(?:raw|call|rows)\(\s*\"(\w+)\"", _js("shell.js")))
+    assert len(exposed) >= 10, f"Java 侧只扫到 {len(exposed)} 个方法，正则失效了：{exposed}"
+    assert exposed == called, (
+        f"壳有页面没接：{sorted(exposed - called)}；页面调了壳没有：{sorted(called - exposed)}")
+
+
+def test_the_shell_never_talks_to_github_directly():
+    """2026-09-23 起，壳的问与取都只经过自家服务器：`api.github.com` 在壳源码里【一处都不许有】。
+
+    这条是原来"只许出现一次且在 ReleasePlan.LATEST_URL"的反向续集：那一跳连同把下载地址
+    丢给 DownloadManager 的整条通道，就是"迅雷劫持 → 未命名残包 → 安装失败"的案发链路。
+    修完之后壳源码里再出现一处 GitHub API 地址，就意味着有人在重新接那条被拆掉的线。
+
+    同一批钉住的还有两件事，缺一条这条锁就开始空转：
+    ① 确实扫到了足够多的文件（正对照，路径写错时"没有命中"和"守住了"长得一模一样）；
+    ② 三个钉死的地址同源、且 Activity 只通过 BuildConfig 引用它们——
+       地址的唯一真相在 build.gradle，改天换域名只改那一处，Java 里没有第二份可以漂。
+    """
+    files = sorted(SHELL_SRC.rglob("*.java"))
+    assert len(files) >= 12, f"只扫到 {len(files)} 个壳源码文件，这条锁多半在空转"
+    hits = [p.name for p in files if "api.github.com" in _code(p)]
+    assert not hits, f"壳又直连 GitHub 了（这些文件里出现地址）：{hits}"
+
+    main = _code(MAIN_ACTIVITY)
+    assert "BuildConfig.UPDATE_INFO_URL" in main, "检查更新不再问钉死的地址了？"
+    assert "BuildConfig.UPDATE_APK_URL" in main, "安装包不再从钉死的地址下载了？"
+
+    gradle = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+    # 值是 `"\"https://…\""` 这种套了一层转义引号的 Groovy 写法，正则按那个原样形状抓。
+    pinned = dict(re.findall(
+        r'buildConfigField\s+"String",\s+"(APP_URL|UPDATE_INFO_URL|UPDATE_APK_URL)",\s+'
+        r'"\\?"(https?://[^"\\]+)',
+        gradle))
+    assert set(pinned) == {"APP_URL", "UPDATE_INFO_URL", "UPDATE_APK_URL"}, \
+        f"钉死的地址三件套不齐：{sorted(pinned)}"
+    hosts = {re.match(r"https://([^/]+)/", url).group(1) for url in pinned.values()}
+    assert hosts == {"ai.fenever.xyz"}, f"更新链路与 APP_URL 不同源（三个地址的主机名）：{hosts}"
+    assert pinned["UPDATE_INFO_URL"].endswith("/v1/update/info")
+    assert pinned["UPDATE_APK_URL"].endswith("/site/android.apk"), \
+        "安装包不再走官网那颗按钮同款的加固代取端点"
+
+
+def test_the_apk_provider_registration_and_the_installer_share_one_authority():
+    """手写 FileProvider 的 authority 是三处拼出来的（manifest、Java 常量、Intent），必须一致。
+
+    对不上的表现不是崩溃，是安装页拿到一个解析不了的 URI 后一句"找不到文件"——
+    用户视角与残包事故几乎同一个症状，查起来却要先怀疑下载。
+    """
+    manifest = MANIFEST.read_text(encoding="utf-8")
+    assert 'android:authorities="${applicationId}.apkprovider"' in manifest, \
+        "manifest 里的 provider authority 形状变了，Java 侧那份要跟着改"
+    assert 'android:name=".ApkFileProvider"' in manifest
+    assert 'android:exported="false"' in manifest and "grantUriPermissions" in manifest
+    provider = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ApkFileProvider.java")
+    assert 'AUTHORITY_SUFFIX = ".apkprovider"' in provider, "Java 侧那份后缀与 manifest 漂了"
+    main = _code(MAIN_ACTIVITY)
+    assert "ApkFileProvider.uriForFile" in main, "安装页不再通过手写 provider 拿 URI"
+
+
+def test_the_apk_provider_imports_parcelfiledescriptor_from_the_real_package():
+    """ParcelFileDescriptor 在 android.os，不在 android.content——第一次签发 v0.19 就死在这。
+
+    本机没有 Android SDK，这类"类名对、包名错"的 import 只有 CI 编译时才炸；而炸的位置
+    恰好是全链路唯一没有 JVM 台架覆盖的一环（provider 依赖平台类，纯 Java 测试跑不了）。
+    所以在这里钉一行：错包名一旦出现，develop 推送即红，不用等打 tag 才发现。
+    """
+    provider = (SHELL_SRC / "xyz" / "fenever" / "assistant" / "ApkFileProvider.java") \
+        .read_text(encoding="utf-8")
+    assert "import android.os.ParcelFileDescriptor;" in provider, \
+        "ParcelFileDescriptor 的 import 包名又漂了：它在 android.os"
+    assert "import android.content.ParcelFileDescriptor;" not in provider, \
+        "android.content 下没有这个类，编译必炸（v0.19 首发实测）"
 
 
 def test_install_intent_and_its_permission_arrive_together():

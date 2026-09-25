@@ -129,4 +129,73 @@ public class ReminderStoreTest {
         assertNull(store.activeOwner());
         assertTrue(store.list().isEmpty());
     }
+
+    /**
+     * "上次实际到点"与"到点被丢掉几次"必须落得下去、读得回来。
+     *
+     * <p>这两个字段存在的唯一理由：用户报告"提醒从来没响过"，而屏幕上没有任何一处
+     * 能区分"没排上"、"排上了但通知被系统丢了"、"排上了也响了只是他错过"。这条测试
+     * 同时是 flush/load 的配对锁——只加 {@code load()} 不加 {@code flush()} 的话，
+     * 下一次任何写入就把这两个数整块抹掉，界面上那一行会永远显示 0（本项目最贵的
+     * "效果没了但不报错"）。
+     */
+    @Test public void firedAndMissedCountsSurviveAReload() {
+        MemIo io = new MemIo();
+        ReminderStore store = new ReminderStore(io);
+        store.setOwner("alice");
+        store.add(r("r-aaaaaaaaaaaa", "alice", 1000L, "daily"));
+        store.add(r("r-bbbbbbbbbbbb", "alice", 2000L, "once"));
+
+        Reminder daily = store.byId("r-aaaaaaaaaaaa");
+        store.markFired(daily, 1000L);
+        store.markMissed(daily);
+        store.markMissed(daily);
+        store.markMissed(store.byId("r-bbbbbbbbbbbb"));
+
+        ReminderStore reopened = new ReminderStore(io);        // 换一个实例，只认盘上那份
+        reopened.setOwner("alice");
+        assertEquals("落不下去就永远读不回来", 1000L, reopened.byId("r-aaaaaaaaaaaa").firedAt);
+        assertEquals(2L, reopened.byId("r-aaaaaaaaaaaa").missed);
+        assertEquals(0L, reopened.byId("r-bbbbbbbbbbbb").firedAt);
+        assertEquals(1L, reopened.byId("r-bbbbbbbbbbbb").missed);
+    }
+
+    /** 记账不许动排期：推进表里的 {@code at} 是 {@link ReminderStore#advance} 一个人的活。 */
+    @Test public void markingNeverMovesTheSchedule() {
+        ReminderStore store = new ReminderStore(new MemIo());
+        store.setOwner("alice");
+        store.add(r("r-aaaaaaaaaaaa", "alice", 1000L, "daily"));
+        Reminder row = store.byId("r-aaaaaaaaaaaa");
+
+        store.markFired(row, 1000L);
+        store.markMissed(row);
+
+        assertEquals(1000L, store.byId("r-aaaaaaaaaaaa").at);
+        assertEquals("标一次就把 daily 删掉或挪走，等于替用户决定这条不用再响",
+                1, store.list().size());
+    }
+
+    /**
+     * 对象已经不在表里了，也要能安全地标记——这是一条防御性要求，不是对真实调用时序的
+     * 描述（{@code ReminderReceiver} 实际是"先记账再推进"，见 {@code markFired} 的注释；
+     * 这里故意反着调用，模拟的是"万一顺序变了，或者手里这个引用本来就是旧的"）。
+     *
+     * <p>不管对象在不在表里，标记只改手里这个对象、绝不重新入表（那会让删掉的提醒复活）；
+     * 落不落盘在这个场景下不影响正确性，但它不许抛、更不许把整条通知流程带崩。
+     */
+    @Test public void markingARemovedReminderResurrectsNothing() {
+        MemIo io = new MemIo();
+        ReminderStore store = new ReminderStore(io);
+        store.setOwner("alice");
+        store.add(r("r-aaaaaaaaaaaa", "alice", 1000L, "once"));
+        Reminder gone = store.byId("r-aaaaaaaaaaaa");
+        store.advance(gone, 1000L);                            // once：触发即删
+        assertEquals(0, store.list().size());
+
+        store.markFired(gone, 1000L);
+        store.markMissed(gone);
+
+        assertEquals("标记把已经删掉的提醒写回去了", 0, store.list().size());
+        assertEquals(1000L, gone.firedAt);                     // 手里的对象仍然改得动，只是不入库
+    }
 }

@@ -21,6 +21,10 @@ os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 # enforced 覆盖。
 os.environ["AUTH_MODE"] = "disabled"
 os.environ["ACCESS_TOKEN"] = ""
+# 会话 Cookie 默认 Secure（现网只有 HTTPS）；TestClient 走 http://testserver，
+# 不显式降级则 Cookie 根本回不来，cookie 鉴权在测试里等于没测。生产忘配不会
+# fail-open——降级必须是这里的主动行为（判据见 tests/test_cookie_auth.py）。
+os.environ["AUTH_COOKIE_SECURE"] = "0"
 
 # 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
 # data/users.json —— 那是越出本次改动范围的外部副作用。
@@ -150,6 +154,16 @@ def _isolated_throttle():
 
     for ledger, _window in _LEDGERS:
         ledger.clear()
+    # APK 代取那本不在 _LEDGERS 里（它在 web_router，窗口/上限都不同），但它同样是
+    # 跨用例的进程内状态：不清的话，任何多点几次下载的用例会把 127.0.0.1 这一个
+    # 来源攒到 429，饿死后面真点按钮的用例。加新闸门时这里跟着长。
+    from app.web import web_router
+    web_router._APK_DOWNLOADS.clear()
+    # 工具频控账本同一性质（tools/executor 的滑动窗口，进程内、10 分钟不自动松）：
+    # 任何多用了几次 execute_code 的用例会把 "anon" 攒到闸门阈值，后面断言"代码跑
+    # 出来了"的用例会拿到一句"调用过于频繁"。
+    from app.tools import executor as _tools_executor
+    _tools_executor._FREQ_LEDGER.clear()
     yield
 
 
@@ -162,7 +176,8 @@ def _cleanup_test_data():
 # 上面那轮 CI 红换来的守卫：一次没还原成功的 monkeypatch 会把
 # AUTH_MODE=enforced + ACCESS_TOKEN=boot-token 留满整场，于是三十条与故障毫不
 # 相干的用例集体 401，红的地方离真凶隔了六个文件。
-_PRISTINE_AUTH_ENV = {k: os.environ.get(k) for k in ("AUTH_MODE", "ACCESS_TOKEN")}
+_PRISTINE_AUTH_ENV = {k: os.environ.get(k)
+                      for k in ("AUTH_MODE", "ACCESS_TOKEN", "AUTH_COOKIE_SECURE")}
 _PREV_TEST = {"nodeid": None}
 
 

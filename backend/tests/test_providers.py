@@ -468,3 +468,116 @@ def test_a_vendor_that_echoes_the_header_back_leaves_no_key_in_the_ping_detail(t
     assert STORED_KEY not in result["detail"], f"密钥从探活结果里漏出去了：{result['detail']}"
     assert "401" in result["detail"], "脱敏不该把「上游回了 401」这条线索一起抹掉"
     assert STORED_KEY in store.resolve(saved["id"])["api_key"], "脱敏只许改出口，不许改配置本身"
+
+
+# ---------- owner 维度：私有 provider 的存储层不变式 ----------
+
+def _priv(**over):
+    base = {"label": "私有", "model": "m", "base_url": "https://p.invalid/v1",
+            "api_key": "sk-private-store-key-1", "owner": "u_a"}  # secret-scan:allow 测试假密钥
+    base.update(over)
+    return base
+
+
+def test_private_record_never_wins_site_default(tmp_path):
+    store = _fresh_store(tmp_path)
+    shared = store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                           "api_key": "sk-shared-0001112223"})  # secret-scan:allow 测试假密钥
+    priv = store.upsert(_priv(is_default=True))
+    assert priv["is_default"] is False, "私有条目不许自称站级默认"
+    assert store.default()["id"] == shared["id"]
+
+
+def test_first_record_auto_default_skips_private(tmp_path):
+    """库里第一条恰好是用户私有：也不能自动顶成站级默认。"""
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    assert priv["is_default"] is False
+    assert store.default() is None
+
+
+def test_upsert_update_inherits_owner_and_cannot_turn_public(tmp_path):
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    again = store.upsert({**priv, "label": "改名", "owner": ""})
+    assert again["owner"] == "u_a", "更新路径不许把私有条目'改姓'成共享"
+
+
+def test_set_default_rejects_private(tmp_path):
+    store = _fresh_store(tmp_path)
+    store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                  "api_key": "sk-shared-0001112223"})  # secret-scan:allow
+    priv = store.upsert(_priv())
+    assert store.set_default(priv["id"]) is False
+
+
+def test_resolve_user_id_keeps_own_and_shared_and_falls_back_for_others(tmp_path):
+    store = _fresh_store(tmp_path)
+    shared = store.upsert({"label": "共享", "model": "s", "base_url": "https://s.invalid/v1",
+                           "api_key": "sk-shared-0001112223"})  # secret-scan:allow
+    priv_a = store.upsert(_priv())
+    assert store.resolve(priv_a["id"], user_id="u_a")["id"] == priv_a["id"]
+    assert store.resolve(shared["id"], user_id="u_b")["id"] == shared["id"]
+    # B 用 A 的私有 id：与不存在同一路径，回落（B 视角的）默认
+    assert store.resolve(priv_a["id"], user_id="u_b")["id"] == shared["id"]
+    # 内部调用（不带 user_id、拿已验过归属的具体 id）仍可解析私有
+    assert store.resolve(priv_a["id"])["id"] == priv_a["id"]
+
+
+def test_prefs_persist_and_sweep_on_delete(tmp_path):
+    store = _fresh_store(tmp_path)
+    priv = store.upsert(_priv())
+    store.set_pref("u_a", priv["id"])
+    assert store.default_for("u_a")["id"] == priv["id"]
+    # 换一个实例（模拟重启）：偏好还在原文件里
+    again = ProviderStore_reopen(tmp_path)
+    assert again.get_pref("u_a") == priv["id"]
+    assert again.default_for("u_b") == again.default()
+    again.delete(priv["id"])
+    assert again.get_pref("u_a") is None
+    assert again.default_for("u_a") == again.default()
+
+
+def ProviderStore_reopen(tmp_path):
+    from app.core.providers import ProviderStore
+    return ProviderStore(path=str(tmp_path / "providers.json"))
+
+
+# ---------- 上下文上限（max_context_k）：滑杆随模型封顶的数据源 ----------
+
+def test_max_context_k_normalizes_any_input():
+    """判据只有这一处：写路径、读路径、兜底都走同一个函数。"""
+    from app.core.providers import normalize_max_context_k, DEFAULT_MAX_CONTEXT_K
+    assert normalize_max_context_k(None) == DEFAULT_MAX_CONTEXT_K == 64
+    assert normalize_max_context_k("") == 64
+    assert normalize_max_context_k("abc") == 64      # 垃圾输入不炸配置，兜底
+    assert normalize_max_context_k("256") == 256
+    assert normalize_max_context_k(256.9) == 256
+    assert normalize_max_context_k(-5) == 1          # 钳下限：0/负数没有意义
+    assert normalize_max_context_k(100000) == 10000  # 钳上限：防手滑 1M 打成 1000M
+
+
+def test_max_context_k_roundtrips_through_api_and_catalog():
+    """表单填的上限必须原样出现在 _public 与 /v1/models 里，前端才有封顶依据。"""
+    plain = client.post("/v1/providers", json=_payload()).json()["provider"]
+    assert plain["max_context_k"] == 64, "没填时应兜底为 64K"
+    big = client.post("/v1/providers", json=_payload(max_context_k=256)).json()["provider"]
+    assert big["max_context_k"] == 256
+    entry = next(m for m in client.get("/v1/models").json()["models"] if m["id"] == big["id"])
+    assert entry["max_context_k"] == 256, "catalog 没把上限带给前端：滑杆封不了顶"
+
+
+def test_legacy_provider_without_field_still_reports_a_number(tmp_path):
+    """字段加入之前就躺在盘上的老记录：读路径兜底成数字，界面拿不到 undefined。"""
+    import json
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps([{
+        "id": "old-one", "label": "老条目", "base_url": "https://api.old/v1",
+        "api_key": "sk-real-looking-legacy-999",  # secret-scan:allow 测试假密钥
+        "model": "m", "supports_vision": False, "is_default": False,
+        "paid_by": "operator", "owner": "",
+    }]), encoding="utf-8")
+    from app.core.providers import ProviderStore
+    store = ProviderStore(path=str(path))
+    assert store.catalog()[0]["max_context_k"] == 64
+    assert store.public_list()[0]["max_context_k"] == 64

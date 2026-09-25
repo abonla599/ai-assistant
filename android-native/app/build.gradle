@@ -1,0 +1,81 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "org.jetbrains.kotlin.plugin.serialization"
+}
+
+android {
+    namespace "xyz.fenever.assistant.nativeapp"
+    compileSdk 34
+
+    defaultConfig {
+        // applicationId 与 WebView 壳（xyz.fenever.assistant）不同，两者可在同一台手机并存
+        applicationId "xyz.fenever.assistant.native"
+        minSdk 24
+        targetSdk 34
+        versionCode 21
+        versionName "0.21"
+
+        // 与壳同一判据：三个值主机名一致（backend 的 test_android_shell.py 同族约束）。
+        buildConfigField "String", "DEFAULT_BASE_URL", "\"https://ai.fenever.xyz\""
+    }
+
+    signingConfigs {
+        release {
+            // 与壳同一把密钥、同一套环境变量：覆盖安装判签名不判版本号，
+            // 缺 secret 时产未签名包给本地试装，CI 缺 secret 直接失败不发新钥匙包。
+            def ksPath = System.getenv("APK_KEYSTORE")
+            if (ksPath) {
+                storeFile file(ksPath)
+                storePassword System.getenv("APK_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("APK_KEY_ALIAS")
+                keyPassword System.getenv("APK_KEY_PASSWORD")
+                storeType "PKCS12"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {}
+        release {
+            minifyEnabled false
+            if (System.getenv("APK_KEYSTORE")) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion "1.5.14"
+    }
+}
+
+dependencies {
+    def composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    implementation composeBom
+
+    implementation "androidx.core:core-ktx:1.13.1"
+    implementation "androidx.activity:activity-compose:1.9.0"
+    implementation "androidx.navigation:navigation-compose:2.7.7"
+    implementation "androidx.compose.ui:ui"
+    implementation "androidx.compose.foundation:foundation"
+    implementation "androidx.compose.material3:material3"
+    implementation "androidx.compose.ui:ui-tooling-preview"
+
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+
+    testImplementation "junit:junit:4.13.2"
+}

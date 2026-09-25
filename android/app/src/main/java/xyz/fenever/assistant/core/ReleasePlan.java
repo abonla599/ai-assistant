@@ -21,17 +21,22 @@ public final class ReleasePlan {
     public static final String OWNER = "abonla599";
     public static final String REPO = "ai-assistant";
 
-    /** 唯一允许问一次的地方。写成一处的意义是"全仓只有一处提到 api.github.com"可以成为一条锁。 */
-    public static final String LATEST_URL =
-            "https://api.github.com/repos/" + OWNER + "/" + REPO + "/releases/latest";
-
-    /** 资产名与 {@code .github/workflows/release-apk.yml} 里那个 {@code file=} 同一个形状。 */
+    /**
+     * 资产名与 {@code .github/workflows/release-apk.yml} 里那个 {@code file=} 同一个形状。
+     *
+     * <p>这里不再有"去哪问"的地址：2026-09-23 起这条链路的问与取都收在自家服务器
+     * （{@code BuildConfig.UPDATE_INFO_URL} / {@code UPDATE_APK_URL}），壳不再直连
+     * GitHub 的发布接口——那一跳曾被 ROM 里的下载通道劫持。这一层只负责对
+     * 透传回来的 JSON 做判断，所以"全仓（壳源码）不出现任何 GitHub API 地址"
+     * 本身成了新的锁。
+     */
     public static final String APK_PREFIX = "ai-assistant-";
 
     /**
-     * 只认这一个主机。{@code browser_download_url} 就是 {@code https://github.com/...}，
-     * 302 到对象存储是 DownloadManager 自己去跟的，不在我们校验的范围里。
-     * GitHub 哪天换了主机的话这里会明确报"地址不在白名单里"，而不是静默去装别处的包。
+     * 透传回来的 JSON 里那个 {@code browser_download_url} 仍然按这一套校验。
+     * 壳现在下载走自家服务器钉死的地址、并不用这个 url，留着的理由是纵深防御：
+     * 一份连"官方下载地址"都被人改花了的 JSON，本来就不该被当成可信发布信息。
+     * GitHub 哪天换了主机的话这里会明确报"地址不在白名单里"，而不是静默放行。
      */
     private static final String ALLOWED_HOST = "github.com";
     private static final String ALLOWED_PATH_PREFIX =
@@ -51,15 +56,27 @@ public final class ReleasePlan {
         public final String notes;
         /** UNUSABLE 时给人看的那句话；其余为 null。 */
         public final String reason;
+        /**
+         * 这版安装包内容的 SHA-256（64 位小写十六进制），来自发布正文里由发布流水线
+         * 在【签名之后】算好的那一行，由服务端解析后搭车透传。
+         *
+         * <p>null 的含义是"这份 JSON 没带可信校验值"——缺行、大写、长度不对统统算缺。
+         * 调用方（MainActivity）拿着它是两件事：没有它就不许起下载；下完字节算出的
+         * 摘要与它不一致就不许起安装页。校验值本身经同一通道回来，防的不是仓库被劫，
+         * 防的是下载途中的完整性事故——2026-09-23 那次"第三方下载通道递回来半截残包"
+         * 就是没有这道闸时用户自己撞上的。
+         */
+        public final String sha256;
 
         private Decision(Kind kind, String version, String url, long sizeBytes,
-                         String notes, String reason) {
+                         String notes, String reason, String sha256) {
             this.kind = kind;
             this.version = version;
             this.url = url;
             this.sizeBytes = sizeBytes;
             this.notes = notes;
             this.reason = reason;
+            this.sha256 = sha256;
         }
     }
 
@@ -72,12 +89,13 @@ public final class ReleasePlan {
      * 但三态的判据必须留在这层，别让它退化成"出错了就当没更新"。
      */
     public static Decision unusable(String reason) {
-        return new Decision(Kind.UNUSABLE, null, null, -1L, null, reason);
+        return new Decision(Kind.UNUSABLE, null, null, -1L, null, reason, null);
     }
 
     /**
      * @param currentVersion 本机 {@code BuildConfig.VERSION_NAME}，形如 {@code 0.14}
-     * @param releaseJson    {@code /releases/latest} 的原样返回
+     * @param releaseJson    {@code BuildConfig.UPDATE_INFO_URL} 透传回来的原样发布 JSON
+     *                       （顶层多一个服务端注入的 {@code apk_sha256}，不认识的就当没有）
      */
     public static Decision decide(String currentVersion, String releaseJson) {
         Object parsed;
@@ -97,7 +115,7 @@ public final class ReleasePlan {
         if (version == null) return unusable("发布标签形状不对");
         if (!isNumericVersion(currentVersion)) return unusable("本机版本号形状不对");
         if (compare(version, currentVersion) <= 0) return new Decision(
-                Kind.UP_TO_DATE, version, null, -1L, null, null);
+                Kind.UP_TO_DATE, version, null, -1L, null, null, null);
 
         Object assets = rel.get("assets");
         if (!(assets instanceof List)) return unusable("发布里没有资产清单");
@@ -106,7 +124,25 @@ public final class ReleasePlan {
 
         String body = text(rel.get("body"));
         return new Decision(Kind.AVAILABLE, version, picked.url, picked.sizeBytes,
-                truncate(body), null);
+                truncate(body), null, digestOrNull(text(rel.get("apk_sha256"))));
+    }
+
+    /**
+     * 只认 64 位小写十六进制，别的一律当"没有"。
+     *
+     * <p>与后端 {@code releases.APK_SHA256_RE} 认的是同一个形状（发布流水线只写小写），
+     * 两边判据的一致性钉在 backend/tests/test_update_channel.py。这里不 trim 不换大小写：
+     * 一个需要"再加工一下才像真的"的摘要，恰恰是被动过手脚时最可能出现的形状。
+     */
+    private static String digestOrNull(String value) {
+        if (value == null || value.length() != 64) return null;
+        for (int i = 0; i < 64; i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                if (c < 'a' || c > 'f') return null;
+            }
+        }
+        return value;
     }
 
     /**
@@ -124,7 +160,8 @@ public final class ReleasePlan {
             if (!want.equals(text(asset.get("name")))) continue;
             String url = text(asset.get("browser_download_url"));
             if (!downloadUrlIsTrusted(url, want)) return null;
-            return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")), null, null);
+            return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")),
+                    null, null, null);
         }
         return null;
     }

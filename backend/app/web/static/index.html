@@ -26,7 +26,7 @@
 
       <nav class="sb-nav">
         <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
-        <button class="nav-item hidden" id="navProviders" data-admin-only><span class="ni-ico">⌗</span>模型服务</button>
+        <button class="nav-item" id="navProviders"><span class="ni-ico">⌗</span>模型服务</button>
         <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
       </nav>
 
@@ -85,6 +85,10 @@
           <div class="input-foot">
             <button type="button" class="icon-btn plus-btn" id="attachBtn" aria-label="添加附件" title="添加附件">＋</button>
             <span class="hint" id="statusHint"></span>
+            <!-- 快速切换模型芯片：点开就是可用模型清单，选一个立刻生效并同步
+                 服务端「我的默认」。hidden 是默认值——模型清单要等 /v1/models
+                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。 -->
+            <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
             <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
@@ -103,6 +107,10 @@
             </button>
           </div>
         </div>
+
+        <!-- 模型快切弹单：条目由 app.js 的 renderModelMenu 从 state.providers
+             现渲染。和附件菜单同款"让位层"：相机、附件打开时它自动收起。 -->
+        <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="选择模型"></div>
 
         <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
              accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->
@@ -163,7 +171,7 @@
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></span>
               <span class="set-lbl">当前模型</span>
               <span class="set-val"><select id="modelSel" class="set-sel" aria-label="选择模型"></select></span></div>
-            <button class="set-row hidden" id="rowProviders" data-admin-only>
+            <button class="set-row" id="rowProviders">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 12l4-3"/></svg></span>
               <span class="set-lbl">模型服务</span><span class="set-val" id="chatNote"></span><span class="set-go">›</span></button>
           </div>
@@ -176,8 +184,12 @@
             <div class="set-row">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h9l3 3v13H6V4Z"/><path d="M9 4v5h6"/></svg></span>
               <span class="set-lbl">上下文长度</span>
-              <span class="set-val"><b id="ctxVal">10</b> 条
-                <input type="range" id="ctxRange" min="2" max="40" step="2" value="10" aria-label="携带上下文条数"></span></div>
+              <!-- 2026-09-23：刻度从"条"换成 token（缩写 k）。条数让人以为
+                   上下文与内容无关，而模型真正吃得下的是 token——设置直接说 token。
+                   斜杠后那截是**当前模型的上限**，来自模型档案的 max_context_k，
+                   切模型自动跟着换；滑杆拖不过它，预算也就不会越界吃 4xx。 -->
+              <span class="set-val"><b id="ctxVal">8</b>/<span id="ctxCap">64</span>k
+                <input type="range" id="ctxRange" min="2" max="64" step="2" value="8" aria-label="上下文 token 预算（k），上限随所选模型"></span></div>
             <button class="set-row" id="exportBtn">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></span>
               <span class="set-lbl">导出本次对话</span><span class="set-go">›</span></button>
@@ -256,21 +268,30 @@
           <h2 class="set-title" id="setPageTitle">设置</h2>
         </div>
         <div class="set-scroll" id="setPageBody">
-        <!-- 模型服务：整块都是管理员专属（后端 7 条路由都要求管理员），
-             data-admin-only 让 app.js 在拿到角色后统一收起。hidden 必须先写在 HTML 上：
-             角色要等 /v1/auth/me 回来才知道，默认可见就等于每次冷启动都给普通用户
-             闪一下"模型服务"，点进去必然 403。默认收起、确认是管理员才放行。 -->
-        <section class="set-page hidden" data-page="providers" id="paneProviders" data-admin-only>
-          <div id="providerList" class="prov-list"></div>
-          <button class="btn btn-block" id="addProviderBtn">＋ 添加模型服务</button>
+        <!-- 模型服务：所有人可进。页面分两区——「共享模型」由管理员维护
+             （普通用户只读，管理员在这里增删改的是**全站**上游）；「我的模型」
+             每个人用自己的 API Key 接入任意 OpenAI 兼容服务，条目只有主人看得见、
+             调用记在主人账上（paid_by=user）。后端按所有权分面：/v1/providers 仅管理员、
+             /v1/me/providers 仅本人，界面收起与否从来不是边界，手搓请求由路由守着。 -->
+        <section class="set-page hidden" data-page="providers" id="paneProviders">
+          <p class="set-group">共享模型（管理员维护）</p>
+          <div id="sharedProvList" class="prov-list"></div>
+          <button class="btn btn-block hidden" id="addSharedBtn" data-admin-only>＋ 添加共享模型服务</button>
+
+          <p class="set-group">我的模型（自带 API Key）</p>
+          <div id="myProvList" class="prov-list"></div>
+          <button class="btn btn-block" id="addProviderBtn">＋ 添加我的模型</button>
 
           <form class="prov-form hidden" id="provForm">
             <input type="hidden" id="provId">
             <div class="preset-row" id="presetRow"></div>
             <label class="field"><span>显示名称</span><input id="provLabel" type="text" placeholder="例如 DeepSeek Chat" autocomplete="off"></label>
             <label class="field"><span>Base URL</span><input id="provBase" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off"></label>
-            <label class="field"><span>API Key</span><input id="provKey" type="password" placeholder="留空则保留原密钥" autocomplete="off"></label>
+            <label class="field"><span>API Key</span><input id="provKey" type="password" placeholder="留空则保留原密钥" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
             <label class="field"><span>模型名</span><input id="provModel" type="text" placeholder="deepseek-flash / qwen-vl-max" autocomplete="off"></label>
+            <!-- 上限（K token）决定聊天设置里"上下文长度"滑杆能拖到多远：
+                 留空按 64K；豆包 256k 填 256，1M 窗口的填 1000。 -->
+            <label class="field"><span>上下文上限（K token）</span><input id="provCtxK" type="number" min="1" max="10000" step="1" placeholder="留空按 64，例如 256 或 1000" inputmode="numeric"></label>
             <label class="check"><input id="provVision" type="checkbox"><span>该模型支持图片输入（视觉）</span></label>
             <div class="row">
               <button class="btn" type="button" id="provTestBtn">测试连通</button>
@@ -280,9 +301,11 @@
             <p class="pane-note" id="provTestResult"></p>
           </form>
 
-          <!-- 手工填令牌：本机直跑服务时的后门。它跟着这一页一起只对管理员出现，
-               普通用户不该在设置里看见一个填令牌的输入框。 -->
-          <div class="row">
+          <!-- 手工填令牌：本机直跑服务时的后门。它只跟着管理员出现，
+               普通用户不该在设置里看见一个填令牌的输入框。hidden 必须是
+               HTML 默认值：applyRole 要等 /v1/auth/me 回来才跑，默认可见
+               等于每次冷启动先闪出来再收掉。 -->
+          <div class="row hidden" data-admin-only>
             <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
             <button class="btn btn-primary" id="saveTokenBtn">保存</button>
           </div>
@@ -499,6 +522,10 @@
     </div>
   </div>
 
+  <!-- 这一页是哪一版：`__ASSET_TOKEN__` 由服务端在出门前填（app/web/web_router.py 的
+       rewritten_html）。HTML 允许缓存 30 秒，所以"旧骨架跑新代码"有一个 30 秒的窗口，
+       症状是缺元素、点了没反应；app.js 拿这个值对一次账，不对就自己重载。 -->
+  <script>window.__ASSETS__ = "__ASSET_TOKEN__";</script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
   <!-- highlight.js 不在关键路径上：由 markdown.js 在首次遇到代码块时懒加载，
@@ -508,6 +535,9 @@
   <!-- shell.js 必须排在 app.js 之前：它定义的全局 SHELL 是 app.js 里三处 setOwner 与
        提醒/分享那几段的唯一入口，而它本身在没有桥的浏览器里就是一堆空操作。 -->
   <script src="shell.js"></script>
+  <!-- layers.js 提供 makeLayerStack，app.js 在加载时就调它建栈（那时会 replaceState 一次），
+       所以必须排在前面。它只认 history、不碰 DOM，因此也能被 node 直接跑起来验行为。 -->
+  <script src="layers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
