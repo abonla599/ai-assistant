@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -178,14 +179,17 @@ fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = 260L, cancelUp: Dp
     val slopPx = with(LocalDensity.current) { 12.dp.toPx() }
     val cancelPx = with(LocalDensity.current) { cancelUp.toPx() }
     return pointerInput(holdMs, cancelUp) {
+        // PointerGestureScope 本身不是 CoroutineScope（1.6 实测 launch 报接收者
+        // 类型不匹配），长按定时器要挂在外面这层 coroutineScope 上。
+        coroutineScope {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
             if (!enabled()) return@awaitEachGesture
             var started = false
             var cancelling = false
             var movedOut = false
-            // 抬手/手势终止时显式掐掉定时器：不能赌框架的会话取消时机，
-            // 慢半拍触发就是"手指都离开了还凭空开始录音"。
+            // 抬手/手势终止时显式掐掉定时器：定时器挂在 pointerInput 级的作用域上，
+            // 不会随手势自己收摊——不掐就是"手指都离开了还凭空开始录音"。
             val timer = launch {
                 delay(holdMs)
                 if (!movedOut) { started = true; onStart() }
@@ -208,6 +212,7 @@ fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = 260L, cancelUp: Dp
                 timer.cancel()
             }
             if (started) onFinish(cancelling)
+        }
         }
     }
 }
