@@ -609,20 +609,25 @@ async function submitRecovery() {
   $("rcHint").textContent = "改密码中…";
   try {
     await API.resetPassword(rcName, answers, pw);
-    // 答案与新密码同样是凭据，但这里不单独清：找回这条流程内清格子只有
-    // clearAuthCredentials() 一处，由下面的 showAuth → setAuthMode 走到（afterAuth 是
-    // "令牌落库之后清输入框"那一处，不归这条流程管）。上一版只在成功分支逐格清，于是
-    // 猜错 401 之后离开流程就漏——同一个 bug 的成因就是"流程内清凭据的地方不止一处"。
+    // 改完密码就地续用（v0.21 双端同契约）：新密码刚被服务端验过，拿它直接登录，
+    // 不再把人退回登录表单要求"再登一次"。别的设备掉线仍是这条路的**设计后果**，
+    // 那句话不藏，只是不再挡在本人中间。
     rcStep = 1;
     renderRecovery();
-    // 令牌已在服务端全部作废，这里必须回到登录而不是直接放人进去。那句提示不许省：
-    // "我改了密码，因为手机丢了"是这条路存在的理由，别的设备掉线是它的**设计后果**，
-    // 藏起来只会让人以为那台设备坏了。
-    $("authUser").value = rcName;
-    showAuth("login");
-    // 顺序是硬约束：上面那句 showAuth 里的 setAuthMode 先把提示与 err 态复位，
-    // 这句好消息才不会被上一次失败留下的红色显示成错误
-    $("authHint").textContent = "密码已重置，请用新密码登录。其他设备需要重新登录一次。";
+    // 以前这一步是 showAuth→setAuthMode 顺路做的；续用不再经过 showAuth，就得在这儿
+    // 亲手清——找回答案与新密码都是凭据，不许留在 DOM 里。用户名照旧留着。
+    clearAuthCredentials();
+    try {
+      const res = await API.login(rcName, pw);
+      await afterAuth(res);        // 收起弹层、落名册、拉数据，和正常登录一字不差
+    } catch (e2) {
+      // 自动登录没成（比如撞上限流）：退回老收口，名字预填好，只说一句人话。
+      // 顺序是硬约束：showAuth 里的 setAuthMode 先把提示与 err 态复位，
+      // 这句才不会被上一次失败的红色显示成错误。
+      $("authUser").value = rcName;
+      showAuth("login");
+      $("authHint").textContent = "密码已重置，但自动登录没成：请用新密码再登一次。其他设备需要重新登录一次。";
+    }
   } catch (e) {
     rcFail(e.message);
   } finally {
@@ -1287,7 +1292,13 @@ function renderSuggestions(show) {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = text;
-    b.onclick = () => { $("input").value = text; autosize($("input")); $("input").focus(); };
+    // 赋完 value 光标默认在句首，点标语想接着打字的人每次都得先跳回末尾——
+    // focus 之后把光标钉到句尾（v0.21 原生端修过同一条，双端同契约）
+    b.onclick = () => {
+      const el = $("input");
+      el.value = text; autosize(el); el.focus();
+      el.setSelectionRange(text.length, text.length);
+    };
     box.appendChild(b);
   });
 }
@@ -2401,6 +2412,10 @@ function bind() {
     }
   });
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
+  // 手机宽度上根本没有 Shift+Enter（上面那颗回车键用的就是同一条 860 分界），
+  // 提示不该留着（v0.21 双端同契约）。网页版没有按住说话的语音输入，
+  // 不写兑现不了的字——手机端只说"发消息"，桌面端保留 Shift+Enter 提示。
+  input.placeholder = window.innerWidth > 860 ? "发消息，Shift + Enter 换行" : "发消息";
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
   // 不给它写 setAttachMenu(false)：附件菜单是"让位层"，openCamera 自己会把它连同
