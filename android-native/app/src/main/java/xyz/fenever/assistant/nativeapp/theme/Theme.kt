@@ -1,6 +1,7 @@
 package xyz.fenever.assistant.nativeapp.theme
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -19,9 +20,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -224,19 +227,17 @@ fun AiGlowBackground(content: @Composable BoxScope.() -> Unit) {
     }
 }
 
-/* 品牌记号：网页用的是 icon.png 那枚渐变圆角方块（brand-logo 22px/圆角 7、
- * 空态 54px、auth 30px），原生端同形制重现。 */
+/* 品牌记号：直接 use 网页同一枚 icon.png（渐变圆角方块 + 白气泡三点），
+ * 不再靠 Canvas 画近似形——用户原话「里面的这个图标也一点都不好看」。
+ * 资源在 res/drawable-nodpi/app_icon.png（由 launcher 同一张源图裁出）。 */
 @Composable
 fun AiBrandMark(sizeDp: Int = 44) {
-    Box(
-        Modifier.size(sizeDp.dp)
-            .background(aiPrimaryBrush(), RoundedCornerShape((sizeDp / 3.14f).dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(Modifier.size((sizeDp * 0.52f).dp)) {
-            drawCircle(Color.White.copy(alpha = 0.92f))
-        }
-    }
+    Image(
+        painter = painterResource(xyz.fenever.assistant.nativeapp.R.drawable.app_icon),
+        contentDescription = "AI 助手",
+        modifier = Modifier.size(sizeDp.dp)
+            .clip(RoundedCornerShape((sizeDp / 3.14f).dp)),
+    )
 }
 
 /* 渐变裁切文字（网页 .brand span / .auth-brand span / .empty-state h2 的

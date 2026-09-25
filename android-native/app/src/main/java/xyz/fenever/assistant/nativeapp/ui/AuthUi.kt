@@ -1,5 +1,6 @@
 package xyz.fenever.assistant.nativeapp.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -233,21 +234,32 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
     val panel = if (light) WebTokens.LAuthPanel
                 else WebTokens.AuthPanel
 
+    // 「上一个交互页」的回退链：登录页里点「忘记密码」进来的，回上一页 = 回登录表单；
+    // 从设置里直接开「改密码」进来的（initialMode=recover），回上一页 = 整层退出回聊天。
+    // 返回键与 × 走同一条路（goBack），不把人在改密码页上关死。
+    fun goBack() {
+        if (recovering && initialMode != "recover") {
+            recovering = false; rcStep = 1; rcHint = ""
+        } else onBack?.invoke()
+    }
+    val canGoBack = onBack != null || (recovering && initialMode != "recover")
+    if (canGoBack) BackHandler(enabled = true) { goBack() }
+
     Box(Modifier.fillMaxSize().background(band)) {
-        onBack?.let { back ->
+        if (canGoBack) {
             Text("×", fontSize = 24.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.TopEnd)
-                    .clickable(onClick = back)
+                    .clickable(onClick = { goBack() })
                     .padding(horizontal = 18.dp, vertical = 12.dp))
         }
-        Column(Modifier.fillMaxSize().widthIn(max = 460.dp)
+        Column(Modifier.widthIn(max = 460.dp)
             .verticalScroll(rememberScrollState())
             .imePadding().padding(horizontal = 20.dp)
             .align(Alignment.Center),
             horizontalAlignment = Alignment.CenterHorizontally) {
 
-            Spacer(Modifier.height(48.dp))
+            Spacer(Modifier.height(8.dp))
 
             // .auth-brand：icon 30px 圆角 + 「AI 助手」24px/600 渐变字（面板外）
             Row(verticalAlignment = Alignment.CenterVertically,
@@ -392,7 +404,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                     }
                 }
             }
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(8.dp))
         }
     }
 }

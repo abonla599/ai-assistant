@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -149,7 +150,8 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
         }
     }
 
-    Column(Modifier.fillMaxWidth().heightIn(max = 600.dp)
+    // 用户要求：设置页顶到最上面 —— 弹层高度不再封顶 600dp，直接铺满整屏
+    Column(Modifier.fillMaxWidth().fillMaxHeight()
         .padding(bottom = 18.dp)) {
         SetBar(page, onOpenPage)
         if (note.isNotEmpty()) {

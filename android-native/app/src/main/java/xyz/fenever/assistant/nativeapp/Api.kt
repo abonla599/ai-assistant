@@ -97,8 +97,11 @@ object Api {
             val rb = request(path, tokenOverride)
             when (method) {
                 "GET" -> rb.get()
-                "DELETE" -> rb.delete(body?.toRequestBody(JSON_MT))
-                else -> rb.method(method, body?.toRequestBody(JSON_MT))
+                "DELETE" -> rb.delete(body?.toRequestBody(JSON_MT) ?: "".toRequestBody(null))
+                // OkHttp 与 fetch 不同：POST/PUT 缺 body 会直接抛
+                // "method 'POST' must have a body"。网页侧这些接口都是空 body 裸 POST
+                // （建会话、设默认、测连通），这里补一个零字节体保持同一语义。
+                else -> rb.method(method, body?.toRequestBody(JSON_MT) ?: "".toRequestBody(null))
             }
             client.newCall(rb.build()).execute().use { res ->
                 val text = res.body?.string() ?: ""
