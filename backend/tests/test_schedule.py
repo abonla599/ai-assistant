@@ -39,14 +39,17 @@ def test_every_plan_needs_an_owner(isolated_schedule):
 
 def test_two_people_do_not_see_each_others_schedule(isolated_schedule):
     """正向对照 + 反例：A 写的那条既不出现在 B 的清单里，也不出现在 B 的那些天里。"""
+    # "别的哪一天"必须避开运行当天：A 那条落在 today，字面量撞上 today 时
+    # "换天串不串人"的两条断言查的就是同一天（2026-09-25 当天 CI 就是这么红的）。
+    other_day = "2026-09-25" if schedule.today() != "2026-09-25" else "2027-01-01"
     schedule.add_item("u-A", "交周报", at="15:00")
-    schedule.add_item("u-B", "取快递", day="2026-09-25")
+    schedule.add_item("u-B", "取快递", day=other_day)
 
     assert [i["text"] for i in schedule.plan("u-A")] == ["交周报"]
-    assert [i["text"] for i in schedule.plan("u-B", "2026-09-25")] == ["取快递"]
+    assert [i["text"] for i in schedule.plan("u-B", other_day)] == ["取快递"]
     assert schedule.days_for("u-A") == [schedule.today()]
-    assert schedule.days_for("u-B") == ["2026-09-25"]
-    assert schedule.plan("u-A", "2026-09-25") == [], "换天也串不了人才算数"
+    assert schedule.days_for("u-B") == [other_day]
+    assert schedule.plan("u-A", other_day) == [], "换天也串不了人才算数"
     assert schedule.plan("u-B") == [], "B 今天没有安排，A 的那条不该出现在他这儿"
 
 
