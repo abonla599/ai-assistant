@@ -168,8 +168,8 @@ fun rememberVoiceRecorder(): VoiceRecorder {
  * 两点不显然的：
  * - 不用 detectTapGestures(onLongPress)：它的 slop 不可配，判定语义也不同，
  *   索性手写状态机；
- * - 抬手事件必须用 PointerEventPass.Final 收——子节点（文本框）在 Initial pass
- *   把 change 消费掉之后，默认 pass 就再也等不到事件，手势会挂死。
+ * - 事件用 PointerEventPass.Final 收：文本框会在 Initial 段消费掉 change，
+ *   Final 段拿到的事件与 pressed 状态不受消费先后影响，抬手一定看得见。
  */
 @Composable
 fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = 260L, cancelUp: Dp = 100.dp,
