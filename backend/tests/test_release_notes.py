@@ -11,7 +11,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUILD_GRADLE = REPO_ROOT / "android" / "app" / "build.gradle"
+# 2026-09-25 起推送版只发原生安卓（android-native/），WebView 壳退役：
+# 版本号的权威来源跟着发布链路一起换过去，工作流的 tag 校验读的是同一个字段。
+BUILD_GRADLE = REPO_ROOT / "android-native" / "app" / "build.gradle"
 RELEASE_NOTES_DIR = REPO_ROOT / "docs" / "releases"
 
 

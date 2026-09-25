@@ -7,8 +7,10 @@ name: Release Android APK
 # 一起挡掉，取决于 GitHub 的过滤语义——这种"能不能触发"的事不该靠猜，所以分开写。
 # 两个文件重复的是二十来行 CI 装配步骤，不是产品逻辑。
 #
-# Release 是公开的（本仓是公开仓库），这正是想要的效果；APK 里不含任何口令，
-# 它只是指向 https://ai.fenever.xyz/app/ 的 WebView 壳，装完仍需注册一个账号才能用。
+# Release 是公开的（本仓是公开仓库），这正是想要的效果。
+# 2026-09-25 起发的是**原生安卓客户端**（android-native/，Compose 全原生实现）：
+# 用户决定推送版只发安卓版；旧的 WebView 壳（android/）退役不再发布，
+# 浏览器网页版不受任何影响，照常从 https://ai.fenever.xyz/app/ 访问。
 on:
   push:
     tags:
@@ -40,7 +42,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eu
-          declared=$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' android/app/build.gradle)
+          declared=$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' android-native/app/build.gradle)
           tag=${GITHUB_REF_NAME#v}
           echo "build.gradle versionName=$declared  tag=$tag"
           if [ "$declared" != "$tag" ]; then
@@ -120,7 +122,7 @@ jobs:
         run: |
           set -uo pipefail
           set +e                      # 同上：失败要能被翻译出来，而不是让 -e 抢着中止
-          gradle -p android --no-daemon --stacktrace assembleRelease 2>&1 \
+          gradle -p android-native --no-daemon --stacktrace assembleRelease 2>&1 \
             | tee "$RUNNER_TEMP/assemble.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
@@ -136,16 +138,16 @@ jobs:
       - name: Show which key signed this APK
         run: |
           set -eu
-          apk=android/app/build/outputs/apk/release/app-release.apk
+          apk=android-native/app/build/outputs/apk/release/app-release.apk
           test -s "$apk"
           "$JAVA_HOME/bin/keytool" -printcert -jarfile "$apk" | grep -E "Owner|SHA256" | head -4
 
       - name: Stage APK with a friend-friendly filename
         run: |
           set -eu
-          cp android/app/build/outputs/apk/release/app-release.apk \
-             "ai-assistant-${GITHUB_REF_NAME#v}.apk"
-          ls -l "ai-assistant-${GITHUB_REF_NAME#v}.apk"
+          cp android-native/app/build/outputs/apk/release/app-release.apk \
+             "ai-assistant-native-${GITHUB_REF_NAME#v}.apk"
+          ls -l "ai-assistant-native-${GITHUB_REF_NAME#v}.apk"
 
       # 手工 Run workflow 只用来验签名链，绝不发版：dispatch 事件里没有 tag，
       # Release 的名字与包里 versionName 无从对上，发出去就是一个名字错乱的公开版本。
@@ -157,7 +159,7 @@ jobs:
           set -eu
           tag="$GITHUB_REF_NAME"
           ver="${tag#v}"
-          file="ai-assistant-${ver}.apk"
+          file="ai-assistant-native-${ver}.apk"
           # 每个版本的变更清单单独存一个文件，不焊死在这段 YAML 里。上一版把
           # "v0.13 实测 97,835 字节""从 0.13 起壳自己也有功能了"写进模板，于是往后
           # 每次发版都在替旧版本说话；现在谁发版谁写自己那份 docs/releases/v<版本>.md。
@@ -176,43 +178,31 @@ jobs:
           cat > tail.md <<EOF
           ## 安装（安卓）
 
-          1. 下载下面的 \`${file}\`（约 100 KB——它只是个壳，因此小到可以直接当文件传给你。
-             v0.13 实测 97,835 字节；以前这里写"约 60 KB"，那是 v0.10/v0.11 的体积，
-             加了提醒、分享与组件之后已经长到近 100 KB，别再抄旧数字。
-             0.15 又加了检查更新那一颗按钮，会比这个数再大一点——
-             准确体积看这个文件旁边 GitHub 自己标的那个数，别信这里写的）
+          1. 下载下面的 \`${file}\`（全原生安卓客户端，约 9 MB——准确体积以 GitHub
+             在文件旁标出的数字为准，别信任何散文里写的）
           2. 传到手机后点开安装。系统会提示"禁止安装未知来源应用"——去
              **设置 → 应用 → 允许来自此来源的安装**，勾选一次即可
-          3. 打开应用，它会提示未登录
-          4. 打开后会自动弹出登录界面：切到「注册」，自己填一个用户名和密码即可开始使用
-             （不需要找任何人要码）。换手机时用同一个用户名再登录一次就行
+          3. 打开应用会进入登录界面：已有账号直接登录；没有就点「立即注册」，
+             自己填用户名、密码和三道找回题即可开始使用（不需要找任何人要码）
+          4. 忘记密码：登录页点「忘记密码」，答对三道找回题就地设新密码、直接续用；
+             换手机用同一个用户名再登录一次就行
 
           ## 这个包是什么
 
-          一个指向 \`https://ai.fenever.xyz/app/\` 的 WebView 外壳，**不含任何口令或密钥**。
-          聊天界面本身仍在服务器上，所以服务端改版你不用重装——打开时加载的就是当前那一版。
+          全原生 Android 客户端：聊天、会话、记忆、设置、提醒都是手机本地实现，
+          数据走 \`https://ai.fenever.xyz\` 的后端接口。自 0.21 起推送版只发这个
+          原生包；旧的 WebView 壳退役（包名不同，两者本可共存安装）。
 
-          但从 0.13 起壳自己也有功能了，这四件事**只在装了本包的手机上有**：
+          装这一个包就有的能力：
 
-          - **提醒**：设置 → 设备 → 提醒。到点弹系统通知，手机重启后依然生效。
-            提醒存在这台手机上，不上传服务器。会申请「精准闹钟」权限，不给也能用
-            （改用更省电的排期，可能晚几分钟到）；那一页顶部常驻一行写着当前是哪一档、
-            通知授权给了没有。
-          - **分享进助手**：在相册或 PDF 上点「分享」→ 选「AI 助手」，
-            文件会挂到助手的附件栏里，不用先存再传。
-          - **桌面组件**：主屏放一个小组件，显示今天的提醒，三颗按钮直达拍照提问、
-            新对话与检查更新。
-          - **检查更新**（0.15 起）：长按桌面图标 →「检查更新」，或点组件上那颗。
-            **不点它就不会去拿新安装包**；查出有新版会先问一句，你点下载才开始动流量，
-            下完自动弹起系统的安装页。它管的是壳自己的这四件事，
-            聊天界面本来就在服务器上，打开即最新、与这个按钮无关。
+          - **提醒**：设置页里设，到点弹系统通知，手机重启后依然生效。会申请
+            「精准闹钟」与通知权限，不给也能用（改用更省电的排期，可能晚几分钟到）
+          - **附件**：拍照、相册、分享文件进助手，随消息一起发
+          - **检查更新**：设置 → 检查更新，应用内直接查有没有新版
+          - **多账号**：设置里可添加/切换身份，聊天记录与长期记忆按账号隔离
 
-          因此这一条要改口了：**改界面不用重装，改壳的功能要重装**。
-          同一件事在手机浏览器里直接访问 \`https://ai.fenever.xyz/app/\` 也能聊天，
-          但上面四项用不了——浏览器拿不到系统通知、分享入口、桌面组件，也起不了安装页。
-
-          注册后你的聊天记录、附件、长期记忆都只归属到你这个账号，别人看不到。
-          提醒与待上传的分享件按账号隔离，换账号后看不见上一个人的。
+          不想装包的人，手机浏览器直接访问 \`https://ai.fenever.xyz/app/\` 照样能用
+          网页版——网页版长期保留，与这个包互不影响。
           EOF
           # 实机验收清单挪进各版本自己的 docs/releases/v*.md 了：条数会随版本变，
           # 写死在这里的话下一次加条目时，Release 还在数旧的那 13 条。
@@ -233,5 +223,5 @@ jobs:
             gh release upload "$tag" "$file" --clobber
             gh release edit "$tag" --notes-file notes.md
           else
-            gh release create "$tag" "$file" --title "AI 助手 $ver（安卓）" --notes-file notes.md
+            gh release create "$tag" "$file" --title "AI 助手 $ver（安卓原生）" --notes-file notes.md
           fi
