@@ -2364,6 +2364,123 @@ function autosize(el) {
   el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + "px";
 }
 
+/* ---------------- 按住说话（v0.22，与原生 VoiceUi 同一套交互） ----------------
+ * 窄屏（≤860px，和 Enter 键/placeholder 同一条分界）且输入框为空时长按起说：
+ * Web Speech API 实时转写，松手发送（走和表单同一个 send()），上滑 100px 进
+ * 取消区再松手即丢弃。桌面鼠标不接管；浏览器没有识别引擎时长按只说实话。 */
+const VOICE_SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voice = { armed: false, active: false, cancelling: false,
+                text: "", timer: 0, rec: null, downX: 0, downY: 0 };
+
+function voiceShow(cancelling) {
+  const mask = $("voiceMask");
+  mask.classList.remove("hidden");
+  mask.classList.toggle("cancelling", cancelling);
+  $("voiceHint").textContent = cancelling ? "松开取消" : "松手发送，上移取消";
+}
+function voiceHeard(text) {
+  const el = $("voiceHeard");
+  el.textContent = text;
+  el.classList.toggle("hidden", !text);
+}
+function voiceHide() {
+  $("voiceMask").classList.add("hidden");
+  $("voiceMask").classList.remove("cancelling");
+  voiceHeard("");
+}
+function voiceStopEngine() {
+  const rec = voice.rec;
+  voice.active = false; voice.rec = null;
+  if (rec) { try { rec.abort(); } catch (e) {} }
+  voiceHide();
+}
+
+function voiceStart() {
+  if (!VOICE_SR) {
+    setStatus("这个浏览器不支持语音输入，换 Chrome / Edge 或系统浏览器试试", true);
+    return;
+  }
+  voice.active = true; voice.cancelling = false; voice.text = "";
+  voiceShow(false);
+  const rec = new VOICE_SR();
+  voice.rec = rec;
+  rec.lang = "zh-CN"; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  rec.onresult = (ev) => {
+    let fin = "", inter = "";
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) fin += r[0].transcript; else inter += r[0].transcript;
+    }
+    voiceHeard(fin || inter);
+    if (fin) voice.text = fin; else if (!voice.text) voice.text = inter;
+  };
+  rec.onerror = (ev) => {
+    // aborted 是取消区松手/重开时的自家用语，不外传
+    if (ev.error === "aborted") return;
+    voiceStopEngine();
+    if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
+      setStatus("页面要用麦克风，允许后才能识别", true);
+    else if (ev.error !== "no-speech") setStatus("没听清，再长按说一次", true);
+  };
+  rec.onend = () => {
+    // 只有"松手待发送、等收尾"这一路还挂着 active；取消与出错都已自行收摊
+    if (!voice.active) return;
+    const t = (voice.text || "").trim();
+    voice.active = false; voice.rec = null; voiceHide();
+    if (voice.cancelling) { voice.cancelling = false; return; }
+    if (t) send(t); else setStatus("没听到什么，再长按说一次", true);
+  };
+  try { rec.start(); }
+  catch (e) { voiceStopEngine(); setStatus("语音识别没启动成，再长按试一次", true); }
+}
+
+function bindVoiceHold() {
+  const input = $("input");
+  // 波纹条：与原生 WaveBars 同一个权重——sin 包络两头低中间高 + 打散抖动；
+  // Web Speech 没有音量回调，律动交给 CSS 动画自己呼吸。
+  const bars = $("voiceBars");
+  for (let i = 0; i < 30; i++) {
+    const b = document.createElement("i");
+    const env = Math.sin((i / 29) * Math.PI) * 0.7 + 0.3;
+    const seed = Math.abs(Math.sin(i * 12.9898) * 43758.5453) % 1;
+    b.style.height = Math.round(100 * Math.min(1, env * (0.4 + 0.6 * seed))) + "%";
+    b.style.animationDuration = Math.round(560 + seed * 420) + "ms";
+    b.style.animationDelay = Math.round(-seed * 800) + "ms";
+    bars.appendChild(b);
+  }
+  input.addEventListener("pointerdown", (e) => {
+    if (window.innerWidth > 860 || e.button > 0) return;   // 桌面、右键盘不接管
+    if (input.value.trim()) return;                          // 有字留给编辑，同原生
+    if (voice.armed || voice.active) return;
+    e.preventDefault();                                      // 压掉聚焦/光标/选字起手
+    voice.armed = true; voice.downX = e.clientX; voice.downY = e.clientY;
+    voice.timer = setTimeout(() => { voice.timer = 0; voice.armed = false; voiceStart(); }, 260);
+    try { input.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  input.addEventListener("pointermove", (e) => {
+    if (voice.armed &&
+        (Math.abs(voice.downY - e.clientY) > 12 || Math.abs(voice.downX - e.clientX) > 12)) {
+      clearTimeout(voice.timer); voice.timer = 0; voice.armed = false;  // 先动了=不是按住说话
+    }
+    if (voice.active) {
+      const cancel = voice.downY - e.clientY > 100;
+      if (cancel !== voice.cancelling) { voice.cancelling = cancel; voiceShow(cancel); }
+    }
+  });
+  const up = () => {
+    if (voice.timer) { clearTimeout(voice.timer); voice.timer = 0; }
+    const wasArmed = voice.armed; voice.armed = false;
+    if (voice.active) {
+      if (voice.cancelling) voiceStopEngine();
+      else { try { voice.rec.stop(); } catch (e) { voiceStopEngine(); } }  // 停引擎等最终结果，onend 发
+    } else if (wasArmed) {
+      input.focus();     // 轻点：pointerdown 被我们压了，聚焦补回来（键盘照常弹）
+    }
+  };
+  input.addEventListener("pointerup", up);
+  input.addEventListener("pointercancel", () => { voice.armed = false; if (voice.active) voiceStopEngine(); });
+}
+
 /* ---------------- 事件绑定 ---------------- */
 function bind() {
   $("openSidebar").onclick = openSidebar;
@@ -2413,9 +2530,11 @@ function bind() {
   });
   input.addEventListener("input", () => { autosize(input); updateSendEnabled(); });
   // 手机宽度上根本没有 Shift+Enter（上面那颗回车键用的就是同一条 860 分界），
-  // 提示不该留着（v0.21 双端同契约）。网页版没有按住说话的语音输入，
-  // 不写兑现不了的字——手机端只说"发消息"，桌面端保留 Shift+Enter 提示。
-  input.placeholder = window.innerWidth > 860 ? "发消息，Shift + Enter 换行" : "发消息";
+  // 提示不该留着（v0.21 双端同契约）。v0.22 起窄屏真的能按住说话——但只有
+  // 浏览器带识别引擎才写这句兑现得了的话；桌面端保留 Shift+Enter 提示。
+  input.placeholder = window.innerWidth > 860 ? "发消息，Shift + Enter 换行"
+    : (VOICE_SR ? "发消息或按住说话" : "发消息");
+  bindVoiceHold();
 
   $("attachBtn").onclick = (e) => { e.stopPropagation(); toggleAttachMenu(); };
   // 不给它写 setAttachMenu(false)：附件菜单是"让位层"，openCamera 自己会把它连同

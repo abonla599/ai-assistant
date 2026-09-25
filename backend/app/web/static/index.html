@@ -134,6 +134,17 @@
           </div>
         </div>
       </div>
+
+      <!-- 按住说话的录音浮层（v0.22，与原生端 VoiceOverlay 同款）：波纹条 + 蓝穹顶 +
+           一行提示。默认 hidden，只有长按空输入框进了录音态才亮；穹顶沉出屏底一半。 -->
+      <div class="voice-mask hidden" id="voiceMask" aria-hidden="true">
+        <div class="voice-dome"></div>
+        <div class="voice-panel">
+          <div class="voice-heard hidden" id="voiceHeard"></div>
+          <div class="voice-bars" id="voiceBars"></div>
+          <div class="voice-hint" id="voiceHint">松手发送，上移取消</div>
+        </div>
+      </div>
     </main>
   </div>
 
