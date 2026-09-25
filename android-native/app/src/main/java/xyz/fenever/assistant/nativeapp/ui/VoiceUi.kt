@@ -73,18 +73,22 @@ class VoiceRecorder(context: Context) {
     var onError: ((String) -> Unit)? = null
 
     private var keepSend = true
+    private var holding = false        // 手指是否还按着：错误自动重试只发生在按住期间
+    private var permRetried = false    // 权限错自动重建重试一次，防"明明开了权限还说没权限"
     private var rec: SpeechRecognizer? = null
 
+    @Suppress("DEPRECATION")
     fun start() {
         if (listening || !available) return
-        listening = true; heard = ""; level = 0.15f; keepSend = true
+        listening = true; holding = true; heard = ""; level = 0.15f; keepSend = true
         val r = try {
             rec ?: SpeechRecognizer.createSpeechRecognizer(appCtx)
                 .also { it.setRecognitionListener(listener) }
                 .also { rec = it }
         } catch (_: Exception) { null }
         if (r == null) {
-            listening = false; onError?.invoke("这台设备没有可用的语音识别服务"); return
+            listening = false; holding = false
+            onError?.invoke("这台设备没有可用的语音识别服务"); return
         }
         try {
             r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
@@ -92,15 +96,22 @@ class VoiceRecorder(context: Context) {
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1))
+                .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                // 不少识别服务（Google/OEM）拿 calling_package 去查调用方的录音权限，
+                // 不填就直接回 ERROR_INSUFFICIENT_PERMISSIONS——哪怕权限早就开了。
+                // 该 extra 在新 API 上标了废弃但服务侧仍在读，必须留着。
+                .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appCtx.packageName))
         } catch (_: Exception) {
-            listening = false; onError?.invoke("语音识别没能启动，再按住试一次")
+            listening = false; holding = false
+            onError?.invoke("语音识别没能启动，再按住试一次")
         }
     }
 
     /** 松手。send=false 立刻收尾（取消）；true 等最终结果，浮层先留一步。 */
     fun finish(send: Boolean) {
         if (!listening) return
+        holding = false
+        permRetried = false   // 一次按压只自愈一次；下次长按重新计数
         if (send) { keepSend = true; runCatching { rec?.stopListening() } }
         else { keepSend = false; listening = false; heard = ""; runCatching { rec?.cancel() } }
     }
@@ -108,7 +119,7 @@ class VoiceRecorder(context: Context) {
     fun destroy() {
         runCatching { rec?.cancel() }
         runCatching { rec?.destroy() }
-        rec = null; listening = false
+        rec = null; listening = false; holding = false
     }
 
     private val listener = object : RecognitionListener {
@@ -131,7 +142,17 @@ class VoiceRecorder(context: Context) {
         }
         override fun onError(error: Int) {
             if (!listening) return
-            listening = false; heard = ""
+            // 权限错且手指还按着、还没重试过：旧识别器可能攥着授权前的拒权缓存，
+            // 拆掉重建再启一次。用户下次长按就是新实例，"开了权限还说没权限"就地自愈。
+            if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS &&
+                keepSend && holding && !permRetried) {
+                permRetried = true
+                runCatching { rec?.destroy() }
+                rec = null; listening = false
+                start()
+                return
+            }
+            listening = false; holding = false; heard = ""
             // 取消时部分设备也会回调一个错码，别拿它吓用户
             if (keepSend) onError?.invoke(errText(error))
         }
@@ -143,7 +164,8 @@ class VoiceRecorder(context: Context) {
     private fun errText(code: Int): String = when (code) {
         SpeechRecognizer.ERROR_AUDIO -> "没收到声音，检查麦克风"
         SpeechRecognizer.ERROR_CLIENT -> "语音识别中断了，再试一次"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有麦克风权限，去系统设置里开一下"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+            "麦克风权限没生效，去系统设置里确认已允许录音，再退出重开一次 App"
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
             "网络不稳，识别失败了"
         SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没听清，再说一次"

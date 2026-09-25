@@ -307,7 +307,7 @@ button:focus-visible, a:focus-visible, select:focus-visible,
   transition: border-color .18s ease, box-shadow .18s ease;
 }
 .input-card:focus-within { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 3px var(--accent-soft); }
-#input { width: 100%; border: 0; background: transparent; resize: none; outline: none; max-height: 40vh; padding: 4px 6px; line-height: 1.6; }
+#input { width: 100%; border: 0; background: transparent; resize: none; outline: none; max-height: 40vh; padding: 4px 6px; line-height: 1.6; caret-color: var(--accent); }
 
 .input-foot { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
 .hint { flex: 1; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -636,7 +636,7 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .auth-field { position: relative; display: flex; }
 .auth-field input { width: 100%; padding: 14px 46px 14px 18px; border: 1px solid var(--line);
                     border-radius: 999px; background: var(--surface); color: var(--text);
-                    font-size: 15px; }
+                    caret-color: var(--accent); font-size: 15px; }
 .auth-field input:focus { outline: none; border-color: var(--accent); }
 .auth-field input::placeholder { color: var(--text-3); }
 .auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%);

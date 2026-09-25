@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -436,6 +437,9 @@ private fun PillField(placeholder: String, value: String, onValue: (String) -> U
                     keyboardType = keyboardType, imeAction = ImeAction.Next),
                 textStyle = TextStyle(fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.onSurface),
+                // 光标跟聊天框同一判据：默认笔刷在近黑底上几乎看不见，
+                // 打字时找不到插入点（2026-09-26 用户报登录/改密页）
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 decorationBox = { inner ->
                     Row(Modifier.padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
                         verticalAlignment = Alignment.CenterVertically) {
