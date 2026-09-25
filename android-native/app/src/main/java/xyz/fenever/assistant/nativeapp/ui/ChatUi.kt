@@ -68,8 +68,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -137,7 +139,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var sessionId by remember { mutableStateOf(Prefs.lastSessionId) }
     var sessions by remember { mutableStateOf(listOf<SessionSummary>()) }
     var messages by remember { mutableStateOf(listOf<UiMsg>()) }
-    var input by remember { mutableStateOf("") }
+    // TextFieldValue 而不是 String：程序改文案（点建议标语、发送后清空）时
+    // String 版 BasicTextField 会把光标弹回句首，用户接着打字很别扭。
+    var input by remember { mutableStateOf(TextFieldValue("")) }
     var providers by remember { mutableStateOf(listOf<ModelInfo>()) }
     var serverDefault by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf(listOf<AttItem>()) }
@@ -381,7 +385,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             val atts = pending.toList()
             pending = emptyList()
             messages = messages + UiMsg("user", t, attachments = atts)
-            input = ""
+            input = TextFieldValue("")
             streamInto()
         }
     }
@@ -515,7 +519,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             CHAT_SUGGESTIONS.forEach { s ->
                                 SuggestionPill(s) {
-                                    input = s
+                                    // 光标落在句尾：填完标语直接接着打字，不用手动挪
+                                    input = TextFieldValue(s, selection = TextRange(s.length))
                                     runCatching { inputFocus.requestFocus() }
                                 }
                             }
@@ -524,7 +529,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     InputCard(
                         input = input, onInput = { input = it },
                         focusRequester = inputFocus,
-                        onSendKey = { sendNow(input) },
+                        onSendKey = { sendNow(input.text) },
                         attachOpen = attachOpen,
                         onToggleAttach = { attachOpen = !attachOpen; modelMenuOpen = false },
                         status = status, statusErr = statusErr, busy = busy,
@@ -533,8 +538,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         chipOpen = modelMenuOpen,
                         onToggleChip = { modelMenuOpen = !modelMenuOpen; attachOpen = false },
                         onStop = { stopRequested = true; streamJob?.cancel() },
-                        onSend = { sendNow(input) },
-                        canSend = input.isNotBlank() || pending.isNotEmpty(),
+                        onSend = { sendNow(input.text) },
+                        canSend = input.text.isNotBlank() || pending.isNotEmpty(),
                     )
                     // .attach-menu：卡片下方玻璃面板（网页 DOM 顺序就在 .input-card 之后）
                     AnimatedVisibility(visible = attachOpen,
@@ -685,7 +690,7 @@ internal fun hoverBg(): Color =
 
 /* ---------------- 输入卡（.input-card：圆角 18 surface 描边；foot 一行五件套） ---------------- */
 @Composable
-private fun InputCard(input: String, onInput: (String) -> Unit,
+private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                       focusRequester: FocusRequester, onSendKey: () -> Unit,
                       attachOpen: Boolean, onToggleAttach: () -> Unit,
                       status: String, statusErr: Boolean, busy: Boolean,
@@ -711,8 +716,10 @@ private fun InputCard(input: String, onInput: (String) -> Unit,
                 keyboardActions = KeyboardActions(onSend = { onSendKey() }),
                 decorationBox = { inner ->
                     Box {
-                        if (input.isEmpty())
-                            Text("发消息，Shift + Enter 换行", fontSize = 15.sp,
+                        if (input.text.isEmpty())
+                            // 手机键盘没有 Shift+Enter 这回事，网页那句提示照搬过来
+                            // 只会误导；改成聊天 App 通用的说法。
+                            Text("发消息或按住说话", fontSize = 15.sp,
                                 color = text3Color(),
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp))
                         inner()

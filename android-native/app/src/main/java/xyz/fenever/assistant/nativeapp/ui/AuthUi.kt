@@ -214,13 +214,18 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
         scope.launch {
             try {
                 Api.resetPassword(rcName, answers.map { it.value.trim() }, rcNew)
-                // 令牌已在服务端全部作废：必须回到登录而不是直接放人进去。
-                // 那句提示不许省——别的设备掉线是这条路的设计后果。
-                rcStep = 1; recovering = false; mode = "login"; regStep = 1
-                answers.forEach { it.value = "" }
-                pass = ""; pass2 = ""
-                user = rcName
-                hint = "密码已重置，请用新密码登录。其他设备需要重新登录一次。"
+                // 服务端会把旧令牌全部作废——网页那侧只能回登录页重敲一遍；
+                // 手机上新密码就在手里，直接静默登录续用，改完即回到聊天。
+                // 只有自动登录真失败了才落回登录表单兜底（提示语保留那句"其他设备"）。
+                runCatching { Api.login(rcName, rcNew) }
+                    .onSuccess { afterAuth(it) }
+                    .onFailure {
+                        rcStep = 1; recovering = false; mode = "login"; regStep = 1
+                        answers.forEach { a -> a.value = "" }
+                        pass = ""; pass2 = ""
+                        user = rcName
+                        hint = "密码已重置，但自动登录没成：请用新密码再登一次。其他设备需要重新登录一次。"
+                    }
             } catch (e: Exception) {
                 rcHint = e.message ?: "重置失败"
             }
@@ -397,11 +402,8 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                         submitRecovery()
                     }
                     HintLine(rcHint, failLike(rcHint))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-                        AuthLink("回去登录") {
-                            recovering = false; rcStep = 1; rcHint = ""; hint = ""
-                        }
-                    }
+                    // 「回去登录」按用户要求撤掉：改完密码就地续用；
+                    // 中途想走有返回键和右上角 ×（见 goBack）。
                 }
             }
             Spacer(Modifier.height(8.dp))
