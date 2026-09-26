@@ -3417,3 +3417,227 @@ def test_a_stale_page_kicks_itself_once_and_only_once():
     boot = _function_body(js, "boot")
     assert "checkBuild(window.__ASSETS__)" in boot, \
         "boot 不再对账：改版后那 30 秒的旧页面没人管了"
+
+
+# ---------------- 本机身份清单为空时会话指针蒸发（v0.23 T3.3 R1 实测抓到） ----------------
+
+def _decl_line(js: str, name: str) -> str:
+    """取声明 `const name ...` 的那一整行原文。
+
+    身份那组函数读的是 ID_KEY / CURRENT_KEY / IDENTITY_CAP 三个顶层常量。在 harness 里
+    手抄 `const ID_KEY = "identities"` 等于把"键名换了会不会全线失效"这件事自己答掉：
+    真源把键名改掉，复刻照样绿。所以整行从源码里取。
+    """
+    m = re.search(r"^.*\bconst " + re.escape(name) + r"\b.*$", js, re.M)
+    if not m:
+        raise AssertionError(f"app.js 里没有 const {name} 这一行：这条锁跟着改名一起失效")
+    return m.group(0)
+
+
+def _const_object(js: str, name: str) -> str:
+    """取 `const name = { ... }` 整段，含首尾。
+
+    和 _function_body 同一个理由：pref 这一整块是"界面上写的值到底落到哪"的唯一出口，
+    在测试里手抄一份 getter/setter 等于把被测对象换成自己的复刻——真源改了形状，
+    复刻不会跟着红。
+    """
+    decl = f"const {name} = {{"
+    if decl not in js:
+        raise AssertionError(f"app.js 里没有 {decl}：这条锁跟着改名一起失效")
+    open_at = js.index(decl) + len(decl) - 1
+    depth = 0
+    for i in range(open_at, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[js.index(decl):i + 1]
+    raise AssertionError(f"{name} 这个对象的花括号没配上")
+
+
+_IDENTITY_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const realFns = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+const PREAMBLE = `
+const flow = [];
+const store = Object.assign({}, SC.store || {});
+const localStorage = {
+  getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+  removeItem: (k) => { delete store[k]; },
+};
+const window = { matchMedia: () => ({ matches: false }) };
+const state = { me: null, sessions: [], messages: [] };
+let created = 0;
+function setStatus(text, isErr) { flow.push("setStatus"); }
+function applyRole() { flow.push("applyRole"); }
+const SHELL = { setOwner: (u) => flow.push("setOwner:" + u) };
+const API = {
+  async me() {
+    if (SC.meFail) { const e = new Error("me boom"); e.status = SC.meFail; throw e; }
+    return SC.me;
+  },
+  async createSession(provider) {
+    created += 1; flow.push("createSession:" + created);
+    return { session_id: "s" + created, provider: provider };
+  },
+};
+// 真 loadSessions 要整个 DOM；这里只留它对 ensureSession 的那一处副作用：
+// 清单就是服务端此刻真实存在的那几条（含刚建出来的）。
+async function loadSessions() {
+  state.sessions = (SC.sessions || []).slice();
+  for (let i = 1; i <= created; i++) state.sessions.push({ session_id: "s" + i });
+  flow.push("loadSessions");
+}
+async function drive() {
+  let threw = null;
+  try { await loadWho(); } catch (e) { threw = String((e && e.message) || e); }
+  const afterWho = (currentEntry() || {}).userId || "";
+  const pointerAfterWho = pref.sessionId;
+  // 真启动顺序：boot → loadServerData（内含 loadSessions）→ 才有第一次 ensureSession。
+  // 少了这一趟，"指针命中清单就复用"这条路根本没有清单可命中。
+  await loadSessions();
+  await ensureSession();
+  const firstPointer = pref.sessionId;
+  const firstMessages = state.messages.length;
+  state.messages.push({ role: "user", content: "x" });
+  await ensureSession();
+  const secondPointer = pref.sessionId;
+  pref.provider = "p-7";
+  // 刷新一次：再走一遍 loadWho（同一个人、同一枚 Cookie），指针必须在。
+  try { await loadWho(); } catch (e) { threw = threw || String((e && e.message) || e); }
+  return { threw: threw, flow: flow,
+    afterWho: afterWho, pointerAfterWho: pointerAfterWho,
+    entries: readIdentities().length,
+    current: localStorage.getItem("currentId") || "",
+    firstPointer: firstPointer, secondPointer: secondPointer,
+    provider: pref.provider, created: created,
+    wipedMessages: firstMessages,
+    stored: store["identities"] || "" };
+}
+`;
+
+const sandbox = { setTimeout, console };
+vm.createContext(sandbox);
+const script = "const SC = " + JSON.stringify(SC) + ";\n" + PREAMBLE + "\n" + realFns + "\ndrive()";
+const done = vm.runInContext(script, sandbox);
+done.then((r) => process.stdout.write(JSON.stringify(r)),
+          (e) => { console.error(e); process.exit(2); });
+"""
+
+
+def _run_identity_js(scenario: dict) -> dict:
+    """在 node 里真跑仓库那一份身份链路：loadWho → ensureIdentityFromMe → touchIdentity
+    → pref 的写入出口 → ensureSession。
+
+    为什么这条非真跑不可：症状是"什么都不报错"。指针写进去就蒸发，界面照样能聊，
+    只有刷新之后对话没了、导出永远换不到票据、服务端里躺着几条空的「新对话」。
+    读源码只能看到 `pref.sessionId = created.session_id` 这一行确实写了——写了却被
+    getter 读回空，因为 patchCurrent 第一句 `if (!hit) return;` 整块空转。
+    只有运行时能回答"这台机器从没登录过、服务端却认得人"时那三行到底落没落。
+    假叶子只有 localStorage 与两个 API 调用；被执行的判定是仓库那一份。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    js = _js()
+    names = ("readIdentities", "saveIdentities", "currentEntry", "patchCurrent",
+             "setCurrent", "addIdentity", "ensureIdentityFromMe", "touchIdentity",
+             "loadWho", "ensureSession")
+    snippet = "\n".join(_decl_line(js, k) for k in ("IDENTITY_CAP", "ID_KEY"))
+    snippet += "\n" + "\n".join(_fn_text(js, n) for n in names) + "\n" + _const_object(js, "pref")
+    d = Path(tempfile.mkdtemp(prefix="identity-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_IDENTITY_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_local_admin_gets_an_identity_entry_so_the_session_pointer_sticks():
+    """AUTH_MODE=disabled 的本机管理员：没登录过，但 /v1/auth/me 认得出人。
+
+    这一路在修之前是整条会话链最安静的坏法：每次发消息各建一条新会话（ensureSession
+    读不到指针），正文一个字都不上服务端（replaceMessages 第一句 `if (!pref.sessionId)
+    return;`），刷新即丢对话，导出拼出 /v1/sessions//export-ticket 永远失败。
+    """
+    out = _run_identity_js({"me": {"user_id": "default_user",
+                                   "username": "本机管理员", "role": "admin"}})
+    assert out["threw"] is None, out
+    assert out["afterWho"] == "default_user", f"服务端认出了人，本机却没记：{out}"
+    assert out["entries"] == 1, out
+    # 指针必须**写进去就读得回**，而且要活过下一次 loadWho（= 刷新）
+    assert out["firstPointer"] == "s1", out
+    assert out["secondPointer"] == "s1", \
+        f"第二条消息又建了一条会话（应该复用）：{out['flow']}"
+    assert out["created"] == 1, f"发了几条消息就建了几条空会话：{out['created']}"
+    assert out["provider"] == "p-7", "选中的模型没落到本机身份上"
+    import json as _json
+    entry = _json.loads(out["stored"])[0]
+    assert entry["lastSessionId"] == "s1" and entry["role"] == "admin", entry
+    assert entry["userId"] == "default_user" and "token" not in entry, \
+        "清单条目里出现了凭据：方案 C 的红线"
+    assert "setOwner:default_user" in out["flow"], out
+
+
+def test_second_send_reuses_the_session_instead_of_opening_a_new_one():
+    """指针修好之后，"每次发送各建一条会话"这件事要有独立一格判据钉住：它才是症状本身。
+
+    第一条 ensureSession 建出 s1；第二条必须因为 pref.sessionId 命中清单而**一发都不发**。
+    """
+    out = _run_identity_js({"me": {"user_id": "u1", "username": "本机", "role": "user"}})
+    assert out["flow"].count("createSession:1") == 1, out["flow"]
+    assert "createSession:2" not in out["flow"], \
+        f"第二次发送又开了一条新会话：{out['flow']}"
+    assert out["created"] == 1, out
+
+
+def test_a_device_that_already_removes_someone_is_left_alone():
+    """清单里已经有人的时候，ensureIdentityFromMe 一个字都不许动。
+
+    这条守的是别人的账户面：多身份切换、5 条上限、退出后回落到最新那条，全都建立在
+    "清单只由登录/注册/手工录入凭据这三处写"之上。若把服务端报回的人无脑再塞一条，
+    换账号的人会凭空多出一个身份，而 currentEntry 的兜底还会把他选成当前。
+    """
+    import json as _json
+    mine = [{"userId": "u-old", "username": "旧人", "role": "user",
+             "lastSessionId": "s-old", "providerId": "p-old",
+             "addedAt": "2026-01-01T00:00:00.000Z"}]
+    out = _run_identity_js({
+        "me": {"user_id": "u-new", "username": "新人", "role": "admin"},
+        "store": {"identities": _json.dumps(mine), "currentId": "u-old"},
+        "sessions": [{"session_id": "s-old"}]})
+    assert out["entries"] == 1, f"清单里已有人的时候多塞了一条：{out}"
+    assert out["current"] == "u-old", f"把当前身份抢走了：{out}"
+    assert out["pointerAfterWho"] == "s-old", out
+    assert out["created"] == 0, f"已有指针还要再建一条会话：{out['flow']}"
+
+
+def test_an_unrecognized_device_invents_no_identity():
+    """认不出人（401）时不凭空造身份：那一屏该出现的还是登录/注册面。
+
+    顺带把这轮症状的形状钉住：没有身份条目时指针确实存不住（第二次 ensureSession
+    又建了一条）。这一格就是"把修复删掉之后第一格会退成什么样"的对照。
+    """
+    out = _run_identity_js({"meFail": 401})
+    assert out["entries"] == 0, f"服务端没认人，本机却记了一个：{out}"
+    assert out["afterWho"] == "", out
+    assert out["firstPointer"] == "" and out["secondPointer"] == "", out
+    assert out["created"] == 2, "这条对照认的是『没身份就存不住指针』，不是修复本身"
+
+
+def test_a_me_response_without_a_user_id_does_not_create_a_broken_entry():
+    """readIdentities 只认带 userId 的条目；造一条空的等于造一条永远读不出来的垃圾。"""
+    out = _run_identity_js({"me": {"username": "缺 id", "role": "admin"}})
+    assert out["entries"] == 0 and out["afterWho"] == "", out
+    assert out["threw"] is None, f"缺 user_id 直接把启动炸了：{out}"
