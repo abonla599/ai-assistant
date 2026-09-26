@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v0.23 T0.1 · 日程统一界面同构设计稿（安卓 + 网页）</title>
+<style>
+/* ============================================================
+   设计令牌 —— 全部取自现网 backend/app/web/static/style.css :root
+   双端同构基准：本文件里不存在第二套尺寸/颜色。
+   安卓 Compose 实现按 1dp = 1px(密度基准标注) 等价映射。
+   ============================================================ */
+:root {
+  --accent: #2fbf8f;
+  --accent-hover: #29a97f;
+  --accent-soft: rgba(47, 191, 143, .14);
+  --accent-2: #6c7bff;
+  --accent-2-soft: rgba(108, 123, 255, .16);
+  --bg: #0b0e15;
+  --bg-soft: #10141d;
+  --bg-hover: #191e2a;
+  --surface: #141824;
+  --text: #e6e9ed;
+  --text-2: #98a1ad;
+  --text-3: #6a7481;
+  --line: #242a3a;
+  --danger: #f87171;
+  --glass: rgba(16, 20, 29, .72);
+  --glass-strong: rgba(20, 24, 36, .88);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 30px rgba(0, 0, 0, .4);
+  --radius: 18px;              /* 主面板圆角 18（PRD 钉住） */
+  --radius-item: 12px;
+  --group-head: 12.5px;        /* 组头 12.5px / letter-spacing .4px（.set-group 同规格） */
+  --row-min-h: 54px;           /* 行最小高（.set-row 同规格） */
+  --edit-radius: 10px;         /* 原地编辑框圆角（.edit-box 同规格） */
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #05070c;
+  color: var(--text);
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI Variable Text", system-ui, sans-serif;
+  padding: 48px 32px 96px;
+}
+.sheet-title { font-size: 28px; font-weight: 600; letter-spacing: .5px; margin-bottom: 6px; }
+.sheet-title em { font-style: normal; color: var(--accent); }
+.sheet-sub { color: var(--text-2); font-size: 14px; margin-bottom: 40px; }
+.canvas { display: flex; gap: 56px; flex-wrap: wrap; align-items: flex-start; justify-content: center; }
+.frame-label { text-align: center; font-size: 13px; color: var(--text-3); letter-spacing: 1.2px; margin-top: 18px; }
+.frame-label b { color: var(--text-2); font-weight: 600; }
+
+/* ---------- 手机壳 ---------- */
+.phone {
+  width: 392px; padding: 12px; border-radius: 40px;
+  background: linear-gradient(160deg, #1c2230, #0d1017 60%);
+  box-shadow: var(--shadow), inset 0 0 0 1px #2a3040;
+}
+.phone-screen { border-radius: 30px; overflow: hidden; background: var(--bg); position: relative; }
+.statusbar {
+  height: 34px; display: flex; justify-content: space-between; align-items: center;
+  padding: 0 18px; font-size: 11px; color: var(--text-2);
+  background: var(--bg);
+}
+
+/* ---------- 桌面壳 ---------- */
+.desktop {
+  width: 640px; border-radius: 14px; overflow: hidden;
+  background: var(--bg-soft); box-shadow: var(--shadow), inset 0 0 0 1px #2a3040;
+}
+.titlebar {
+  height: 38px; display: flex; align-items: center; gap: 7px; padding: 0 14px;
+  background: #0d111a; border-bottom: 1px solid var(--line);
+}
+.dot { width: 11px; height: 11px; border-radius: 50%; }
+.desktop-body { display: flex; }
+.sidenav {
+  width: 76px; padding: 18px 0; border-right: 1px solid var(--line);
+  background: var(--bg); display: flex; flex-direction: column; align-items: center; gap: 20px;
+  color: var(--text-3); font-size: 11px;
+}
+.sidenav .on { color: var(--accent); }
+.sidenav .glyph { font-size: 19px; line-height: 1; }
+
+/* ============================================================
+   日程界面本体 —— 两端共用同一组 class，这就是"同构"的含义
+   ============================================================ */
+.schedule-pane { flex: 1; padding: 16px 16px 24px; min-width: 0; }
+
+/* 主面板：圆角 18，玻璃底，与聊天页面板同一材质 */
+.sched-panel {
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* 顶栏：标题 + 服务端今天口径副标题 + 保存动作 */
+.sched-head { padding: 16px 16px 10px; }
+.sched-h1 { font-size: 19px; font-weight: 600; letter-spacing: .3px; display: flex; align-items: baseline; gap: 8px; }
+.sched-h1 .day { color: var(--text-3); font-size: 12.5px; font-weight: 400; letter-spacing: .4px; }
+.sched-sub { margin-top: 2px; font-size: 12.5px; color: var(--text-3); letter-spacing: .4px; }
+
+/* 日期选择器：横向周条；有安排的日子带点（GET /v1/schedule 的 days 字段） */
+.daybar { display: flex; gap: 6px; padding: 12px 16px; overflow-x: auto; scrollbar-width: none; }
+.daychip {
+  flex: 0 0 auto; width: 44px; padding: 7px 0 6px; text-align: center; cursor: pointer;
+  border: 1px solid transparent; border-radius: 12px; background: transparent;
+  color: var(--text-2); font: inherit; transition: background .15s, border-color .15s;
+}
+.daychip .w { display: block; font-size: 10.5px; color: var(--text-3); letter-spacing: .5px; }
+.daychip .d { display: block; font-size: 15px; font-weight: 600; line-height: 1.3; }
+.daychip .tick { display: block; width: 4px; height: 4px; margin: 3px auto 0; border-radius: 50%; background: var(--accent-2); visibility: hidden; }
+.daychip.has .tick { visibility: visible; }                 /* days 标记：有安排 */
+.daychip:hover { background: var(--bg-hover); }
+.daychip.sel { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.daychip.today .w { color: var(--accent); }                  /* "今天"两个字钉在副标题色上 */
+
+/* 组头：12.5px / .4px —— 与设置页 .set-group 完全同规格 */
+.group { margin: 22px 16px 8px; color: var(--text-3); font-size: var(--group-head); letter-spacing: .4px;
+         display: flex; justify-content: space-between; align-items: center; }
+.group .count { color: var(--text-3); opacity: .75; }
+
+/* 条目行：勾选 + 文本 + 时间角标；54px 最小高与 .set-row 同规格 */
+.item {
+  display: flex; align-items: center; gap: 12px; min-height: var(--row-min-h);
+  padding: 8px 16px; border-top: 1px solid var(--line); position: relative;
+  transition: background .15s;
+}
+.item:hover { background: var(--bg-hover); }
+.chk {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  border: 1.5px solid var(--text-3); background: transparent; display: grid; place-items: center;
+  color: transparent; font-size: 13px; line-height: 1; transition: all .15s;
+}
+.item.done .chk { border-color: var(--accent); background: var(--accent); color: #07120d; }
+.item.done .txt { color: var(--text-3); text-decoration: line-through; text-decoration-color: rgba(106,116,129,.6); }
+.txt { flex: 1; font-size: 15px; line-height: 1.45; word-break: break-word; }
+.at {
+  flex: 0 0 auto; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px; color: var(--text-2); letter-spacing: .4px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; background: var(--bg-soft);
+}
+.at.none { visibility: hidden; }
+.op { flex: 0 0 auto; display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+.item:hover .op { opacity: 1; }
+.op button { border: 0; background: transparent; color: var(--text-3); font: inherit; font-size: 14px;
+             padding: 4px 6px; border-radius: 8px; cursor: pointer; }
+.op button:hover { color: var(--text); background: var(--bg-soft); }
+.op button.del:hover { color: var(--danger); }
+/* 触摸端（安卓/移动网页）：操作按钮常显，不靠 hover —— 与 .msg-tools 移动端规则同构 */
+.phone .op { opacity: 1; }
+
+/* 原地编辑框：对位网页 .edit-box（accent 描边、圆角 10、surface 底） */
+.edit-box {
+  flex: 1; font: inherit; font-size: 15px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--accent); border-radius: var(--edit-radius);
+  padding: 9px 12px; outline: none; min-width: 0;
+}
+.time-edit { width: 74px; text-align: center; }
+
+/* 新增行 */
+.add-row {
+  display: flex; align-items: center; gap: 12px; min-height: var(--row-min-h);
+  padding: 8px 16px; border-top: 1px solid var(--line); color: var(--text-3); cursor: pointer;
+  font-size: 15px; transition: background .15s;
+}
+.add-row:hover { background: var(--bg-hover); color: var(--text-2); }
+.add-row .plus { color: var(--accent); font-size: 17px; width: 20px; text-align: center; }
+
+/* 空态 */
+.empty { padding: 34px 16px 38px; text-align: center; color: var(--text-3); font-size: 14px; line-height: 1.8; }
+.empty .big { font-size: 26px; display: block; margin-bottom: 6px; opacity: .8; }
+
+/* 错误条：400 → 服务端 detail 原文直出（R3-AC-2），不渲染空态 */
+.errbar {
+  margin: 0 16px 14px; padding: 10px 12px; border-radius: 12px; font-size: 13.5px;
+  color: var(--danger); background: rgba(248, 113, 113, .08); border: 1px solid rgba(248, 113, 113, .25);
+}
+
+/* 保存条：dirty 才可点；保存 = 整天 PUT 幂等替换（D 口径） */
+.sched-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+              padding: 12px 16px 14px; border-top: 1px solid var(--line); background: var(--bg-soft); }
+.dirty-note { font-size: 12.5px; color: var(--text-3); letter-spacing: .4px; }
+.dirty-note.on { color: var(--accent-2); }
+.btn-save {
+  border: 0; cursor: pointer; font: inherit; font-size: 14.5px; font-weight: 600; letter-spacing: .5px;
+  color: #07120d; background: var(--accent); border-radius: 999px; padding: 10px 26px;
+  transition: filter .15s, opacity .15s;
+}
+.btn-save:hover { filter: brightness(1.08); }
+.btn-save:disabled { opacity: .35; cursor: default; filter: none; }
+
+/* ---------- 标注区 ---------- */
+.notes { max-width: 1120px; margin: 56px auto 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+.note {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px 20px; font-size: 13.5px; line-height: 1.75; color: var(--text-2);
+}
+.note h3 { color: var(--text); font-size: 14px; margin-bottom: 8px; letter-spacing: .4px; }
+.note code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: var(--accent); }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; border: 1px solid rgba(255,255,255,.15); }
+</style>
+</head>
+<body>
+
+<h1 class="sheet-title">v0.23 · <em>日程</em> 统一界面同构设计稿</h1>
+<p class="sheet-sub">T0.1 ｜ 安卓 Compose 与网页版共用下方同一组 class —— 两帧只是外壳不同，界面本体逐像素同构 ｜ 令牌钉自现网 style.css（#0b0e15 / #2fbf8f / #6c7bff，主面板圆角 18，组头 12.5px）</p>
+
+<div class="canvas">
+
+  <!-- ============ 安卓端（手机壳） ============ -->
+  <div>
+    <div class="phone"><div class="phone-screen">
+      <div class="statusbar"><span>9:41</span><span>᯽ 5G ▮▮▮ 82%</span></div>
+
+      <div class="schedule-pane">
+        <div class="sched-panel">
+          <div class="sched-head">
+            <div class="sched-h1">日程 <span class="day">2026年9月26日 · 今天</span></div>
+            <div class="sched-sub">「今天」取服务端日期（跨天口径 R3-AC-3）</div>
+          </div>
+
+          <div class="daybar">
+            <button class="daychip"><span class="w">周一</span><span class="d">21</span><span class="tick"></span></button>
+            <button class="daychip has"><span class="w">周二</span><span class="d">22</span><span class="tick"></span></button>
+            <button class="daychip"><span class="w">周三</span><span class="d">23</span><span class="tick"></span></button>
+            <button class="daychip"><span class="w">周四</span><span class="d">24</span><span class="tick"></span></button>
+            <button class="daychip has"><span class="w">周五</span><span class="d">25</span><span class="tick"></span></button>
+            <button class="daychip sel today has"><span class="w">今天</span><span class="d">26</span><span class="tick"></span></button>
+            <button class="daychip"><span class="w">周日</span><span class="d">27</span><span class="tick"></span></button>
+            <button class="daychip"><span class="w">周一</span><span class="d">28</span><span class="tick"></span></button>
+          </div>
+
+          <div class="group">今日安排<span class="count">3 项 · 已完成 1</span></div>
+
+          <div class="item done">
+            <span class="chk">✓</span><span class="txt">给 v0.22 出验收小结</span>
+            <span class="at">09:30</span>
+            <span class="op"><button>✎</button><button class="del">🗑</button></span>
+          </div>
+          <div class="item">
+            <span class="chk"></span><span class="txt">真机测试：小米 + 三星升级链路</span>
+            <span class="at">14:00</span>
+            <span class="op"><button>✎</button><button class="del">🗑</button></span>
+          </div>
+          <div class="item">
+            <span class="chk"></span><span class="txt">晚上过一遍日程设计稿评审意见</span>
+            <span class="at none">—</span>
+            <span class="op"><button>✎</button><button class="del">🗑</button></span>
+          </div>
+          <div class="item">
+            <span class="chk"></span>
+            <input class="edit-box" value="编辑态：accent 描边，回车保存 / Esc 取消" />
+            <input class="edit-box time-edit" value="HH:MM" />
+          </div>
+
+          <div class="add-row"><span class="plus">＋</span>添加一项</div>
+
+          <div class="sched-foot">
+            <span class="dirty-note on">● 有未保存修改 · 保存将整日替换</span>
+            <button class="btn-save">保存</button>
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <p class="frame-label"><b>安卓 · Compose</b> ｜ 操作按钮常显（触摸端无 hover）</p>
+  </div>
+
+  <!-- ============ 网页端（桌面壳） ============ -->
+  <div>
+    <div class="desktop">
+      <div class="titlebar">
+        <span class="dot" style="background:#f6615f"></span><span class="dot" style="background:#f6bd4a"></span><span class="dot" style="background:#4cc768"></span>
+        <span style="margin-left:10px;font-size:12px;color:var(--text-3)">ai.fenever.xyz/app/</span>
+      </div>
+      <div class="desktop-body" style="min-height:762px">
+        <nav class="sidenav">
+          <div><div class="glyph">💬</div>会话</div>
+          <div><div class="glyph">🧠</div>记忆</div>
+          <div class="on"><div class="glyph">📅</div>日程</div>
+          <div><div class="glyph">⚙️</div>设置</div>
+        </nav>
+
+        <div class="schedule-pane">
+          <div class="sched-panel">
+            <div class="sched-head">
+              <div class="sched-h1">日程 <span class="day">2026年9月26日 · 今天</span></div>
+              <div class="sched-sub">「今天」取服务端日期（跨天口径 R3-AC-3）</div>
+            </div>
+
+            <div class="daybar">
+              <button class="daychip"><span class="w">周一</span><span class="d">21</span><span class="tick"></span></button>
+              <button class="daychip has"><span class="w">周二</span><span class="d">22</span><span class="tick"></span></button>
+              <button class="daychip"><span class="w">周三</span><span class="d">23</span><span class="tick"></span></button>
+              <button class="daychip"><span class="w">周四</span><span class="d">24</span><span class="tick"></span></button>
+              <button class="daychip has"><span class="w">周五</span><span class="d">25</span><span class="tick"></span></button>
+              <button class="daychip sel today has"><span class="w">今天</span><span class="d">26</span><span class="tick"></span></button>
+              <button class="daychip"><span class="w">周日</span><span class="d">27</span><span class="tick"></span></button>
+              <button class="daychip"><span class="w">周一</span><span class="d">28</span><span class="tick"></span></button>
+            </div>
+
+            <div class="group">今日安排<span class="count">3 项 · 已完成 1</span></div>
+
+            <div class="item done">
+              <span class="chk">✓</span><span class="txt">给 v0.22 出验收小结</span>
+              <span class="at">09:30</span>
+              <span class="op"><button>✎</button><button class="del">🗑</button></span>
+            </div>
+            <div class="item">
+              <span class="chk"></span><span class="txt">真机测试：小米 + 三星升级链路</span>
+              <span class="at">14:00</span>
+              <span class="op"><button>✎</button><button class="del">🗑</button></span>
+            </div>
+            <div class="item">
+              <span class="chk"></span><span class="txt">晚上过一遍日程设计稿评审意见</span>
+              <span class="at none">—</span>
+              <span class="op"><button>✎</button><button class="del">🗑</button></span>
+            </div>
+
+            <div class="errbar">⚠ 日期格式应为 YYYY-MM-DD（示例：400 时服务端 detail 原文直出，不渲染空态 · R3-AC-2）</div>
+
+            <div class="add-row"><span class="plus">＋</span>添加一项</div>
+
+            <div class="sched-foot">
+              <span class="dirty-note">尚无修改</span>
+              <button class="btn-save" disabled>保存</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="frame-label"><b>网页版</b> ｜ 行操作 hover 才显形（与 .msg-tools 桌面端同规则）；示例含 400 错误条</p>
+  </div>
+</div>
+
+<!-- ============ 实现标注 ============ -->
+<div class="notes">
+  <div class="note">
+    <h3>令牌（双端唯一来源）</h3>
+    <span class="swatch" style="background:#0b0e15"></span><code>--bg #0b0e15</code> 底 ·
+    <span class="swatch" style="background:#2fbf8f"></span><code>--accent #2fbf8f</code> 选中/完成/保存 ·
+    <span class="swatch" style="background:#6c7bff"></span><code>--accent-2 #6c7bff</code> 日期点/dirty 提示<br>
+    主面板 <code>radius 18</code>、条目 <code>12</code>、编辑框 <code>10</code>；组头 <code>12.5px / .4px</code>；行最小高 <code>54px</code>；时间角标等宽字体（同代码块规格）。<br>
+    Compose 映射：<code>RoundedCornerShape(18.dp)</code> + 既有 <code>Theme.tokens</code>，不新增色值。
+  </div>
+  <div class="note">
+    <h3>数据契约（后端已就绪）</h3>
+    读取 <code>GET /v1/schedule?day=YYYY-MM-DD</code> → <code>{day, items[{text,at,done}], days[]}</code>；<code>days</code> 驱动日期条上的 <code>#6c7bff</code> 标记点。<br>
+    保存 <code>PUT /v1/schedule</code> 整天幂等替换（点「保存」才写；离开页未保存要二次确认）。<br>
+    <code>at</code> 允许为空 = 无固定时间的条目。
+  </div>
+  <div class="note">
+    <h3>状态与异常口径</h3>
+    ① 400 → 显示服务端 <code>detail</code> 原文（错误条），<b>不</b>渲染空列表；② 空态 = 「这天还没有安排」+ 添加引导，与 400 视觉严格区分；③ 跨天 → 「今天」永远取服务端返回的 <code>day</code>；④ 保存失败保留 dirty 态可重试；⑤ 加载中日期条禁用，不闪空态。
+  </div>
+  <div class="note">
+    <h3>交互与动效</h3>
+    勾选完成：框体 <code>#242a3a→#2fbf8f</code> 150ms，文本划除；列表进场逐行 stagger（网页 CSS <code>animation-delay</code>，Compose <code>animateItem()</code>）；日期切换横移 200ms ease-out；保存成功按钮旁「已保存」淡入淡出 1.5s。<br>
+    键盘：编辑框 Enter 保存 / Esc 取消（同 .edit-box 契约）；焦点环 <code>outline: 2px solid var(--accent)</code>。
+  </div>
+</div>
+
+</body>
+</html>
