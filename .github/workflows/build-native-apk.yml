@@ -31,22 +31,7 @@ jobs:
           gradle-version: "8.7"
 
       - name: Assemble debug APK
-        id: assemble
-        continue-on-error: true
-        # T2.5 排障临时：本机无 Android SDK，日志又要鉴权才能读，
-        # 所以把编译错误以 ::error:: 注解的形式推到公开 API 上过一次目。
-        run: |
-          gradle -p android-native --no-daemon --stacktrace assembleDebug 2>&1 | tee /tmp/assemble.log
-
-      - name: Surface Kotlin errors as annotations
-        run: |
-          grep -E "^e: |^> Task .*FAILED|error:" /tmp/assemble.log | head -30 > /tmp/errs.txt || true
-          sed -i 's/%/%25/g' /tmp/errs.txt || true
-          while IFS= read -r line; do echo "::error::${line}"; done < /tmp/errs.txt
-
-      - name: Fail the job when assemble failed
-        if: steps.assemble.outcome == 'failure'
-        run: exit 1
+        run: gradle -p android-native --no-daemon --stacktrace assembleDebug
 
       - uses: actions/upload-artifact@v4
         with:

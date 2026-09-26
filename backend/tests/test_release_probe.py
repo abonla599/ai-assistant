@@ -681,6 +681,11 @@ def test_the_expired_ticket_gets_exactly_one_reissue():
         "过期之后没有『重签→重新入队』这一拍"
     assert "ExportRedeem.looksExpired" in body, "没有先认服务端那句 detail 再决定重签？"
     assert "retriedSids" in body, "重签预算的记账不见了——套娃重签就回来了"
+    # DownloadManager 压根没有 ERROR_HTTP 这个常量（第一次 CI 构建就是这么红的）：
+    # HTTP 失败时 COLUMN_REASON 直接就是状态码。只认 4xx/5xx，本地失败原因
+    # （空间不足/取消/重试过多，都落在 1xx~3xx）不许白占重签预算。
+    assert "ERROR_HTTP" not in body, "DownloadManager 不导出 ERROR_HTTP，别再引回去"
+    assert "reason in 400..599" in body, "读不出失败体时的 HTTP 判据不见了"
 
 
 def test_the_permission_denied_fallback_names_the_private_path():

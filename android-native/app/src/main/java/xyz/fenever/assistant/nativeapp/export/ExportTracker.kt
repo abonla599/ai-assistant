@@ -80,7 +80,12 @@ object ExportTracker {
                 deleteGarbage(ctx, downloadId)   // 失败留下的错误体不是导出文件，别让它躺在 Downloads
                 // HTTP 层错误但判不出那行字（有些 ROM 不透出失败体）：过期嫌疑成立，
                 // 预算只花一次——重签再败就报通用文案，不会套娃。
-                val httpish = expired || reasonOf(ctx, downloadId) == DownloadManager.ERROR_HTTP
+                // DownloadManager 没有"HTTP 出错"这一个常量：COLUMN_REASON 在 HTTP 失败时
+                // 直接就是那个状态码，而它自己的 ERROR_* 一族（101/102/106/108/300/302…）
+                // 和状态码数字上有重叠。所以这里只认 4xx/5xx——票据失效服务端回 404，
+                // 空间不足、取消、重试过多这些本地原因都落在区间外，不会白占重签预算。
+                val reason = reasonOf(ctx, downloadId)
+                val httpish = expired || (reason != null && reason in 400..599)
                 if (httpish && retriedSids.add(sid)) {
                     val again = runCatching {
                         val title = Api.getSession(sid).title
