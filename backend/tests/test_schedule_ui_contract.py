@@ -32,7 +32,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.test_android_shell import _code                       # noqa: E402
-from tests.test_web_pwa import STATIC, _css, _html, _js, _js_fn  # noqa: E402
+from tests.test_web_pwa import (STATIC, _const_object, _css, _html, _js,  # noqa: E402
+                              _js_fn)
 
 REPO = Path(__file__).resolve().parents[2]
 MOCK = REPO / "docs" / "v0.23-阶段0" / "T0.1-日程设计稿-双端同构.html"
@@ -447,3 +448,138 @@ def test_unsaved_changes_are_asked_before_leaving_on_web():
     for handler in ('$("closeSettings").onclick', '$("setBack").onclick', '$("settings").onclick'):
         at = js.index(handler)
         assert "schedCanLeave()" in js[at:at + 200], f"{handler} 没过未保存这道门"
+
+# ---------- 运行时判据：把"顺序对就够了"升级成"结果必须对" ----------
+#
+# 上面那批锁是源码顺序锁：`sched.pristine = schedSnapshot();` 出现一次、排在
+# `API.putSchedule` 之后。顺序对而结果错的做法它拦不住，最典型的一条是
+# "顺序完全合法，但 pristine 是在 items 被服务端回包覆盖**之前**定的"——
+# 界面会永远显示"有未保存修改"，而源码每一行都还是那个顺序。
+# 所以这里把仓库那份 saveSchedule 原文放进 node 真跑一遍：成功、失败、
+# 服务端回包改了内容这三种结局各问一次运行时。
+
+def _run_save_js(outcome: str) -> dict:
+    """真跑 app.js 的 saveSchedule()：outcome ∈ {"ok", "normalized", "fail400", "auth401"}。
+
+    叶子全部是假的（API/渲染/needsAuth），函数本体一个字不改地从磁盘原文里取——
+    判的是仓库那份实现，不是测试自己的复刻。
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    js = _js()
+    # `_js_fn` 从 `function 名字(` 起切，`async` 这个前缀会被它吃掉——真跑得补回来，
+    # 否则切出来的那份在第一个 `await` 上直接 SyntaxError，harness 连门都进不去。
+    body = ("async " if "async function saveSchedule(" in js else "") + _js_fn(js, "saveSchedule")
+    snap = _js_fn(js, "schedSnapshot")
+    state = _const_object(js, "sched")
+    harness = """
+"use strict";
+const API = { putSchedule: async (day, payload) => {
+  global.__reqs.push([day, payload]);
+  if (global.__fail) { const e = new Error(global.__fail); e.status = global.__status; throw e; }
+  return global.__echo;
+} };
+function renderSchedule() { global.__renders++; }
+function flashSaved() { global.__flashes++; }
+function needsAuth(e) { return !!e && e.status === 401; }
+$STATE
+$SNAP
+$BODY
+global.__reqs = []; global.__renders = 0; global.__flashes = 0;
+global.__echo = null; global.__fail = null; global.__status = 0;
+global.__setup = (o) => {
+  sched.day = "2026-09-26"; sched.today = "2026-09-26"; sched.days = ["2026-09-20"];
+  sched.items = [{ text: "  写周报  ", at: "09:30", done: false }];
+  sched.pristine = "[]";              // 服务端那份还是空的，手上有草稿 = 未保存
+  if (o === "fail400") { global.__fail = "日期要写成 YYYY-MM-DD"; global.__status = 400; }
+  if (o === "auth401") { global.__fail = ""; global.__status = 401; }
+  if (o === "ok") global.__echo = { day: "2026-09-26", count: 1,
+    items: [{ text: "  写周报  ", at: "09:30", done: false }] };
+  if (o === "normalized") global.__echo = { day: "2026-09-26", count: 1,
+    items: [{ text: "写周报", at: "09:30", done: false }] };   // 服务端把空格去了
+  if (o === "double") global.__echo = { day: "2026-09-26", count: 1,
+    items: [{ text: "  写周报  ", at: "09:30", done: false }] };  // 连点两颗同一份
+};
+global.__run = async (o) => {
+  global.__setup(o);
+  const before = sched.pristine;
+  if (o === "double") await Promise.all([saveSchedule(), saveSchedule()]);
+  else await saveSchedule();
+  return {
+    outcome: o,
+    before,
+    pristine: sched.pristine,
+    items: sched.items,
+    dirty: schedSnapshot() !== sched.pristine,
+    error: sched.error,
+    saving: sched.saving,
+    days: sched.days,
+    requests: global.__reqs.length,
+    payload: global.__reqs[0] ? global.__reqs[0][1] : null,
+    flashes: global.__flashes,
+  };
+};
+"""
+    harness = harness.replace("$STATE", state).replace("$SNAP", snap).replace("$BODY", body)
+    tmp = Path(tempfile.mkdtemp(prefix="sched-save-")) / "harness.cjs"
+    tmp.write_text(harness + "\n;(async () => console.log(JSON.stringify(await global.__run(%s))))();\n"
+                   % json.dumps(outcome), encoding="utf-8")
+    r = subprocess.run([node, str(tmp)], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_failed_save_keeps_dirty_and_never_claims_saved():
+    """存失败之后：基准不许动、dirty 必须还在、错误是服务端原文、不许闪「已保存」。"""
+    out = _run_save_js("fail400")
+    assert out["pristine"] == out["before"], \
+        "保存失败却把 pristine 换成了草稿：dirty 被悄悄清掉，人以为存上了（改动其实还在手里）"
+    assert out["dirty"] is True, "失败之后必须还是 dirty——保存钮要重新亮起来，改了能直接再存"
+    assert out["error"] == "日期要写成 YYYY-MM-DD", f"错误位必须是服务端 detail 原文：{out['error']!r}"
+    assert out["flashes"] == 0, "失败这一趟不许闪「已保存」"
+    assert out["saving"] is False, "saving 必须在 finally 里落回 false，否则这颗钮永久卡死"
+    assert out["items"][0]["text"] == "  写周报  ", "失败不许顺手清洗人写的东西"
+    assert out["days"] == ["2026-09-20"], "失败不许改动日期条上的星点"
+
+
+def test_unauthorized_save_does_not_look_like_a_successful_save():
+    out = _run_save_js("auth401")
+    assert out["flashes"] == 0, "掉登录这一趟不许闪「已保存」"
+    assert out["dirty"] is True and out["pristine"] == out["before"], \
+        "401 也要保留草稿与 dirty：重新登录后还得能把刚才那一条存下去"
+
+
+def test_pristine_follows_the_servers_echo_not_the_local_draft():
+    """服务端把文本里的空格去掉时，基准必须跟着**回包**走，而不是跟着送出去的草稿走。
+
+    顺序锁在这里是绿的：`sched.pristine = schedSnapshot();` 仍然只出现一次、仍然排在
+    `API.putSchedule` 之后。但把它定在 items 被回包覆盖**之前**，dirty 会永远清不掉，
+    界面一直挂着"有未保存修改"。只有真跑能问出这一格。
+    """
+    out = _run_save_js("normalized")
+    assert out["dirty"] is False, "服务端已确认，界面却还在喊未保存：基准跟错了对象"
+    assert out["items"][0]["text"] == "写周报", "清单要以服务端回包为准"
+    assert out["flashes"] == 1, "确认成功才许闪那一次「已保存」"
+    assert out["error"] == "", "成功这一趟不许留着上一轮的错"
+
+
+def test_saved_day_dot_and_payload_shape_survive_the_round_trip():
+    out = _run_save_js("ok")
+    assert out["dirty"] is False and out["flashes"] == 1
+    assert "2026-09-26" in out["days"], "count>0 就要把这一天补上星点（不靠猜别的天）"
+    assert out["requests"] == 1, "一次点保存只发整天 PUT，不许重放"
+    assert out["payload"] == [{"text": "  写周报  ", "at": "09:30", "done": False}], \
+        f"整天 PUT 的载荷形状变了：{out['payload']}"
+
+
+def test_rapid_double_click_sends_one_whole_day_put():
+    """连点两颗保存只发一次整天 PUT：第二次必须被 saving 闸门挡在门外。
+
+    这条只能真跑：grep 看得见 `if (sched.saving) return;` 那一行在不在，
+    看不见它挡不挡得住——把闸门挪到 await 之后，源码里那行字还在。
+    """
+    out = _run_save_js("double")
+    assert out["requests"] == 1, f"两次点按发了 {out['requests']} 次整天替换，后一次会把前一次的响应盖掉"
+    assert out["dirty"] is False and out["error"] == ""
+    assert out["saving"] is False
