@@ -198,3 +198,92 @@ def test_the_digest_contract_is_the_same_shape_in_the_workflow_the_backend_and_t
     assert '"apk_sha256"' in plan, "壳不再从透传 JSON 读这个字段了"
     assert "length() != 64" in plan, "壳认的长度不再是 64？"
     assert "c < 'a' || c > 'f'" in plan, "壳认的字符集不再是小写十六进制？"
+
+
+# ---------- T1.4：mock GitHub 的剩余形状 —— 服务端一格判断都不许长出 ----------
+
+def test_the_first_wellformed_marker_line_wins(client, enforced, monkeypatch):
+    """正文里挂着好几行长得像校验值的东西：取第一条【合法】的，形状不对的直接跳过。
+
+    search() 的语义在这里是被钉住的行为而不是实现巧合：发布流程只在末尾写一行，
+    多出来的行只可能来自手改正文——第一条合法行赢，后面的花活不掺和。
+    """
+    fake = _Urlopen(_release(
+        f"APK-SHA256: {DIGEST}\n\n有人手抄了一遍：APK-SHA256: {'b' * 64}"))
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    assert client.get("/v1/update/info").json()["apk_sha256"] == DIGEST
+    # 首行形状不对（大写）不算数，下一个合法行才上位
+    releases.reset_for_tests()
+    junky = _release(f"APK-SHA256: {'A' * 64}\nAPK-SHA256: {DIGEST}")
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(junky))
+    assert client.get("/v1/update/info").json()["apk_sha256"] == DIGEST
+
+
+def test_a_digest_field_injected_into_the_github_json_is_overwritten_not_trusted(
+        client, enforced, monkeypatch):
+    """GitHub 形状的 JSON 顶层【自带】一个 apk_sha256 也不许透出去——只认正文那行重算的。
+
+    这是透传设计唯一会漏的地方：raw 是别人家的 JSON，若服务端顺手"没有才注入"，
+    一条能改发布 JSON 的通道就能伪造校验值，壳的对账闸当场变成摆设。所以这里
+    是无条件覆盖：正文里没有合法行 ⇒ 空串，哪怕顶层自称有值。
+    """
+    rel = _release("这一版正文里没写校验值那行")
+    rel["apk_sha256"] = "b" * 64                      # 伪造的顶层字段
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(rel))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 200
+    assert out.json()["apk_sha256"] == "", "自报的校验值被透出去了：对账闸被绕过"
+
+
+@pytest.mark.parametrize("body_value", [None, 123, ["APK-SHA256: " + DIGEST]])
+def test_a_body_that_is_not_text_yields_no_digest_without_an_exception(
+        client, enforced, monkeypatch, body_value):
+    """GitHub 哪天把 body 换成 null/数字/数组，这里不许 500——只能老实说"没有校验值"。"""
+    rel = dict(GOOD)
+    rel["body"] = body_value
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(rel))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 200, out.text
+    assert out.json()["apk_sha256"] == ""
+
+
+def test_a_snapshot_without_the_raw_json_is_a_502_not_an_empty_ok(client, enforced):
+    """内部状态坏了（快照里没有"原样 JSON"这一格）也要明说，不许拼一份空对象糊弄壳。
+
+    直接喂坏 _payload：这条测的是 latest_release_manifest 自己的防御，与网络无关。
+    """
+    import time as _time
+    releases._payload = {"version": "0.18", "url": "", "asset_name": "",
+                         "asset_url": "", "size": 0}          # 缺 "raw"
+    releases._fetched_at = _time.monotonic()
+    releases._payload_at = _time.monotonic()
+    out = client.get("/v1/update/info")
+    assert out.status_code == 502
+    assert "原样 JSON" in out.json()["detail"]
+
+
+def test_a_top_level_list_from_github_is_a_502_with_the_fetch_reason(client, enforced, monkeypatch):
+    """GitHub 换成别的顶层形状（比如哪天回了一个数组）：reason 一路带到人前，不静默。"""
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen([GOOD]))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 502
+    assert "不是对象" in out.json()["detail"]
+
+
+def test_draft_and_vless_tags_pass_through_untouched(client, enforced, monkeypatch):
+    """draft=true、tag 不带 v——服务端一个字段都不改写：三态分辨全在壳的 ReleasePlan。
+
+    透传层的纪律就一条：GitHub 给什么形状，壳见到什么形状（外加 apk_sha256 那一格）。
+    服务端若"顺手"把 tag 补个 v 或把 draft 过滤掉，壳里钉着的判据就成了对不上号的第二真相。
+    """
+    rel = dict(GOOD)
+    rel["tag_name"] = "0.19"                                    # 不带 v
+    rel["draft"] = True
+    rel["body"] = f"APK-SHA256: {DIGEST}"
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(rel))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 200, out.text
+    body = out.json()
+    assert body["tag_name"] == "0.19", "tag 被改写：壳里 normalizeTag 的判据对不上号了"
+    assert body["draft"] is True, "draft 被吞：壳会把草稿版当成可装版本放行"
+    assert body["apk_sha256"] == DIGEST

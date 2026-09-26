@@ -41,7 +41,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import xyz.fenever.assistant.core.ApkDigest;
+import xyz.fenever.assistant.core.ApkDownloader;
 import xyz.fenever.assistant.core.ReleasePlan;
 import xyz.fenever.assistant.core.ReminderStore;
 import xyz.fenever.assistant.core.ShellEvents;
@@ -315,7 +315,8 @@ public class MainActivity extends Activity {
             @Override public void run() {
                 ReleasePlan.Decision decision;
                 try {
-                    decision = ReleasePlan.decide(BuildConfig.VERSION_NAME, fetchLatestRelease(app));
+                    decision = ReleasePlan.decide(BuildConfig.VERSION_NAME,
+                            fetchLatestRelease(app), BuildConfig.APP_URL);
                 } catch (Exception e) {
                     // 连不上/超时/被网关改了：说清是哪一种，绝不当成"已经是最新版"
                     decision = ReleasePlan.unusable("连不上更新服务（"
@@ -468,80 +469,52 @@ public class MainActivity extends Activity {
         }, "apk-download").start();
     }
 
-    /** 后台线程里跑。返回 null = 文件已就位（target 可安装）；否则是人能看懂的一句失败原因。 */
+    /**
+     * 后台线程里跑。返回 null = 文件已就位（target 可安装）；否则是人能看懂的一句失败原因。
+     *
+     * <p>v0.23 T1.6 起真正的收字节逻辑住在 {@code core/ApkDownloader}（纯 JVM、台架可测），
+     * 这里只剩 Android 特有的两件事：把 HttpURLConnection 适配成下载器的接缝，
+     * 把进度回调摆回主线程的那条 ProgressDialog 上。判断与字节纪律一条都没改——
+     * 地址依旧钉死在 BuildConfig，不用 JSON 里任何 url。
+     */
     private String runApkDownload(ReleasePlan.Decision decision,
                                   final File temp, final File target,
                                   final ProgressDialog progress) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(BuildConfig.UPDATE_APK_URL).openConnection();
-            conn.setConnectTimeout(UPDATE_CONNECT_MS);
-            conn.setReadTimeout(UPDATE_READ_MS);
-            conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty("User-Agent", "ai-assistant-shell/" + BuildConfig.VERSION_NAME);
-            int status = conn.getResponseCode();
-            if (status != HttpURLConnection.HTTP_OK) {
-                // 后端取不到包时会 302 回发布页——跟着跳完拿到的就不是 200 的 APK 字节流，
-                // 停在这里比"收下 HTML 再去校验"诚实，也更早给出对得上的失败文案。
-                throw new java.io.IOException("服务回 HTTP " + status);
-            }
-            long declared = conn.getContentLength();
-            if (declared > UPDATE_APK_MAX_BYTES) {
-                throw new java.io.IOException("声明的包体积异常");
-            }
-            InputStream in = conn.getInputStream();
-            FileOutputStream out = new FileOutputStream(temp);
-            try {
-                byte[] buf = new byte[8192];
-                int read;
-                long done = 0;
-                int lastPercent = -1;
-                while ((read = in.read(buf)) > 0) {
-                    done += read;
-                    if (done > UPDATE_APK_MAX_BYTES) {
-                        throw new java.io.IOException("下载超出体积上限");
+        ApkDownloader.Result result = ApkDownloader.download(
+                BuildConfig.UPDATE_APK_URL, temp, target, UPDATE_APK_MAX_BYTES,
+                decision.sha256,
+                new ApkDownloader.Connector() {
+                    @Override public ApkDownloader.Opened open(String url) throws java.io.IOException {
+                        final HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                        conn.setConnectTimeout(UPDATE_CONNECT_MS);
+                        conn.setReadTimeout(UPDATE_READ_MS);
+                        conn.setInstanceFollowRedirects(true);
+                        conn.setRequestProperty("User-Agent",
+                                "ai-assistant-shell/" + BuildConfig.VERSION_NAME);
+                        final int status = conn.getResponseCode();
+                        return new ApkDownloader.Opened() {
+                            @Override public int status() { return status; }
+                            @Override public long contentLength() { return conn.getContentLength(); }
+                            @Override public java.io.InputStream body() throws java.io.IOException {
+                                return conn.getInputStream();
+                            }
+                            @Override public void closeQuietly() { conn.disconnect(); }
+                        };
                     }
-                    out.write(buf, 0, read);
-                    if (declared > 0) {
-                        final int percent = (int) Math.min(100, done * 100 / declared);
-                        if (percent != lastPercent) {
-                            lastPercent = percent;
-                            final long sent = done;
-                            final long total = declared;
-                            runOnUiThread(new Runnable() {
-                                @Override public void run() {
-                                    if (progress.isShowing()) {
-                                        progress.setProgress(percent);
-                                        progress.setMessage(fmtKb(sent) + " / " + fmtKb(total));
-                                    }
+                },
+                new ApkDownloader.Progress() {
+                    @Override public void onProgress(final int percent, final long done, final long total) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if (progress.isShowing()) {
+                                    progress.setProgress(percent);
+                                    progress.setMessage(fmtKb(done) + " / " + fmtKb(total));
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
-                }
-            } finally {
-                in.close();
-                out.close();
-            }
-            if (declared > 0 && temp.length() != declared) {
-                temp.delete();
-                return "下载中断：收下的字节比声明的少";
-            }
-            String actual = ApkDigest.sha256Hex(temp);
-            if (!decision.sha256.equals(actual)) {
-                temp.delete();  // 残包/被换过的包留在盘上只会喂给下一次误装
-                return "校验值不一致，这个包不是发布的那一份";
-            }
-            if (!temp.renameTo(target)) {
-                return "文件写好了却没归位（存储状态异常）";
-            }
-            return null;
-        } catch (Exception e) {
-            temp.delete();
-            return "下载失败：" + e.getMessage();
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
+                });
+        return result.error;
     }
 
     /** 回主线程收尾：失败要说清是哪一种；成功才起安装页。两条都要关进度框。 */

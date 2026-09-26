@@ -42,6 +42,21 @@ public final class ReleasePlan {
     private static final String ALLOWED_PATH_PREFIX =
             "/" + OWNER + "/" + REPO + "/releases/download/";
 
+    /**
+     * 第二条信任规则（v0.23 T1.5 / R5-AC-3）：**与 APP_URL 同源**且路径【恰好等于】
+     * 这一个的那条 URL 也算可信。精确路径不是前缀——这是"同源 + 精确路径"的题面，
+     * 也是这条链路唯一的字节出口（{@code web_router.py} 的 {@code GET /site/android.apk}，
+     * 与壳 {@code BuildConfig.UPDATE_APK_URL} 钉的是同一条；三处同值由下方测试与
+     * backend/tests/test_android_shell.py 各钉各的一段）。
+     *
+     * <p>信任的是"这条地址与自家服务器同源且只能是那个代取端点"，不是"JSON 里写了
+     * 什么 host 都放行"：host 必须逐字符等于传入的 appUrl 的 host（https、不带端口、
+     * 不带 userinfo），路径必须整串等于 {@link #SELF_APK_PATH}，query/片段一律不算。
+     * 旧的两参 decide 不传 appUrl，行为与只有 GitHub 一条白名单时完全相同——
+     * 扩大信任的入口只在新调用方显式交出 APP_URL 的那一刻打开。
+     */
+    public static final String SELF_APK_PATH = "/site/android.apk";
+
     private ReleasePlan() {}
 
     public enum Kind { UP_TO_DATE, AVAILABLE, UNUSABLE }
@@ -98,6 +113,15 @@ public final class ReleasePlan {
      *                       （顶层多一个服务端注入的 {@code apk_sha256}，不认识的就当没有）
      */
     public static Decision decide(String currentVersion, String releaseJson) {
+        return decide(currentVersion, releaseJson, null);
+    }
+
+    /**
+     * 带自家来源的判定（T1.5）。{@code appUrl} 传 {@code BuildConfig.APP_URL} 那一族
+     * 地址（如 {@code https://ai.fenever.xyz/app/}）：只有此刻起，"同源 + 精确路径"
+     * 那条 URL 才升级成可信下载口；传 null 或形状不对等于沿用旧的两条都不认。
+     */
+    public static Decision decide(String currentVersion, String releaseJson, String appUrl) {
         Object parsed;
         try {
             parsed = MiniJson.decode(releaseJson);
@@ -119,7 +143,7 @@ public final class ReleasePlan {
 
         Object assets = rel.get("assets");
         if (!(assets instanceof List)) return unusable("发布里没有资产清单");
-        Decision picked = pickAsset((List<?>) assets, version);
+        Decision picked = pickAsset((List<?>) assets, version, appUrl);
         if (picked == null) return unusable("没有名为 " + assetName(version) + " 的可安装资产");
 
         String body = text(rel.get("body"));
@@ -152,22 +176,26 @@ public final class ReleasePlan {
      * 或者上一次误传的文件，而这里挑中的东西是要弹给系统去安装的。名字对上版本号顺带钉住了
      * "这个包就是这一版"，链式改错 tag 与资产名时这里会先变红。
      */
-    private static Decision pickAsset(List<?> assets, String version) {
+    private static Decision pickAsset(List<?> assets, String version, String appUrl) {
         String want = assetName(version);
         for (Object item : assets) {
             if (!(item instanceof Map)) continue;
             Map<?, ?> asset = (Map<?, ?>) item;
             if (!want.equals(text(asset.get("name")))) continue;
             String url = text(asset.get("browser_download_url"));
-            if (!downloadUrlIsTrusted(url, want)) return null;
+            if (!downloadUrlIsTrusted(url, want, appUrl)) return null;
             return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")),
                     null, null, null);
         }
         return null;
     }
 
-    /** 校验的是 API 给回来的那个地址，不是我们自己拼的——所以每一项都不省。 */
-    static boolean downloadUrlIsTrusted(String raw, String expectedName) {
+    /**
+     * 校验的是 API 给回来的那个地址，不是我们自己拼的——所以每一项都不省。
+     * 两条信任规则并列（T1.5 前只有一条）：GitHub 官方发布路径（精确文件名）
+     * 或 与 appUrl 同源 + 路径恰为 {@link #SELF_APK_PATH}。
+     */
+    static boolean downloadUrlIsTrusted(String raw, String expectedName, String appUrl) {
         if (raw == null || raw.isEmpty()) return false;
         URL url;
         try {
@@ -176,15 +204,47 @@ public final class ReleasePlan {
             return false;
         }
         if (!"https".equalsIgnoreCase(url.getProtocol())) return false;
-        if (!ALLOWED_HOST.equalsIgnoreCase(url.getHost())) return false;
         if (url.getUserInfo() != null) return false;
-        if (url.getPort() != -1) return false;                 // 带端口的不是那个下载入口
+        if (url.getRef() != null) return false;   // getFile() 不含片段，得单独挡：带 # 的不算那个地址
         String path = url.getPath();
+        // 第二条：自家代取端点。host 逐字符对上 appUrl 的 host，路径整串相等；
+        // 带 query/fragment/端口的都不在这条规则里（new URL 把 query 从 path 里分出去，
+        // 所以还要单独挡一次 getFile 与 getPath 不等的情况）。
+        if (sameOriginApk(url, appUrl) && SELF_APK_PATH.equals(path)
+                && url.getFile().equals(path)) {
+            return true;
+        }
+        // 第一条（原样保留）：GitHub 官方发布路径 + 资产名精确匹配。
+        if (!ALLOWED_HOST.equalsIgnoreCase(url.getHost())) return false;
+        if (url.getPort() != -1) return false;                 // 带端口的不是那个下载入口
         if (path == null || !path.startsWith(ALLOWED_PATH_PREFIX)) return false;
         if (path.contains("..")) return false;
         int slash = path.lastIndexOf('/');
         return slash >= 0 && path.length() > slash + 1
                 && expectedName.equals(path.substring(slash + 1));
+    }
+
+    /** 兼容旧调用与既有测试的两参形状：没有 appUrl 就没有第二条规则。 */
+    static boolean downloadUrlIsTrusted(String raw, String expectedName) {
+        return downloadUrlIsTrusted(raw, expectedName, null);
+    }
+
+    /** url 的主机是否【就是】appUrl 那一族说的主机：https、默认端口、host 精确相等。 */
+    private static boolean sameOriginApk(URL url, String appUrl) {
+        if (appUrl == null || appUrl.isEmpty()) return false;
+        URL self;
+        try {
+            self = new URL(appUrl);
+        } catch (MalformedURLException e) {
+            return false;      // 自家来源说不利索，第二条规则整体不启用——宁可窄
+        }
+        if (!"https".equalsIgnoreCase(self.getProtocol())) return false;
+        String selfHost = self.getHost();
+        if (selfHost == null || selfHost.isEmpty()) return false;
+        if (self.getPort() != -1 || self.getUserInfo() != null) return false;
+        String host = url.getHost();
+        if (host == null || !host.equalsIgnoreCase(selfHost)) return false;
+        return url.getPort() == -1;         // 同源但改了端口就不是那台服务器的那个出口
     }
 
     /** {@code v0.15} / {@code V0.15} → {@code 0.15}；不是"数字.数字…"的形状就判死。 */
