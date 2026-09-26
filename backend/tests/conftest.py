@@ -52,6 +52,17 @@ with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
         "supports_vision": False, "is_default": True,
     }], _f)
 
+# 上面那份 providers.json 只挡住了"库已存在"这条路，挡不住**播种**那条：
+# `ProviderStore._load()` 在一个它没见过文件的空路径上会走 `_seed_from_env()`，
+# 而 `load_project_env()` 已经把项目根 `.env` 里的真 DEEPSEEK_API_KEY 灌进了
+# os.environ（`override=False`，所以这里预先置空才算数——置空后 dotenv 不会覆盖）。
+# 后果是**同一份代码在两种机器上给出相反的结果**：带着真 .env 的开发机上，
+# 播种出的 deepseek-chat 抢走站级默认，凡是断言"私有记录不越权、回落默认"的用例
+# 全部翻红（2026-09-26 实测三条）；CI 上没有 .env，于是全绿。
+# 只清这一颗变量，不碰别的——播种判据守的是密钥占位，与真凭据无关。
+os.environ["DEEPSEEK_API_KEY"] = ""
+os.environ["DEEPSEEK_BASE_URL"] = ""
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
