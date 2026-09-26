@@ -84,7 +84,9 @@ import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.AuthResult
 import xyz.fenever.assistant.nativeapp.BuildConfig
+import xyz.fenever.assistant.core.ExportName
 import xyz.fenever.assistant.core.ReleasePlan
+import xyz.fenever.assistant.nativeapp.export.SessionDownloads
 import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.ReminderChannels
@@ -119,7 +121,8 @@ private val SET_PAGES = mapOf(
 @Composable
 fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                   onRequireAuth: (String) -> Unit, onOpenUrl: (String) -> Unit,
-                  onModelsChanged: () -> Unit, onLoggedOut: () -> Unit) {
+                  onModelsChanged: () -> Unit, onLoggedOut: () -> Unit,
+                  canExport: Boolean) {
     val scope = rememberCoroutineScope()
 
     // ---------- 跨页共享的状态（对照 app.js 的 state / 各 sync* 函数） ----------
@@ -179,7 +182,7 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                     providers = providers, memoryCount = memoryCount,
                     serverBuild = serverBuild, identityTick = identityTick,
                     onTick = { identityTick++ }, onNote = { t, err -> setStatus(t, err) },
-                    onModelsChanged = { reloadProviders() })
+                    onModelsChanged = { reloadProviders() }, canExport = canExport)
             }
         }
     }
@@ -318,7 +321,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          serverBuild: String, identityTick: Int,
                          onTick: () -> Unit,
                          onNote: (String, Boolean) -> Unit,
-                         onModelsChanged: () -> Unit) {
+                         onModelsChanged: () -> Unit, canExport: Boolean) {
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
@@ -401,12 +404,26 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         }) { onOpenPage("persona") }
         CtxRow(cap, providersKnown = providers.isNotEmpty())
         SetRow("↓", "导出本次对话", divider = false) {
-            val sid = Prefs.lastSessionId
-            if (sid.isBlank()) { onNote("当前没有可导出的对话", true); return@SetRow }
+            // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
+            // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
+            // 说话；原生没有这层浏览器，文件名自己按同源规则算（ExportName），
+            // 字节流交给 DownloadManager 落系统 Downloads，完成通知是系统下载队列的。
+            // 曾经这里是 onOpenUrl(票据)：把一次性兑换权递给外部浏览器，既拿不到
+            // 落盘通知也多一个能看见 URL 的人，按 R2-AC-3 判负，别再改回去。
+            if (!canExport) { onNote("当前没有可导出的对话", true); return@SetRow }
             scope.launch {
-                runCatching { Api.exportTicket(sid) }
-                    .onSuccess { onOpenUrl(Prefs.baseUrl.trimEnd('/') + it.path) }
-                    .onFailure { onNote("导出失败：" + (it.message ?: ""), true) }
+                runCatching {
+                    val sid = Prefs.lastSessionId
+                    // 先取服务端标题再签票：标题拿不到就不浪费一张一次性票据；
+                    // 用服务端算好的 title 而不是本地消息重切，避免第二份截断规则。
+                    val title = Api.getSession(sid).title
+                    val ticket = Api.exportTicket(sid)
+                    if (!ExportName.isTicketPath(ticket.path))
+                        throw IllegalStateException("服务端给的票据形状不对")
+                    SessionDownloads.enqueue(ctx,
+                        Prefs.baseUrl.trimEnd('/') + ticket.path,
+                        ExportName.exportFileName(title))
+                }.onFailure { onNote("导出失败：" + (it.message ?: ""), true) }
             }
         }
     }
