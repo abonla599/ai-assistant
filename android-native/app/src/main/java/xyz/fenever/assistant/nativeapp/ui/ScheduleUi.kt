@@ -55,7 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import xyz.fenever.assistant.assistant.core.ScheduleBoard
+import xyz.fenever.assistant.core.ScheduleBoard
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ScheduleItemDto
