@@ -1584,9 +1584,12 @@ async function sendFeedback(index, rating, btn) {
  * 返回键该先退回列表、再关弹层，而不是直接把整个设置关掉。
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
-                    persona: "角色设定", memory: "长期记忆", reminders: "提醒" };
+                    persona: "角色设定", memory: "长期记忆", reminders: "提醒",
+                    schedule: "日程" };
 
 function openSettings(page) {
+  // 从侧栏点进别的页面，也是离开日程页：先确认，再把弹层换掉。
+  if (page && page !== "schedule" && !schedCanLeave()) return;
   $("settings").classList.remove("hidden");
   Layers.open("settings", hideSettings);
   showSetList();
@@ -1603,6 +1606,8 @@ function showSetList() {
 function openSetPage(name) {
   const page = document.querySelector(`.set-page[data-page="${name}"]`);
   if (!page) { showSetList(); return; }
+  // 从日程页换去别的二级页同样是"离开这一页"：先问一句，别让人以为改动还在。
+  if (name !== "schedule" && !schedCanLeave()) return;
   $("setPageTitle").textContent = SET_PAGES[name];
   $("setList").classList.add("hidden");
   $("setPages").classList.remove("hidden");
@@ -1613,6 +1618,7 @@ function openSetPage(name) {
   if (name === "memory") loadMemories();
   if (name === "persona") syncPersonaChip();
   if (name === "reminders") renderReminders($("paneReminders"));
+  if (name === "schedule") loadSchedule();
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
 function closeSetPage() { Layers.close("setPage"); }
@@ -2212,6 +2218,295 @@ function memoryListErrorText(e) {
   return "记忆服务不可用：" + e.message;
 }
 
+/* ---------------- 日程（v0.23 R3 · T2.6 + T2.8） ----------------
+ * 一天一份清单：GET 拿回服务端那一份，编辑改的是本地草稿，点「保存」才整天 PUT
+ * （幂等，重放同一份结果相同）。状态只住内存，不落 localStorage：日程的真身在
+ * 服务端，本地留一份副本就得对账，而对账一定会错（两端同时改、跨天、换账号）。
+ *
+ * 三条口径是照着验收条件写的，别当成可有可无的实现细节：
+ *   · 「今天」永远是服务端 GET 回来的那个 day，不是设备日期（R3-AC-3）——
+ *     手机把系统时间改了，也不该让它问出别人的一天；
+ *   · 400 时错误条里是服务端 detail 原文，并且**不**渲染空态（R3-AC-2）——
+ *     "日期要写成 YYYY-MM-DD" 渲染成"这天还没有安排"，是把一句问错了的话
+ *     说成一句真话；
+ *   · 客户端一条内容校验都不做：空文本、坏时间、超过 40 条，都由服务端回它
+ *     自己那句话，界面负责原样念出来。少一份第二实现，就少一处会漂的地方。
+ */
+const sched = {
+  today: "",          // 服务端今天（不传 day 那次 GET 回到的 day）
+  day: "",            // 当前看的那一天
+  items: [],          // 本地草稿 [{text, at, done}]
+  pristine: "[]",     // 上一次与服务端一致的快照，dirty 判据就是它与草稿的差
+  days: [],           // 有过安排的那些天 → 日期条上的星紫点
+  loading: false,
+  saving: false,
+  error: "",          // 服务端 detail 原文；非空即错误态
+  editing: -1,        // 原地编辑的行号，-1 = 没有
+  isNew: false,       // 正在编辑的这行是本次新加的（取消时要收掉）
+};
+
+const SCHED_WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+// 日期条窗口：今天前 5 格 + 今天 + 后 2 格 = 8 格，与设计稿那一排完全同数量同形状。
+const SCHED_BEFORE = 5, SCHED_AFTER = 2;
+
+/** "YYYY-MM-DD" → 本地零点的 Date。刻意不用 new Date(iso)：那个按 UTC 解析，
+ *  东八区看前一天会整体差一天，日期条会错位。 */
+function schedParse(iso) {
+  const p = String(iso || "").split("-");
+  return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+}
+
+function schedIso(d) {
+  const m = String(d.getMonth() + 1), day = String(d.getDate());
+  return `${d.getFullYear()}-${m.length < 2 ? "0" + m : m}-${day.length < 2 ? "0" + day : day}`;
+}
+
+function schedShift(iso, delta) {
+  const d = schedParse(iso);
+  return schedIso(new Date(d.getFullYear(), d.getMonth(), d.getDate() + delta));
+}
+
+function schedWeek(iso) { return SCHED_WEEK[schedParse(iso).getDay()]; }
+
+function schedFullDate(iso) {
+  const d = schedParse(iso);
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+/** 顶栏那截日期副标：今天多带一个「· 今天」，其余只报日期。 */
+function schedDayLabel(iso, today) {
+  return schedFullDate(iso) + (iso === today ? " · 今天" : "");
+}
+
+function schedWindow() {
+  const out = [];
+  for (let i = -SCHED_BEFORE; i <= SCHED_AFTER; i++) out.push(schedShift(sched.today, i));
+  return out;
+}
+
+/** 组头两件事：看的是今天就叫「今日安排」，看别日就报那一天的日期；后面挂计数。 */
+function schedGroupText(iso, today) {
+  return iso === today ? "今日安排" : `${schedFullDate(iso)}安排`;
+}
+
+function schedCountText(items) {
+  return `${items.length} 项 · 已完成 ${items.filter((it) => it.done).length}`;
+}
+
+function schedSnapshot() {
+  return JSON.stringify(sched.items.map((it) => ({ text: it.text, at: it.at, done: !!it.done })));
+}
+
+async function loadSchedule(day) {
+  // 草稿优先：还在同一天上且手上有未保存改动，就不要拿服务端那份把人写的盖掉。
+  // 浏览器返回键绕过二次确认时（层栈那一路没法挡），这条保证草稿还在原地。
+  if (sched.day && (!day || day === sched.day) && schedSnapshot() !== sched.pristine) {
+    renderSchedule();
+    return;
+  }
+  sched.loading = true; sched.error = ""; sched.editing = -1;
+  renderSchedule();
+  try {
+    const data = await API.getSchedule(day);
+    // 只有"没指定哪天"那一次才允许改写锚点：点了别的日子不能把今天挪走。
+    if (!day) sched.today = data.day;
+    sched.day = data.day;
+    sched.items = (data.items || []).map((it) => ({
+      text: it.text || "", at: it.at || "", done: !!it.done,
+    }));
+    sched.days = data.days || [];
+    sched.pristine = schedSnapshot();
+  } catch (e) {
+    if (needsAuth(e)) return;
+    sched.error = e.message || String(e);   // 服务端 detail 原文，不加自己的解释
+    sched.items = [];
+    sched.day = day || sched.day;
+  } finally {
+    sched.loading = false;
+    renderSchedule();
+  }
+}
+
+function schedChip(iso) {
+  const b = document.createElement("button");
+  const cls = ["daychip"];
+  if (sched.days.includes(iso)) cls.push("has");
+  if (iso === sched.day) cls.push("sel");
+  if (iso === sched.today) cls.push("today");
+  b.className = cls.join(" ");
+  b.type = "button";
+  const w = document.createElement("span");
+  w.className = "w";
+  w.textContent = iso === sched.today ? "今天" : schedWeek(iso);
+  const d = document.createElement("span");
+  d.className = "d";
+  d.textContent = String(schedParse(iso).getDate());
+  const tick = document.createElement("span");
+  tick.className = "tick";
+  b.append(w, d, tick);
+  b.setAttribute("aria-label", schedFullDate(iso) + (sched.days.includes(iso) ? "，有安排" : ""));
+  b.setAttribute("aria-pressed", iso === sched.day ? "true" : "false");
+  b.onclick = () => { if (iso !== sched.day) loadSchedule(iso); };
+  return b;
+}
+
+function schedRow(item, i) {
+  const row = document.createElement("div");
+  row.className = "item" + (item.done ? " done" : "");
+  if (sched.editing === i) {
+    const txt = document.createElement("input");
+    txt.className = "edit-box";
+    txt.value = item.text;
+    txt.placeholder = "要做什么";
+    txt.setAttribute("aria-label", "事项内容");
+    const at = document.createElement("input");
+    at.className = "edit-box time-edit";
+    at.value = item.at;
+    at.placeholder = "HH:MM";
+    at.setAttribute("aria-label", "时间（24 小时 HH:MM，可留空）");
+    // Enter 收这一行、Esc 取消 —— 与聊天页 .edit-box 同一套键盘契约。
+    const commit = () => {
+      item.text = txt.value; item.at = at.value;
+      sched.editing = -1; sched.isNew = false;
+      renderSchedule();
+      $("schedSaveBtn").focus();
+    };
+    const cancel = () => {
+      if (sched.isNew) sched.items.splice(i, 1);
+      sched.editing = -1; sched.isNew = false;
+      renderSchedule();
+    };
+    txt.onkeydown = at.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    };
+    txt.onblur = at.onblur = () => {
+      // 焦点还在编辑框之间挪动时不收；真走开了才收（点保存也算走开，保存前先收）。
+      setTimeout(() => {
+        if (sched.editing === i && document.activeElement !== txt && document.activeElement !== at) commit();
+      }, 0);
+    };
+    row.append(txt, at);
+    return row;
+  }
+  const chk = document.createElement("button");
+  chk.className = "chk";
+  chk.type = "button";
+  chk.textContent = "✓";
+  chk.setAttribute("aria-label", item.done ? "标记为未完成" : "标记为已完成");
+  chk.setAttribute("aria-pressed", item.done ? "true" : "false");
+  chk.onclick = () => { item.done = !item.done; renderSchedule(); };
+  const txt = document.createElement("span");
+  txt.className = "txt";
+  txt.textContent = item.text;
+  const at = document.createElement("span");
+  at.className = "at" + (item.at ? "" : " none");
+  at.textContent = item.at || "—";
+  const op = document.createElement("span");
+  op.className = "op";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.textContent = "✎";
+  edit.setAttribute("aria-label", "编辑这一条");
+  edit.onclick = () => { sched.editing = i; sched.isNew = false; renderSchedule(); };
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "del";
+  del.textContent = "🗑";
+  del.setAttribute("aria-label", "删除这一条");
+  // 不做删除确认：保存才是唯一写回点，整天 PUT 的语义下这一步随时可以反悔
+  //（不保存就走 = 什么都没发生），弹一层确认反而让人以为已经删了。
+  del.onclick = () => { sched.items.splice(i, 1); if (sched.editing >= sched.items.length) sched.editing = -1; renderSchedule(); };
+  op.append(edit, del);
+  row.append(chk, txt, at, op);
+  return row;
+}
+
+function renderSchedule() {
+  const pane = $("paneSchedule");
+  if (!pane) return;
+  const daybar = $("schedDaybar"), items = $("schedItems");
+  const err = $("schedError"), empty = $("schedEmpty"), group = $("schedGroup");
+  const foot = $("schedDirty"), add = $("schedAdd"), save = $("schedSaveBtn");
+
+  $("schedDayLabel").textContent = sched.day ? schedDayLabel(sched.day, sched.today) : "";
+  $("scheduleVal").textContent = sched.today ? `${sched.days.length} 天有安排` : "";
+
+  daybar.innerHTML = "";
+  daybar.classList.toggle("busy", sched.loading);
+  if (sched.today) schedWindow().forEach((iso) => daybar.appendChild(schedChip(iso)));
+
+  // 错误态与空态严格互斥：有 detail 就只给错误条，清单区整块收起。
+  const hasErr = !!sched.error;
+  err.classList.toggle("hidden", !hasErr);
+  err.textContent = hasErr ? "⚠ " + sched.error : "";
+  group.classList.toggle("hidden", hasErr || sched.loading || !sched.items.length);
+  items.classList.toggle("hidden", hasErr || sched.loading);
+  empty.classList.toggle("hidden", hasErr || sched.loading || !!sched.items.length);
+  add.classList.toggle("hidden", hasErr);
+  items.innerHTML = "";
+  if (!hasErr && !sched.loading) sched.items.forEach((it, i) => items.appendChild(schedRow(it, i)));
+
+  $("schedGroup").firstChild.nodeValue = schedGroupText(sched.day || sched.today, sched.today);
+  $("schedCount").textContent = schedCountText(sched.items);
+
+  const dirty = schedSnapshot() !== sched.pristine;
+  foot.textContent = dirty ? "● 有未保存修改 · 保存将整日替换" : "尚无修改";
+  foot.classList.toggle("on", dirty);
+  save.disabled = !dirty || sched.saving;
+  save.textContent = sched.saving ? "保存中…" : "保存";
+}
+
+async function saveSchedule() {
+  if (sched.saving) return;
+  // pristine 只代表"服务端确认过的那一份"：这里绝不提前换成草稿。
+  // 提前定住会让失败的这一趟看起来像成功——人以为存上了，其实改动还在手里。
+  const payload = sched.items.map((it) => ({ text: it.text, at: it.at, done: !!it.done }));
+  sched.saving = true; renderSchedule();
+  try {
+    const data = await API.putSchedule(sched.day, payload);
+    sched.items = (data.items || []).map((it) => ({
+      text: it.text || "", at: it.at || "", done: !!it.done,
+    }));
+    sched.day = data.day || sched.day;
+    sched.error = "";
+    // PUT 的响应没有 days：这一天的有无由 count 说了算，别的天不靠猜。
+    if ((data.count || sched.items.length) > 0 && !sched.days.includes(sched.day)) {
+      sched.days = [...sched.days, sched.day].sort();
+    } else if (!sched.items.length) {
+      sched.days = sched.days.filter((d) => d !== sched.day);
+    }
+    sched.pristine = schedSnapshot();
+  } catch (e) {
+    if (needsAuth(e)) return;
+    sched.error = e.message || String(e);    // 失败保留 dirty，可以改了再存
+  } finally {
+    sched.saving = false;
+    renderSchedule();
+    if (!sched.error && schedSnapshot() === sched.pristine) flashSaved();
+  }
+}
+
+/** 「已保存」淡入淡出 1.5s 就消失：常驻一行绿字会让人以为还有个没保存的东西。 */
+function flashSaved() {
+  const foot = $("schedDirty");
+  if (!foot) return;
+  const note = document.createElement("span");
+  note.className = "saved-note";
+  note.textContent = "已保存";
+  foot.textContent = "";
+  foot.appendChild(note);
+  setTimeout(() => renderSchedule(), 1600);
+}
+
+/** 离开日程页时的未保存提醒。不在这一页、或没有改动，一律放行。 */
+function schedCanLeave() {
+  const pane = $("paneSchedule");
+  const onSchedule = pane && !pane.classList.contains("hidden");
+  if (!onSchedule || schedSnapshot() === sched.pristine) return true;
+  return confirm("有未保存的修改：离开这一页就不会保存它们。确定离开？");
+}
+
 /** 设置一级列表顶上的身份卡。
  *  原先这里是一张 dl 回显（当前模型 / 登录身份 / 温度 · 上下文…）：模型在上一行
  *  就能改、温度根本不生效，回显等于把同一件事说两遍还捎带一个假数字。值现在
@@ -2489,6 +2784,7 @@ function bind() {
   $("newChatBtn").onclick = () => { newChat(); closeSidebar(); };
   $("navProviders").onclick = () => { openSettings("providers"); closeSidebar(); };
   $("navMemory").onclick = () => { openSettings("memory"); closeSidebar(); };
+  $("navSchedule").onclick = () => { openSettings("schedule"); closeSidebar(); };
   // 不传 tab：落在哪一页由 openSettings 按角色决定（管理员=模型服务，其他人=连接）。
   // 收起侧栏是必须的：手机上它是抽屉，不收就是一片遮罩挡在面板前面。
   $("whoRow").onclick = () => { openSettings(); closeSidebar(); };
@@ -2567,14 +2863,28 @@ function bind() {
   $("camRetake").onclick = retake;
   $("camUse").onclick = usePhoto;
 
-  $("closeSettings").onclick = closeSettings;
-  $("settings").onclick = (e) => { if (e.target === $("settings")) closeSettings(); };
-  $("setBack").onclick = closeSetPage;
+  // 关弹层的三个出口都要过 schedCanLeave()：设置页是唯一的写回机会，
+  // 人在日程页改了没存就点 × / 点遮罩 / 按返回，得先问一句（PRD R3-AC-4 的"不静默丢改动"）。
+  $("closeSettings").onclick = () => { if (schedCanLeave()) closeSettings(); };
+  $("settings").onclick = (e) => { if (e.target === $("settings") && schedCanLeave()) closeSettings(); };
+  $("setBack").onclick = () => { if (schedCanLeave()) closeSetPage(); };
   $("rowAccounts").onclick = () => openSetPage("accounts");
   $("rowProviders").onclick = () => openSetPage("providers");
   $("rowPersona").onclick = () => openSetPage("persona");
   $("rowMemory").onclick = () => openSetPage("memory");
   $("rowReminders").onclick = () => openSetPage("reminders");
+  $("rowSchedule").onclick = () => openSetPage("schedule");
+  // 「添加一项」= 追加一条空事项并立刻进编辑态。空文本不进 PUT 也能被服务端拦住，
+  // 但那样错误条会盖掉整张清单，不如让这一行先被写满（Esc 就撤掉，等于没加）。
+  $("schedAdd").onclick = () => {
+    sched.items.push({ text: "", at: "", done: false });
+    sched.editing = sched.items.length - 1;
+    sched.isNew = true;
+    renderSchedule();
+    const last = $("schedItems").lastElementChild;
+    if (last) { const box = last.querySelector(".edit-box"); if (box) box.focus(); }
+  };
+  $("schedSaveBtn").onclick = () => saveSchedule();
   renderAboutRows();
   /* 底部卡片那三颗。「立即更新」与「稍后」都写当天的日期戳：这一版今天不再弹第二次，
      不管他是点了更新还是点了拒绝——他已经知道有新版了，同一天再问是骚扰。

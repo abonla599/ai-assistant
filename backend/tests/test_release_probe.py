@@ -482,7 +482,7 @@ def test_the_native_shell_ships_byte_identical_core_classes():
 
     repo = Path(releases.__file__).resolve().parents[3]
     shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java",
-              "ExportName.java", "ExportRedeem.java")
+              "ExportName.java", "ExportRedeem.java", "ScheduleBoard.java")
     for name in shared:
         old = repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
             / "assistant" / "core" / name

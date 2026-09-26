@@ -728,3 +728,132 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 @keyframes voiceBar { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
 @media (prefers-reduced-motion: reduce) { .voice-bars i { animation-duration: 1.6s; } }
 
+/* ============================================================
+   日程面板（v0.23 R3 · T2.6）
+   唯一来源是 docs/v0.23-阶段0/T0.1-日程设计稿-双端同构.html：
+   下面每一条数值都能在稿子里找到，颜色一律走现网 :root 令牌
+   （#0b0e15 底 / #2fbf8f 选中·完成·保存 / #6c7bff 日期点·dirty），
+   没有任何新增色值。安卓 Compose 那份按同名结构逐块对位，
+   两端的文案与规格由 test_schedule_ui_contract.py 钉在一起。
+   ============================================================ */
+.sched-panel {
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);              /* 主面板圆角 18 */
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.sched-head { padding: 16px 16px 10px; }
+.sched-h1 { font-size: 19px; font-weight: 600; letter-spacing: .3px; display: flex; align-items: baseline; gap: 8px; }
+.sched-h1 .day { color: var(--text-3); font-size: 12.5px; font-weight: 400; letter-spacing: .4px; }
+.sched-sub { margin-top: 2px; font-size: 12.5px; color: var(--text-3); letter-spacing: .4px; }
+
+/* 日期条：横向周条；有安排的日子带一颗星紫点（GET /v1/schedule 的 days 字段） */
+.daybar { display: flex; gap: 6px; padding: 12px 16px; overflow-x: auto; scrollbar-width: none; }
+.daybar::-webkit-scrollbar { display: none; }
+.daychip {
+  flex: 0 0 auto; width: 44px; padding: 7px 0 6px; text-align: center; cursor: pointer;
+  border: 1px solid transparent; border-radius: 12px; background: transparent;
+  color: var(--text-2); font: inherit; transition: background .15s, border-color .15s;
+}
+.daychip .w { display: block; font-size: 10.5px; color: var(--text-3); letter-spacing: .5px; }
+.daychip .d { display: block; font-size: 15px; font-weight: 600; line-height: 1.3; }
+.daychip .tick { display: block; width: 4px; height: 4px; margin: 3px auto 0; border-radius: 50%; background: var(--accent-2); visibility: hidden; }
+.daychip.has .tick { visibility: visible; }
+.daychip:hover { background: var(--bg-hover); }
+.daychip.sel { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.daychip.today .w { color: var(--accent); }        /* 今天那一格的星期位写"今天"，用强调色 */
+.daybar.busy .daychip { pointer-events: none; opacity: .6; }   /* 加载中禁用，不闪空态 */
+
+/* 组头：12.5px / .4px —— 与设置页 .set-group 同规格 */
+.sched-panel .group {
+  margin: 22px 16px 8px; color: var(--text-3); font-size: 12.5px; letter-spacing: .4px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.sched-panel .group .count { color: var(--text-3); opacity: .75; }
+
+/* 条目行：勾选 + 文本 + 时间角标；54px 最小高与 .set-row 同规格 */
+.sched-panel .item {
+  display: flex; align-items: center; gap: 12px; min-height: 54px;
+  padding: 8px 16px; border-top: 1px solid var(--line); position: relative;
+  transition: background .15s; animation: schedIn .25s ease-out both;
+}
+.sched-panel .item:hover { background: var(--bg-hover); }
+/* 逐行进场 stagger：网页用 CSS delay，Compose 侧对应 animateItem() */
+.sched-panel .item:nth-child(2) { animation-delay: 40ms; }
+.sched-panel .item:nth-child(3) { animation-delay: 80ms; }
+.sched-panel .item:nth-child(4) { animation-delay: 120ms; }
+.sched-panel .item:nth-child(5) { animation-delay: 160ms; }
+.sched-panel .item:nth-child(n+6) { animation-delay: 200ms; }
+@keyframes schedIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.sched-panel .chk {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  border: 1.5px solid var(--text-3); background: transparent; display: grid; place-items: center;
+  color: transparent; font-size: 13px; line-height: 1; transition: all .15s;
+}
+.sched-panel .item.done .chk { border-color: var(--accent); background: var(--accent); color: #07120d; }
+.sched-panel .item.done .txt { color: var(--text-3); text-decoration: line-through; text-decoration-color: rgba(106, 116, 129, .6); }
+.sched-panel .txt { flex: 1; font-size: 15px; line-height: 1.45; word-break: break-word; }
+/* 时间角标用代码同款等宽字体 —— 这份界面的唯一签名细节 */
+.sched-panel .at {
+  flex: 0 0 auto; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px; color: var(--text-2); letter-spacing: .4px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; background: var(--bg-soft);
+}
+.sched-panel .at.none { visibility: hidden; }
+.sched-panel .op { flex: 0 0 auto; display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+.sched-panel .item:hover .op { opacity: 1; }
+.sched-panel .op button { border: 0; background: transparent; color: var(--text-3); font: inherit; font-size: 14px; padding: 4px 6px; border-radius: 8px; cursor: pointer; }
+.sched-panel .op button:hover { color: var(--text); background: var(--bg-soft); }
+.sched-panel .op button.del:hover { color: var(--danger); }
+/* 触摸端没有 hover：操作按钮常显（与 .msg-tools 移动端规则同构，稿子里的 .phone .op） */
+@media (hover: none) { .sched-panel .op { opacity: 1; } }
+
+/* 原地编辑框：与聊天页 .edit-box 同一契约（accent 描边、圆角 10、surface 底） */
+.sched-panel .edit-box {
+  flex: 1; font: inherit; font-size: 15px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--accent); border-radius: 10px;
+  padding: 9px 12px; outline: none; min-width: 0;
+}
+.sched-panel .edit-box.time-edit { width: 74px; flex: 0 0 auto; text-align: center; }
+.sched-panel .edit-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sched-panel .daychip:focus-visible, .sched-panel .chk:focus-visible,
+.sched-panel .add-row:focus-visible, .btn-save:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.sched-panel .add-row {
+  display: flex; align-items: center; gap: 12px; min-height: 54px; width: 100%;
+  padding: 8px 16px; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--text-3); cursor: pointer; font: inherit;
+  font-size: 15px; text-align: left; transition: background .15s, color .15s;
+}
+.sched-panel .add-row:hover { background: var(--bg-hover); color: var(--text-2); }
+.sched-panel .add-row .plus { color: var(--accent); font-size: 17px; width: 20px; text-align: center; }
+
+/* 空态与 400 错误条视觉严格区分：空态居中灰字，错误条是 danger 的一整条 */
+.sched-panel .empty { padding: 34px 16px 38px; text-align: center; color: var(--text-3); font-size: 14px; line-height: 1.8; }
+.sched-panel .empty .big { font-size: 26px; display: block; margin-bottom: 6px; opacity: .8; }
+.errbar {
+  margin: 0 16px 14px; padding: 10px 12px; border-radius: 12px; font-size: 13.5px;
+  color: var(--danger); background: rgba(248, 113, 113, .08); border: 1px solid rgba(248, 113, 113, .25);
+}
+
+.sched-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+              padding: 12px 16px 14px; border-top: 1px solid var(--line); background: var(--bg-soft); }
+.dirty-note { font-size: 12.5px; color: var(--text-3); letter-spacing: .4px; }
+.dirty-note.on { color: var(--accent-2); }
+.saved-note { font-size: 12.5px; color: var(--accent); letter-spacing: .4px; animation: savedFade 1.5s ease-out both; }
+@keyframes savedFade { 0% { opacity: 0; } 18% { opacity: 1; } 78% { opacity: 1; } 100% { opacity: 0; } }
+.btn-save {
+  border: 0; cursor: pointer; font: inherit; font-size: 14.5px; font-weight: 600; letter-spacing: .5px;
+  color: #07120d; background: var(--accent); border-radius: 999px; padding: 10px 26px;
+  transition: filter .15s, opacity .15s;
+}
+.btn-save:hover { filter: brightness(1.08); }
+.btn-save:disabled { opacity: .35; cursor: default; filter: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sched-panel .item { animation: none; }
+  .saved-note { animation-duration: 3s; }
+}
+

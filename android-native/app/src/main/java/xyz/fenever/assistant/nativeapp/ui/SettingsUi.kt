@@ -117,7 +117,7 @@ internal var reenterRequested = false
 
 private val SET_PAGES = mapOf(
     "providers" to "模型服务", "accounts" to "账户", "persona" to "角色设定",
-    "memory" to "长期记忆", "reminders" to "提醒",
+    "memory" to "长期记忆", "reminders" to "提醒", "schedule" to "日程",
 )
 
 @Composable
@@ -133,7 +133,8 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     var noteErr by remember { mutableStateOf(false) }
     var providers by remember { mutableStateOf(listOf<ModelInfo>()) }
     var serverDefault by remember { mutableStateOf<String?>(null) }
-    var memoryCount by remember { mutableStateOf("") }              // 「N 条」/「50+ 条」/""
+    var memoryCount by remember { mutableStateOf("") }
+    var scheduleVal by remember { mutableStateOf("") }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
     var serverBuild by remember { mutableStateOf("") }
 
     fun setStatus(t: String, err: Boolean = false) { note = t; noteErr = err }
@@ -179,9 +180,13 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                     onClose = { onOpenPage(null) })
                 "memory" -> MemoryPage(onCountChanged = { memoryCount = it },
                     onNote = { setStatus(it, true) })
+                "schedule" -> SchedulePage(onNote = { t, err -> setStatus(t, err) },
+                    onRequireAuth = onRequireAuth,
+                    onValChanged = { scheduleVal = it })
                 "reminders" -> RemindersPage(onNote = { t, err -> setStatus(t, err) })
                 else -> SettingsList(onOpenPage, onRequireAuth, onOpenUrl, onLoggedOut,
                     providers = providers, memoryCount = memoryCount,
+                    scheduleVal = scheduleVal,
                     serverBuild = serverBuild, identityTick = identityTick,
                     onTick = { identityTick++ }, onNote = { t, err -> setStatus(t, err) },
                     onModelsChanged = { reloadProviders() }, canExport = canExport)
@@ -320,6 +325,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          onRequireAuth: (String) -> Unit, onOpenUrl: (String) -> Unit,
                          onLoggedOut: () -> Unit,
                          providers: List<ModelInfo>, memoryCount: String,
+                         scheduleVal: String,
                          serverBuild: String, identityTick: Int,
                          onTick: () -> Unit,
                          onNote: (String, Boolean) -> Unit,
@@ -470,6 +476,14 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     SetCard {
         SetRow("◈", "长期记忆", divider = false, valSlot = { SetValText(memoryCount) }) {
             onOpenPage("memory")
+        }
+    }
+
+    // —— 日程 ——
+    SetGroup("日程")
+    SetCard {
+        SetRow("▤", "日程", divider = false, valSlot = { SetValText(scheduleVal) }) {
+            onOpenPage("schedule")
         }
     }
 
