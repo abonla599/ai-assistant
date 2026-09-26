@@ -135,12 +135,106 @@ jobs:
 
       # 把签进包里的那把钥匙的指纹打进日志：以后再出"用户装不上"，第一件事就是
       # 比对两个 Release 的这行输出，而不是靠人回忆签名是哪把。
+      # 2026-09-26 换用 apksigner：release 包只有 v2/v3 签名字块、没有 v1 JAR 签名
+      # （实测 v0.22 资产 META-INF 下无 *.RSA），keytool -printcert -jarfile 只认 v1，
+      # 对着这种包静默输出 "No signers"——grep 接在管道尾把退出码洗成 0，
+      # 这一步过去几个版本其实一直在空转。apksigner 才看得见真正的签名。
       - name: Show which key signed this APK
         run: |
           set -eu
           apk=android-native/app/build/outputs/apk/release/app-release.apk
           test -s "$apk"
-          "$JAVA_HOME/bin/keytool" -printcert -jarfile "$apk" | grep -E "Owner|SHA256" | head -4
+          apksigner="$(command -v apksigner || true)"
+          if [ -z "$apksigner" ]; then
+            bt=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)
+            apksigner="${bt}apksigner"
+          fi
+          test -x "$apksigner" || { echo "::error::找不到 apksigner（SDK build-tools 缺席？）"; exit 1; }
+          "$apksigner" verify --print-certs "$apk" | grep -E "Signer #|SHA-256 digest"
+
+      # R5-AC-4 签名指纹守卫（T1.2）：新包签名指纹 ≠ 上一正式版 → 红，不许发。
+      # 为什么钉的是"上一正式版实际用的签名"而不是仓库里抄一个常量：常量会过时，
+      # keystore 一旦轮换就得记得改 yml，忘了的那天恰好是守卫最该响的那天；
+      # 从上一个真实 Release 的资产现读，参照物永远跟着发布史自己走。
+      # 误报豁免：仓库变量 SIGNATURE_GUARD_EXEMPT 精确等于**新包指纹**才放行——
+      # 设错值不生效，逼着豁免的人去 CI 日志抄真实指纹；放行时 ::warning:: +
+      # 写入 Step Summary，两处留痕（PRD 风险表要求豁免可追溯）。
+      - name: "SIGNATURE DRIFT -> 与上一正式版签名不同（豁免见变量 SIGNATURE_GUARD_EXEMPT）"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GUARD_EXEMPT: ${{ vars.SIGNATURE_GUARD_EXEMPT }}
+        run: |
+          set -uo pipefail
+          apk=android-native/app/build/outputs/apk/release/app-release.apk
+          apksigner="$(command -v apksigner || true)"
+          if [ -z "$apksigner" ]; then
+            bt=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)
+            apksigner="${bt}apksigner"
+          fi
+          if [ ! -x "$apksigner" ]; then
+            echo "::error::找不到 apksigner，无法核对签名指纹。宁可停，不瞎放行"
+            exit 1
+          fi
+          fp_of() {  # 输出该包 1 号签名者证书的 SHA-256（64 位小写十六进制）
+            "$apksigner" verify --print-certs "$1" 2>/dev/null \
+              | grep -m1 "certificate SHA-256 digest" \
+              | grep -oiE "[0-9a-f]{64}" | head -1 | tr "A-F" "a-f"
+          }
+          new_fp=$(fp_of "$apk")
+          if [ -z "$new_fp" ]; then
+            echo "::error::新包里读不到签名指纹（未签名或 apksigner 解析失败）——这种包本来就不该发出去"
+            exit 1
+          fi
+          echo "本次构建签名指纹: $new_fp"
+          # 上一正式版 = tag 不等于本次、非草稿非预发布里最近的一个。
+          # v0.21/v0.22 资产虽名带 -debug，但覆盖安装判的是签名，不比文件名，
+          # 所以拿"最近发布"的证书指纹当参照正是题意。
+          tag="${GITHUB_REF_NAME}"
+          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
+            --jq "[.[] | select(.tag_name != \"${tag}\" and .draft == false and .prerelease == false)][0].tag_name // empty")
+          if [ -z "$prev" ]; then
+            echo "::warning::找不到上一正式版（首次发布？），本次跳过签名守卫"
+            exit 0
+          fi
+          url=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${prev}" \
+            --jq "[.assets[] | select(.name | endswith(\".apk\"))][0].browser_download_url // empty")
+          if [ -z "$url" ]; then
+            echo "::error::Release ${prev} 里没有可下载的 .apk 资产，无从核对指纹"
+            exit 1
+          fi
+          if ! curl -fsSL "$url" -o "$RUNNER_TEMP/prev-release.apk"; then
+            echo "::error::下载 ${prev} 的 APK 失败（网络抖动的概率大；重跑本 workflow 即可）"
+            exit 1
+          fi
+          old_fp=$(fp_of "$RUNNER_TEMP/prev-release.apk")
+          if [ -z "$old_fp" ]; then
+            echo "::error::读不出 ${prev} 包的签名指纹，无法比对"
+            exit 1
+          fi
+          echo "上一正式版 ${prev} 签名指纹: $old_fp"
+          if [ "$new_fp" = "$old_fp" ]; then
+            echo "::notice::签名指纹与 ${prev} 一致，守卫通过"
+            exit 0
+          fi
+          if [ "${GUARD_EXEMPT:-}" = "$new_fp" ]; then
+            echo "::warning::⚠️ 签名指纹漂移已被人工豁免：${prev}=$old_fp 新包=$new_fp。升级用户若装不上必须卸载重装——这是 R5 要消灭的事故，豁免前先确认 keystore 轮换是有意的"
+            {
+              echo "## ⚠️ 签名守卫人工豁免"
+              echo ""
+              echo "| 项 | 值 |"
+              echo "|---|---|"
+              echo "| 上一正式版 | \`${prev}\` |"
+              echo "| 上版签名指纹 | \`$old_fp\` |"
+              echo "| 本次签名指纹 | \`$new_fp\` |"
+              echo "| 豁免方式 | 仓库变量 \`SIGNATURE_GUARD_EXEMPT\`（设置该变量的操作在 repo audit log 留痕） |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::新包签名指纹与 ${prev} 不一致：new=$new_fp prev=$old_fp"
+          echo "::error::Android 覆盖安装判签名不判版本号，签错钥匙发出去 = 全体老用户必须卸载重装。"
+          echo "::error::若确认是 keystore 有意轮换：把上面 new= 的指纹一字不差设为仓库变量 SIGNATURE_GUARD_EXEMPT 再重跑，本步会放行并在 Summary 留痕。"
+          echo "::error::若不是有意行为（比如 secret 被换过）：回到 APK_KEYSTORE_BASE64 的源头核对，参考 docs/APK正式签名落地指引.md。"
+          exit 1
 
       - name: Stage APK with a friend-friendly filename
         run: |
