@@ -209,20 +209,9 @@ object Api {
     /** /health 免鉴权；build 字段 = 服务端构建戳（关于页「服务端 …」那一截）。 */
     suspend fun health(): JsonObject =
         json.parseToJsonElement(call("/health")).jsonObject
-    /** 「检查更新」用：直接问 GitHub 最新 release 的 tag（如 v0.22），不打扰自建服务端，
-     *  也不跳浏览器——用户要求更新检查全部留在应用内完成。 */
-    suspend fun latestRelease(): String =
-        withContext(Dispatchers.IO) {
-            val rb = Request.Builder()
-                .url("https://api.github.com/repos/abonla599/ai-assistant/releases/latest")
-                .header("Accept", "application/vnd.github+json")
-            client.newCall(rb.build()).execute().use { res ->
-                val text = res.body?.string() ?: ""
-                if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
-                json.parseToJsonElement(text).jsonObject["tag_name"]
-                    ?.jsonPrimitive?.contentOrNull ?: ""
-            }
-        }
+    // v0.23 T1.8：这里不再有 latestRelease()——检查更新改走自建服务端的
+    // GET /v1/update/info（唯一下载入口，见 update/Updater.kt）；客户端直连
+    // api.github.com 是 v0.22 那类「GitHub 漂了自家不漂」事故的入口，封死。
     suspend fun testMyProviderDraft(rec: JsonObject): JsonObject =
         json.parseToJsonElement(call("/v1/me/providers/test", "POST", rec.toString())).jsonObject
     suspend fun addProvider(rec: JsonObject) { call("/v1/providers", "POST", rec.toString()) }

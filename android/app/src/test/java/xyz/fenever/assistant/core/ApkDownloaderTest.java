@@ -36,8 +36,8 @@ public class ApkDownloaderTest {
 
     private File temp, target;
     private void files() throws IOException {
-        temp = new File(folder.getRoot(), "ai-assistant-0.16.apk.part");
-        target = new File(folder.getRoot(), "ai-assistant-0.16.apk");
+        temp = new File(folder.getRoot(), "ai-assistant-native-0.16.apk.part");
+        target = new File(folder.getRoot(), "ai-assistant-native-0.16.apk");
     }
 
     // ---------- 成功路径 ----------

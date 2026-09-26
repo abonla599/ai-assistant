@@ -573,14 +573,14 @@ def _fake_plan(monkeypatch, plan=(None, "模拟：没有快照")):
 def test_the_apk_route_hands_over_bytes_with_a_save_header(monkeypatch):
     """一次点击 = 直接落盘。类型与 Content-Disposition 就是"别在浏览器里打开它"。"""
     releases = _fake_plan(monkeypatch, ({
-        "url": "https://github.com/o/r/releases/download/v0.17/ai-assistant-0.17.apk",
-        "name": "ai-assistant-0.17.apk", "size": 5, "version": "0.17"}, ""))
+        "url": "https://github.com/o/r/releases/download/v0.17/ai-assistant-native-0.17.apk",
+        "name": "ai-assistant-native-0.17.apk", "size": 5, "version": "0.17"}, ""))
     monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"12345", ""))
 
     res = client.get("/site/android.apk")          # 不带任何凭据：朋友没登录也要能下
     assert res.status_code == 200, res.status_code
     assert res.headers["content-type"].startswith("application/vnd.android.package-archive")
-    assert res.headers["content-disposition"] == 'attachment; filename="ai-assistant-0.17.apk"'
+    assert res.headers["content-disposition"] == 'attachment; filename="ai-assistant-native-0.17.apk"'
     assert res.content == b"12345"
     assert res.headers["cache-control"] == "no-cache", "缓存住了就等于让人下到上一版"
 
@@ -596,7 +596,7 @@ def test_the_apk_route_falls_back_to_the_release_page(monkeypatch):
     assert res.status_code in (302, 307), res.status_code
     assert res.headers["location"] == releases.RELEASES_PAGE
 
-    _fake_plan(monkeypatch, ({"url": "https://github.com/o/a.apk", "name": "ai-assistant-0.17.apk",
+    _fake_plan(monkeypatch, ({"url": "https://github.com/o/a.apk", "name": "ai-assistant-native-0.17.apk",
                              "size": 5, "version": "0.17"}, ""))
     monkeypatch.setattr(releases, "fetch_asset", lambda url: (None, "上游回 404"))
     res = client.get("/site/android.apk", follow_redirects=False)

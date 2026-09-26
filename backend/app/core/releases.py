@@ -47,7 +47,13 @@ ASSET_TIMEOUT_SECONDS = 20.0
 APK_MAX_BYTES = 16 * 1024 * 1024
 MAX_HOPS = 3
 # 这个形状同时保证它放进 Content-Disposition 是安全的：没有 CR/LF、没有引号、没有分号。
-_ASSET_NAME_RE = re.compile(r"^ai-assistant-[0-9][0-9A-Za-z.\-]*\.apk$")
+# 前缀与发布流水线真实产出的资产名逐字对齐（release-apk.yml 自 2026-09-25 起发的是
+# 原生客户端包 ai-assistant-native-<版本>.apk）——对齐关系由
+# test_the_asset_name_is_the_one_the_workflow_publishes 数着，漂了的不是报错，
+# 是官网按钮与 App 内更新双双静默退回发布页。
+_ASSET_NAME_RE = re.compile(r"^ai-assistant-native-[0-9][0-9A-Za-z.\-]*\.apk$")
+# 资产名的前缀只在这里写一次：_pick_asset 与 download_plan 拼的是同一个串。
+ASSET_PREFIX = "ai-assistant-native-"
 
 _lock = threading.Lock()
 _payload = None                 # 上一次**成功**拉到的那份
@@ -100,13 +106,13 @@ def normalize_version(text) -> str:
 
 
 def _pick_asset(body: dict, version: str):
-    """只取名字**精确等于** `ai-assistant-<version>.apk` 的那一个资产。
+    """只取名字**精确等于** `ai-assistant-native-<version>.apk` 的那一个资产。
 
     与壳里 `ReleasePlan.pickAsset` 同一个理由：一次发布可以同时挂着 mapping.txt、
     别的平台的产物或上一次误传的文件，而这里挑中的东西是要弹给人去安装的。
     名字对上版本号顺带钉住了"这个包就是这一版"。
     """
-    want = f"ai-assistant-{version}.apk"
+    want = ASSET_PREFIX + version + ".apk"
     for asset in (body.get("assets") or []):
         if isinstance(asset, dict) and asset.get("name") == want:
             return asset
@@ -267,7 +273,7 @@ def download_plan():
     的是"陌生人的浏览器从我们这台服务器落下哪个字节流"，所以任何一项对不上都宁可拒：
     调用方拿不到 plan 就退回发布页，而不是硬编一个地址给人。
 
-    资产名必须等于 `ai-assistant-<这一版>.apk`：一次发布可以同时挂着 mapping.txt、
+    资产名必须等于 `ai-assistant-native-<这一版>.apk`：一次发布可以同时挂着 mapping.txt、
     别的平台的产物或上一次误传的旧包（`_pick_asset` 同一个理由），而且这条正则顺带
     保证了它放进 Content-Disposition 是安全的——没有 CR/LF、没有引号、没有分号。
     """
@@ -283,7 +289,7 @@ def download_plan():
         size = 0
     if not _ASSET_NAME_RE.match(name):
         return None, f"资产名不是我们发布的那个形状：{name!r}"
-    if name != f"ai-assistant-{version}.apk":
+    if name != ASSET_PREFIX + version + ".apk":
         return None, f"资产名与版本号对不上：{name!r} vs {version!r}"
     if not size or size > APK_MAX_BYTES:
         return None, f"这个包的大小不像一个 APK：{size}"

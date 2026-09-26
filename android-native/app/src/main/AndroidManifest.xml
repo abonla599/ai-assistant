@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 按住说话的录音。运行时才弹框（ChatUi 里在第一次长按时才请求）。 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- v0.23 T1.7 应用内更新：Android 8+ 起，发起安装包 Intent 需要这个特殊权限
+         （不弹框，在系统「安装未知应用」页里给）。拿不到时 Updater 不硬闯——
+         抛 SecurityException 会被接住，改弹「去设置」引导对话框。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Android 11+ 的包可见性：SpeechRecognizer 绑的是系统识别服务，
          不声明这条，isRecognitionAvailable 在部分 ROM 上会假报"没有服务"。 -->
@@ -48,5 +52,16 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- v0.23 T1.7：把壳自己下载的更新包以 content:// 交给系统安装页。
+             与 WebView 壳同一套安全边界（单段路径 + canonical 不逃逸 + 只读 + 文件名
+             必须形如 ai-assistant-native-*.apk），写死在 update/ApkFileProvider.kt 里。
+             exported=false：除了 grantUriPermissions 明确授权的接收方，谁也解析不到；
+             authority 用 applicationId 拼——native 壳与 WebView 壳并存安装时天然不撞。 -->
+        <provider
+            android:name=".update.ApkFileProvider"
+            android:authorities="${applicationId}.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>
