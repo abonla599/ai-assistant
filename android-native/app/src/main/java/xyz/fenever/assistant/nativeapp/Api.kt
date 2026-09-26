@@ -57,6 +57,19 @@ class ApiException(val status: Int, message: String) : Exception(message)
 @Serializable data class ChatReply(val reply: String = "", val message_id: String = "")
 @Serializable data class ExportTicket(val path: String = "")
 
+/* 日程（v0.23 R3）：与服务端 app/main.py 的 /v1/schedule 两面同形。
+   GET 回 {day, items, days}，PUT 回 {day, items, count}——PUT 的响应里**没有** days，
+   所以"哪些天有安排"这一份要客户端自己补（见 ui/ScheduleUi.kt 的保存分支）。
+   id 只在 GET 那份里有意义（整天 PUT 会重新发号），客户端不拿它做任何判断。 */
+@Serializable data class ScheduleItemDto(val id: String = "", val text: String = "",
+                                         val at: String = "", val done: Boolean = false)
+@Serializable data class ScheduleDayResult(val day: String = "",
+                                           val items: List<ScheduleItemDto> = emptyList(),
+                                           val days: List<String> = emptyList())
+@Serializable data class ScheduleSaveResult(val day: String = "",
+                                            val items: List<ScheduleItemDto> = emptyList(),
+                                            val count: Int = 0)
+
 /* /v1/chat/stream 的帧只有四种有效事件（start/content/done/error），
    与服务端 generate() 的产出逐字对齐。 */
 sealed class ChatEvent {
@@ -386,5 +399,29 @@ object Api {
     suspend fun deleteMemory(ids: List<String>) {
         call("/v1/memory/delete", "DELETE",
             obj(listOf("memory_ids" to arr(ids))))
+    }
+
+    // ---------- 日程（v0.23 R3 · T2.7）：与 api.js 的 getSchedule/putSchedule 同两条路 ----------
+    /* 归属人只从凭据里来：这里不拼任何 user_id，服务端按 token 认人（与
+       backend/app/core/schedule.py 的"归属人只从凭据里来"同一个口径）。
+       day 传空 = 问服务端"今天"，回来的 day 字段就是这一页的锚点（R3-AC-3）。 */
+    suspend fun getSchedule(day: String? = null): ScheduleDayResult =
+        callJson("/v1/schedule" + (if (day.isNullOrEmpty()) ""
+            else "?day=" + enc(day)))
+
+    /** 整天替换（幂等）：items 只带 {text, at, done}，id 由服务端重新发。 */
+    suspend fun putSchedule(day: String, items: List<ScheduleItemDto>): ScheduleSaveResult {
+        val arr = JsonArray(items.map { it2 ->
+            buildJsonObject {
+                put("text", JsonPrimitive(it2.text))
+                put("at", JsonPrimitive(it2.at))
+                put("done", JsonPrimitive(it2.done))
+            }
+        })
+        return json.decodeFromString(call("/v1/schedule", "PUT",
+            buildJsonObject {
+                put("day", JsonPrimitive(day))
+                put("items", arr)
+            }.toString()))
     }
 }

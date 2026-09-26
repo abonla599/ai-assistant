@@ -28,6 +28,8 @@
         <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
         <button class="nav-item" id="navProviders"><span class="ni-ico">⌗</span>模型服务</button>
         <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
+        <!-- 日程是一等功能，不藏在设置深处：设计稿 T0.1 的侧栏就是 会话/记忆/日程/设置。 -->
+        <button class="nav-item" id="navSchedule"><span class="ni-ico">▤</span>日程</button>
       </nav>
 
       <div class="search-box">
@@ -213,6 +215,15 @@
               <span class="set-lbl">长期记忆</span><span class="set-val" id="memoryVal"></span><span class="set-go">›</span></button>
           </div>
 
+          <!-- 日程（v0.23 R3）：服务端按天存的那份清单，与"提醒"（这台设备上的闹钟）
+               是两件事，所以单独一组，不塞进记忆也不塞进设备。 -->
+          <p class="set-group">日程</p>
+          <div class="set-card">
+            <button class="set-row" id="rowSchedule">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M8 3v4M16 3v4M4 10h16"/></svg></span>
+              <span class="set-lbl">日程</span><span class="set-val" id="scheduleVal"></span><span class="set-go">›</span></button>
+          </div>
+
           <!-- 提醒是**这台手机上的壳**在排期的，服务端没有这件事：所以它既不在记忆
                那一组、也不在对话那一组，单独一组「设备」。浏览器里没有壳，这一页
                只剩一句说明（app.js 的 renderReminders）。 -->
@@ -357,6 +368,31 @@
         <!-- 提醒：整块内容由 app.js 的 renderReminders 铺——这一页要么只有壳，
              要么只有一个空壳，HTML 里写死任何一行都会在浏览器里露出一个按不动的表单。 -->
         <section class="set-page hidden" data-page="reminders" id="paneReminders"></section>
+
+        <!-- 日程（v0.23 T2.6）：结构逐块对位 T0.1 同构设计稿——面板 → 顶栏 → 日期条 →
+             组头 → 条目 → 新增行 → 保存条。骨架留在 HTML（可访问性名字与静态文案），
+             会变的部分（日期条、条目、错误条、空态、计数）全由 app.js 的 renderSchedule
+             铺：这里写死任何一条安排，就等于和安卓那份各存一份真相。 -->
+        <section class="set-page hidden" data-page="schedule" id="paneSchedule">
+          <div class="sched-panel">
+            <div class="sched-head">
+              <h3 class="sched-h1">日程 <span class="day" id="schedDayLabel"></span></h3>
+              <p class="sched-sub" id="schedSub">「今天」取服务端日期</p>
+            </div>
+            <div class="daybar" id="schedDaybar" role="group" aria-label="日期选择"></div>
+            <p class="errbar hidden" id="schedError" role="alert"></p>
+            <p class="group" id="schedGroup">今日安排<span class="count" id="schedCount"></span></p>
+            <div class="empty hidden" id="schedEmpty">
+              <span class="big">▤</span>这天还没有安排<br>点下面「添加一项」记下第一件
+            </div>
+            <div id="schedItems"></div>
+            <button class="add-row" id="schedAdd"><span class="plus">＋</span>添加一项</button>
+            <div class="sched-foot">
+              <span class="dirty-note" id="schedDirty">尚无修改</span>
+              <button class="btn-save" id="schedSaveBtn" disabled>保存</button>
+            </div>
+          </div>
+        </section>
         </div>
       </div>
     </div>
