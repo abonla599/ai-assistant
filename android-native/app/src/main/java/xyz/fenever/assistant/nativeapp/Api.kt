@@ -18,6 +18,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
+import xyz.fenever.assistant.core.ExportName
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -169,10 +170,32 @@ object Api {
         call("/v1/sessions/" + enc(id) + "/messages", "PUT",
             buildJsonObject { put("messages", arr) }.toString())
     }
-    /* 导出：换一张一次性下载票据，原生侧把浏览器指到那个真实链接
-       （响应带 Content-Disposition，与网页 location.href = t.path 同一语义）。 */
+    /* 导出：换一张一次性下载票据。T2.4 起原生不再把票据交给外部浏览器——
+       签回的 path 过 ExportName.isTicketPath 门后直接进 DownloadManager 兑换
+       （正常链路），或走下面 fetchTicketBytes 自取字节（≤28 拒权的私有目录兜底）。 */
     suspend fun exportTicket(id: String): ExportTicket =
         callJson("/v1/sessions/" + enc(id) + "/export-ticket", "POST")
+
+    /**
+     * 匿名兑换票据字节流（v0.23 T2.5 的 DownloadManager 替代路）。
+     *
+     * 不带 Authorization：与网页 location.href 同一身份——链接本身就是凭据。
+     * 顺手带过期 token 反而会被鉴权门误伤，网页侧从来不带，这里逐字对齐。
+     * 形状门在发网之前再过一遍：这是服务端 path 字段唯一可能流向网络的第二处，
+     * 门禁不收窄成一处有例外。
+     */
+    suspend fun fetchTicketBytes(path: String): ByteArray = withContext(Dispatchers.IO) {
+        if (!ExportName.isTicketPath(path)) throw IllegalStateException("服务端给的票据形状不对")
+        client.newCall(Request.Builder()
+                .url(Prefs.baseUrl.trimEnd('/') + path).build())
+            .execute().use { res ->
+                if (!res.isSuccessful) {
+                    val text = runCatching { res.body?.string() }.getOrNull() ?: ""
+                    throw ApiException(res.code, failDetail(text, res.code))
+                }
+                res.body?.bytes() ?: ByteArray(0)
+            }
+    }
 
     private fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8")
 
