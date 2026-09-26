@@ -302,6 +302,9 @@ def _payload(version="0.17", name="ai-assistant-0.17.apk",
 def _prime(monkeypatch, payload):
     monkeypatch.setattr(releases, "_payload", payload)
     monkeypatch.setattr(releases, "_fetched_at", 1e9)      # 让它以为刚拉过，不碰网络
+    # 新鲜度现在看"最近一次成功"（_payload_at，T1.3 的 AC-4 收紧）——primed 快照
+    # 必须同步这个读数，否则 stale_attempt 会越过假数据去真出网。
+    monkeypatch.setattr(releases, "_payload_at", 1e9)
 
 
 def test_download_plan_accepts_a_normal_release(monkeypatch):

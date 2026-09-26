@@ -57,6 +57,11 @@ _payload = None                 # 上一次**成功**拉到的那份
 # 症状是每次重启后的头 10 分钟里那张卡片永远不弹，且一句错都不报。
 # （不是假想：CI 就是这么抓到的，runner 是一台刚开的虚拟机。）
 _fetched_at = None
+# 最近一次**成功**的读数。和 `_fetched_at`（最近一次**尝试**）分开记，是为了让
+# "手里这份货超过 10 分钟了"能独立发问：失败已经把 `_fetched_at` 推到下一轮，
+# 若缓存期只认尝试时间，一份超过 TTL 的旧快照会在 GitHub 恢复前被一直当成最新供出去
+# ——那正是 AC-4「伪装最新」的样子。
+_payload_at = None
 
 
 def _numeric(segments):
@@ -158,10 +163,18 @@ def latest_release_manifest():
     返回 (dict, reason)。拉不到时 (None, 理由)——调用方必须把这句理由原样带给人，
     而不是回一份"看起来没有更新"的空 JSON：那条三态纪律（读不出来 ≠ 已是最新）
     从壳里一路管到服务端这一层。
+
+    超过一个缓存期都没再成功过的旧快照同样算"拉不到"：手动点「检查更新」问的就是
+    "现在有没有新版"，把 GitHub 断供前攒下的旧货当最新发出去，恰恰是把"我读不到"
+    伪装成"你已是最新"——AC-4 的后半个词是这么被违反的。卡片端点不收紧，是因为
+    它拉不到就不弹，旧快照撑死多弹一句"去下载"，方向上仍是真话。
     """
-    snapshot, reason = _snapshot()
+    snapshot, reason, stale = _snapshot()
     if not snapshot:
         return None, reason or "还没有一次成功过的发布页读取"
+    if stale:
+        return None, (f"发布信息已超过 {CACHE_SECONDS // 60} 分钟没有一次成功的读取"
+                      f"（最近一次：{reason or '原因未知'}），不把旧快照冒充最新")
     raw = snapshot.get("raw")
     if not isinstance(raw, dict):
         return None, "发布快照里没有原样 JSON（内部状态坏了）"
@@ -171,32 +184,40 @@ def latest_release_manifest():
 
 
 def _snapshot() -> tuple:
-    """返回 (最新一次的发布快照 | None, 这次读取失败的理由)。
+    """返回 (最新一次的发布快照 | None, 这次读取失败的理由, 快照是否已过缓存期)。
 
     缓存的**唯一**入口：卡片（probe）与官网代取（download_plan）都从这里读，
     所以"10 分钟内最多问 GitHub 一次"这条承诺只有一处实现，不会一边省、一边不省。
+    重试节流看 `_fetched_at`（最近一次尝试），但**是否还新鲜**看 `_payload_at`
+    （最近一次成功）：两者分开，旧货出不了「检查更新」这道门，见
+    `latest_release_manifest` 的注释。
     """
-    global _payload, _fetched_at
+    global _payload, _fetched_at, _payload_at
     now = time.monotonic()
     with _lock:
-        stale = _fetched_at is None or (now - _fetched_at) >= CACHE_SECONDS
+        stale_attempt = (_fetched_at is None or (now - _fetched_at) >= CACHE_SECONDS
+                         or _payload_at is None or (now - _payload_at) >= CACHE_SECONDS)
     reason = ""
-    if stale:
+    if stale_attempt:
         payload, why = _fetch()
         with _lock:
             # 失败也把时间推进到下一轮：不然每个打开 App 的人都替 GitHub 挡一次枪。
             _fetched_at = time.monotonic()
             if payload is not None:
                 _payload = payload
+                _payload_at = time.monotonic()
         if why:
             reason = why
     with _lock:
-        return (dict(_payload) if _payload else None), reason
+        snap = dict(_payload) if _payload else None
+        stale = not (_payload_at is not None
+                     and (time.monotonic() - _payload_at) < CACHE_SECONDS)
+        return snap, reason, stale
 
 
 def probe(have: str = None) -> dict:
     """这张卡片要问的全部：最新是哪版、比手上这版新吗、去哪儿下。"""
-    snapshot, reason = _snapshot()
+    snapshot, reason, _stale = _snapshot()
 
     out = {"ok": bool(snapshot), "latest": (snapshot or {}).get("version", ""),
            "url": (snapshot or {}).get("url", ""),
@@ -222,10 +243,11 @@ def reset_for_tests() -> None:
     刚起来 = `_fetched_at` 是 None，不是 0.0：后者在 monotonic 还很小（真·刚开机、
     或 CI 的虚拟机）时会被判成"缓存还新"，那正是这条缓存要防的反面。
     """
-    global _payload, _fetched_at
+    global _payload, _fetched_at, _payload_at
     with _lock:
         _payload = None
         _fetched_at = None
+        _payload_at = None
 
 
 def _host_ok(url: str):
@@ -249,7 +271,7 @@ def download_plan():
     别的平台的产物或上一次误传的旧包（`_pick_asset` 同一个理由），而且这条正则顺带
     保证了它放进 Content-Disposition 是安全的——没有 CR/LF、没有引号、没有分号。
     """
-    snapshot, reason = _snapshot()
+    snapshot, reason, _stale = _snapshot()
     if not snapshot:
         return None, reason or "还没有一次成功过的发布页读取"
     version = snapshot.get("version") or ""
