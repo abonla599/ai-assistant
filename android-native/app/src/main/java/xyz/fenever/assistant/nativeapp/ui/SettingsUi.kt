@@ -84,11 +84,13 @@ import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.AuthResult
 import xyz.fenever.assistant.nativeapp.BuildConfig
+import xyz.fenever.assistant.core.ReleasePlan
 import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.ReminderChannels
 import xyz.fenever.assistant.nativeapp.ReminderScheduler
 import xyz.fenever.assistant.nativeapp.ReminderStore
+import xyz.fenever.assistant.nativeapp.update.Updater
 import xyz.fenever.assistant.nativeapp.theme.aiSoftBrush
 import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
@@ -318,9 +320,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          onNote: (String, Boolean) -> Unit,
                          onModelsChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
-    // 「检查更新」的应用内状态：结果只写在这行的值槽里，绝不拉浏览器（用户要求）
-    var checking by remember { mutableStateOf(false) }
-    var updNote by remember { mutableStateOf("") }
+    val ctx = LocalContext.current
+    // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
+    // 值槽与两个对话框都从它读——这里不再另起一份 remember 状态做第二真相。
     val light = isWebLight()
     val admin = Prefs.role == "admin"
     val me = Prefs.currentEntry()
@@ -437,26 +439,33 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         SetRow("ⓘ", "版本", plain = true, trailing = "",
             valSlot = { SetValText(versionVal) })
         // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
-        // 值槽依次显示「点按检查 → 正在检查… → 结果」，全程不跳外部。
+        // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
+        // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。
         SetRow("↻", "检查更新", trailing = "", valSlot = {
-            SetValText(when {
-                checking -> "正在检查…"
-                updNote.isNotEmpty() -> updNote
-                else -> "$shellVer · 点按检查"
-            })
-        }) {
-            if (checking) return@SetRow
-            checking = true
-            scope.launch {
-                runCatching { Api.latestRelease() }
-                    .onSuccess { tag ->
-                        updNote = if (isNewerVersion(tag, BuildConfig.VERSION_NAME))
-                            "发现新版本 $tag，请到下载页获取安装包"
-                        else "已是最新版本 v${BuildConfig.VERSION_NAME}"
+            val d = Updater.decision
+            val available = d != null && d.kind == ReleasePlan.Kind.AVAILABLE
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SetValText(when {
+                    Updater.checking -> "正在检查…"
+                    Updater.downloading -> "下载中 ${Updater.percent}%"
+                    available -> "发现新版本 ${d!!.version}"
+                    d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
+                        "已是最新版本 v${d.version}"
+                    d != null -> "检查更新失败：${d.reason}"
+                    else -> "$shellVer · 点按检查"
+                })
+                if (available && !Updater.checking && !Updater.downloading) {
+                    SetMiniPrimary("立即更新") {
+                        Updater.startDownload(ctx.applicationContext) { err ->
+                            err?.let { onNote("更新失败：$it", true) }
+                        }
                     }
-                    .onFailure { updNote = "没查到更新：GitHub 暂时打不开" }
-                checking = false
+                }
             }
+        }) {
+            if (Updater.checking) return@SetRow
+            Updater.startCheck()
         }
         SetRow("☾", "外观", trailing = "⇅", valSlot = {
             SetValText(if (light) "浅色" else "深色")
@@ -479,6 +488,17 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                 onLoggedOut()
             }
         }
+    }
+
+    // —— 应用内更新（T1.7）：进度对话框 + 「安装未知应用」授权引导 ——
+    // 状态在 Updater 上，弹层被划掉再进来时这两个对话框会原样挂回来（下载不丢）。
+    if (Updater.downloading) {
+        UpdateProgressDialog(onCancel = { Updater.cancelDownload() })
+    }
+    if (Updater.installGuideVersion != null) {
+        InstallGuideDialog(
+            onGoSettings = { Updater.openInstallPermissionSettings(ctx.applicationContext) },
+            onDismiss = { Updater.dismissInstallGuide() })
     }
 }
 
@@ -579,22 +599,9 @@ private fun hostOf(url: String): String = runCatching {
     if (u.port > 0 && u.port != def) "$h:${u.port}" else h
 }.getOrDefault("")
 
-/** 版本号逐段比大小（tag 形如 v0.22 / 0.22.1，缺段按 0 补）。任何一段解析不出数字
- *  就当「没有更新」——宁可不报，也不给一行假的新版本提示。 */
-private fun isNewerVersion(tag: String, current: String): Boolean {
-    fun parts(s: String): List<Int>? {
-        val segs = s.trim().trimStart('v', 'V').split('.')
-        return segs.map { it.trim().toIntOrNull() ?: return null }
-    }
-    val a = parts(tag) ?: return false
-    val b = parts(current) ?: return false
-    for (i in 0 until maxOf(a.size, b.size)) {
-        val x = a.getOrElse(i) { 0 }
-        val y = b.getOrElse(i) { 0 }
-        if (x != y) return x > y
-    }
-    return false
-}
+/* v0.23 T1.8 起这里不再有"顺手的一份版本比较"（原 isNewerVersion 已删）：
+ * 版号判"有没有更新"的真相只有共享的 ReleasePlan.compare 一份——
+ * 跨语言第二实现一定漂，漂的样子不是报错，是有的设备劝人下载有的不劝。 */
 
 /* ---------------- 账户页（renderAccounts 逐行） ---------------- */
 @Composable

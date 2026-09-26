@@ -60,8 +60,8 @@ def test_reset_account_key_normalizes_case_and_length():
 def _apk_env(monkeypatch, plan=None, data=b"APK"):
     from app.core import releases
     if plan is None:
-        plan = ({"url": "https://github.com/o/r/releases/download/v0.19/ai-assistant-0.19.apk",
-                 "name": "ai-assistant-0.19.apk", "size": 3, "version": "0.19"}, "")
+        plan = ({"url": "https://github.com/o/r/releases/download/v0.19/ai-assistant-native-0.19.apk",
+                 "name": "ai-assistant-native-0.19.apk", "size": 3, "version": "0.19"}, "")
     monkeypatch.setattr(releases, "download_plan", lambda: plan)
     monkeypatch.setattr(releases, "fetch_asset", lambda url: (data, ""))
 

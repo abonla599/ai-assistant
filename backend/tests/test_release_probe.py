@@ -20,8 +20,8 @@ from app.core import releases
 from app.main import app
 
 GOOD = {"tag_name": "v0.18", "html_url": "https://github.com/o/r/releases/tag/v0.18",
-        "assets": [{"name": "ai-assistant-0.18.apk", "size": 98304,
-                    "browser_download_url": "https://objects.example/ai-assistant-0.18.apk"}]}
+        "assets": [{"name": "ai-assistant-native-0.18.apk", "size": 98304,
+                    "browser_download_url": "https://objects.example/ai-assistant-native-0.18.apk"}]}
 
 
 class _FakeResponse:
@@ -74,7 +74,7 @@ def test_it_says_update_exists_only_when_the_installed_one_is_older(monkeypatch)
 
     out = releases.probe(have="0.16")
     assert out["ok"] and out["latest"] == "0.18" and out["has_update"] is True
-    assert out["size"] == 98304 and out["asset_name"] == "ai-assistant-0.18.apk"
+    assert out["size"] == 98304 and out["asset_name"] == "ai-assistant-native-0.18.apk"
 
     releases.reset_for_tests()
     same = releases.probe(have="v0.18")          # 带不带 v 是同一个版本
@@ -221,7 +221,7 @@ def test_the_github_host_is_written_in_exactly_one_place():
 def test_the_asset_must_be_named_after_the_version(monkeypatch):
     """挂着别的 apk 不算：一次发布可能同时有 mapping.txt、别的平台的产物或误传的旧包。"""
     payload = {"tag_name": "v0.18", "html_url": "u",
-               "assets": [{"name": "ai-assistant-0.17.apk", "size": 1,
+               "assets": [{"name": "ai-assistant-native-0.17.apk", "size": 1,
                            "browser_download_url": "https://objects.example/old.apk"}]}
     fake = _Urlopen(payload)
     monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
@@ -292,8 +292,8 @@ def test_python_and_the_shell_agree_on_every_case_the_shell_tests():
 _SPOOFY = "0.17" + chr(13) + chr(10) + "X-Spoof: 1"
 
 
-def _payload(version="0.17", name="ai-assistant-0.17.apk",
-             url="https://github.com/abonla599/ai-assistant/releases/download/v0.17/ai-assistant-0.17.apk",
+def _payload(version="0.17", name="ai-assistant-native-0.17.apk",
+             url="https://github.com/abonla599/ai-assistant/releases/download/v0.17/ai-assistant-native-0.17.apk",
              size=102_400):
     return {"version": version, "url": f"https://github.com/x/releases/tag/v{version}",
             "asset_name": name, "asset_url": url, "size": size}
@@ -310,20 +310,20 @@ def _prime(monkeypatch, payload):
 def test_download_plan_accepts_a_normal_release(monkeypatch):
     _prime(monkeypatch, _payload())
     plan, reason = releases.download_plan()
-    assert reason == "" and plan["name"] == "ai-assistant-0.17.apk"
+    assert reason == "" and plan["name"] == "ai-assistant-native-0.17.apk"
     assert plan["url"].startswith("https://") and plan["size"] == 102_400
 
 
 @pytest.mark.parametrize("broken, why", [
     (lambda: _payload(url="http://github.com/x/apk"), "明文 http 不代理"),
     (lambda: _payload(url="https://evil.example.com/apk"), "白名单外的主机不代理"),
-    (lambda: _payload(name="ai-assistant-0.16.apk", version="0.17"), "名字与版本不一致"),
+    (lambda: _payload(name="ai-assistant-native-0.16.apk", version="0.17"), "名字与版本不一致"),
     (lambda: _payload(size=0), "大小不知道就不代理"),
     (lambda: _payload(size=64 * 1024 * 1024), "大得离谱的资产不当 apk 代理"),
-    # 资产名要原样进 Content-Disposition。光靠"名字等于 ai-assistant-<版本>.apk"挡不住它：
+    # 资产名要原样进 Content-Disposition。光靠"名字等于 ai-assistant-native-<版本>.apk"挡不住它：
     # 名字是拿版本号拼出来的，而 tag_name 来自对面——一个带 CR/LF 的 tag_name 拼出来的是
     # 一个能对响应头做注入的值。所以形状必须先过一遍正则。
-    (lambda: _payload(version=_SPOOFY, name="ai-assistant-" + _SPOOFY + ".apk"),
+    (lambda: _payload(version=_SPOOFY, name="ai-assistant-native-" + _SPOOFY + ".apk"),
      "资产名形状不对就不代理（防响应头注入）"),
 ])
 def test_download_plan_refuses_without_raising(monkeypatch, broken, why):
@@ -437,3 +437,85 @@ def test_fetch_asset_follows_the_hop_to_the_host_github_really_redirects_to(monk
     monkeypatch.setattr(releases, "_open_asset", relative)
     data, why = releases.fetch_asset("https://github.com/o/r/releases/download/v1/a.apk")
     assert data == b"ok", f"相对跳转没接住（真实响应里这种写法很常见）：{data!r} / {why}"
+
+
+# ---------- 资产名三层对齐：工作流发的名字 = 后端挑的名字 = 壳认的名字（T1.7/T1.8） ----------
+
+def test_the_asset_name_is_the_one_the_workflow_publishes():
+    """`ai-assistant-native-<版本>.apk` 由发布流水线写、后端 _pick_asset 挑、壳 ReleasePlan 认。
+
+    2026-09-25 起工作流发的是原生包，资产名前缀换成了 ai-assistant-native-；
+    当时后端与壳还按旧名找，漂移的表现不是哪一环报错，而是【官网按钮与 App 内更新
+    双双静默退回发布页】——每份 JSON 都"合法"，只是没人能找到那个资产。
+    与 v0.22 那次 302 白名单事故同一课。所以这里把三份字面量并排钉成同一个。
+    """
+    from pathlib import Path
+
+    repo = Path(releases.__file__).resolve().parents[3]
+    wf = (repo / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    assert 'file="ai-assistant-native-${ver}.apk"' in wf, \
+        "发布流不再发 ai-assistant-native-<版本>.apk 了？那这一整串判据要三处一起改"
+    assert 'cp android-native/app/build/outputs/apk/release/app-release.apk \\\n             "ai-assistant-native-' in wf \
+        or 'cp android-native/app/build/outputs/apk/release/app-release.apk' in wf, \
+        "发布流不再从 android-native 打包了"
+
+    assert releases.ASSET_PREFIX == "ai-assistant-native-", \
+        "后端挑的名字漂了，要和上面工作流发的字面量一起改"
+    assert releases._ASSET_NAME_RE.pattern.startswith(r"^ai-assistant-native-"), \
+        "后端形状正则与 ASSET_PREFIX 不是一套了"
+
+    plan = (repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
+            / "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
+    assert 'APK_PREFIX = "ai-assistant-native-"' in plan, \
+        "壳认的资产名前缀与发布/后端不是同一个了"
+
+
+def test_the_native_shell_ships_byte_identical_core_classes():
+    """android-native 复用同一份纯 JVM 判断核：两边必须是逐字节相同的文件。
+
+    两份拷贝一定漂（digest 契约那条注释说的同一件事），所以这里不是"内容大致一致"，
+    是 sha256 相等。native 没有本地 JVM 台架可跑（tools/shell_jvm_tests.py 数的是
+    android/ 那一份），台架测试对这份拷贝**同样成立**——前提是它真的一个字节都没改。
+    """
+    import hashlib
+    from pathlib import Path
+
+    repo = Path(releases.__file__).resolve().parents[3]
+    shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java")
+    for name in shared:
+        old = repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
+            / "assistant" / "core" / name
+        new = repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" \
+            / "fenever" / "assistant" / "core" / name
+        assert old.is_file() and new.is_file(), f"共享核心类缺文件：{name}"
+        assert hashlib.sha256(old.read_bytes()).hexdigest() == \
+               hashlib.sha256(new.read_bytes()).hexdigest(), \
+            f"android-native 的 {name} 与 android/ 那份漂移了——要么同步字节，要么别拷"
+
+
+def test_the_native_shell_never_talks_to_github_directly():
+    """v0.23 T1.8 起，native 壳与 WebView 壳同一条纪律：源码里不许出现 api.github.com。
+
+    Android 壳那份锁在 test_android_shell.py（"the_shell_never_talks_to_github_directly"）；
+    native 壳换的是同一层皮——它上一次「检查更新」还是直接 GET releases/latest，
+    2026-09-23 的迅雷劫持链路在 native 里原样重演了一遍，只是这次连下载都没回自家。
+    现在问与取都从 Prefs.baseUrl 现拼（/v1/update/info + /site/android.apk），
+    再出现一处 GitHub API 地址 = 有人在 native 里重新接那条被拆掉的线。
+
+    与 WebView 壳那条同款的正对照：先数够文件（路径写错时"没命中"和"守住了"长得一样），
+    且注释剥完才算数（这里唯一的合法出现是 Api.kt 解释"为什么封死"的那行注释）。
+    """
+    from pathlib import Path
+    from tests.test_android_shell import _code   # 剥注释的尺子只有一份，不抄第二遍
+
+    src = Path(releases.__file__).resolve().parents[3] / "android-native" \
+        / "app" / "src" / "main" / "java"
+    files = sorted(p for p in src.rglob("*.kt") if "core" not in p.parts)
+    assert len(files) >= 10, f"只扫到 {len(files)} 个 native 源码文件，这条锁多半在空转"
+    hits = [p.name for p in files if "api.github.com" in _code(p)]
+    assert not hits, f"native 壳又直连 GitHub 了（这些文件里出现地址）：{hits}"
+
+    updater = _code(src / "xyz" / "fenever" / "assistant" / "nativeapp"
+                    / "update" / "Updater.kt")
+    assert "/v1/update/info" in updater, "native 的检查更新不再问自家端点了？"
+    assert "ReleasePlan.SELF_APK_PATH" in updater, "native 的字节流不再走 /site/android.apk 了？"
