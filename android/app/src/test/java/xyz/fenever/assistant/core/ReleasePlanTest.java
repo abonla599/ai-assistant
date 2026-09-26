@@ -193,6 +193,103 @@ public class ReleasePlanTest {
         assertTrue(ReleasePlan.assetName("0.15").equals("ai-assistant-0.15.apk"));
     }
 
+    // ---------- 第二条信任规则：自家字节出口 = APP_URL 同源 + 精确路径（T1.5） ----------
+
+    private static final String APP = "https://ai.fenever.xyz/app/";
+    private static final String SELF_URL = "https://ai.fenever.xyz/site/android.apk";
+
+    @Test
+    public void theSelfHostedByteExitIsTrustedOnlyWhenTheCallerHandsOverAppUrl() {
+        // 放大信任的入口是新调用方显式交出 APP_URL 的那一刻；两参旧形状行为不变。
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "ai-assistant-0.15.apk", APP));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "ai-assistant-0.15.apk"));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "ai-assistant-0.15.apk", null));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "ai-assistant-0.15.apk", ""));
+        // 自家来源说不利索（非 https / 带端口 / 带 userinfo），第二条规则整体不启用——宁可窄
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "x", "http://ai.fenever.xyz/app/"));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "x", "https://ai.fenever.xyz:8443/app/"));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "x", "https://ops@ai.fenever.xyz/app/"));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(SELF_URL, "x", "not a url"));
+    }
+
+    @Test
+    public void everyDetourFromTheExactSameOriginPathIsRefused() {
+        String[] bad = {
+                // 主机不是那一个：子域替身、别家、userinfo 伪装
+                "https://ai.fenever.xyz.eil.com/site/android.apk",
+                "https://eil.com/site/android.apk",
+                "https://ai.fenever.xyz:8734/site/android.apk",
+                "https://fenever.xyz/site/android.apk",
+                "http://ai.fenever.xyz/site/android.apk",
+                // 路径必须【整串相等】：近似、前缀、大小写、尾巴、query、fragment 统统不算
+                "https://ai.fenever.xyz/site/other.apk",
+                "https://ai.fenever.xyz/Site/android.apk",
+                "https://ai.fenever.xyz/site/android.apk/",
+                "https://ai.fenever.xyz/site/android.apk?force=1",
+                "https://ai.fenever.xyz/site/android.apk#v2",
+                "https://ai.fenever.xyz/site/android.apk/../evil.apk",
+                "https://ai.fenever.xyz/../site/android.apk",
+                "https://ai.feverov.xyz/site/android.apk",   // 只差一个字母
+        };
+        for (String url : bad) {
+            assertFalse("这个地址不该走第二条规则放行：" + url,
+                    ReleasePlan.downloadUrlIsTrusted(url, "ai-assistant-0.15.apk", APP));
+        }
+    }
+
+    @Test
+    public void theGitHubRuleStillStandsWithTheSecondRuleArmed() {
+        // 加第二条不是换第一条：官方发布路径照常可信，官方路径上的花活照常死。
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(GOOD_URL, "ai-assistant-0.15.apk", APP));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(
+                "https://github.com/abonla599/ai-assistant/releases/download/v0.15/evil.apk",
+                "ai-assistant-0.15.apk", APP));
+    }
+
+    @Test
+    public void decideAcceptsTheSelfHostedAssetOnlyInTheThreeArgShape() {
+        String json = release("v0.15", SELF_URL, "ai-assistant-0.15.apk", 4_096L, null, false, false);
+        ReleasePlan.Decision d = ReleasePlan.decide("0.14", json, APP);
+        assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        assertEquals(SELF_URL, d.url);
+        assertEquals(4_096L, d.sizeBytes);
+        // 同一份 JSON，不交 APP_URL 的两参调用仍然按旧白名单拒——放行的永远是调用姿势不是内容
+        assertEquals(ReleasePlan.Kind.UNUSABLE, ReleasePlan.decide("0.14", json).kind);
+    }
+
+    @Test
+    public void theConstantMatchesTheRealPinnedDownloadAddress() throws Exception {
+        // SELF_APK_PATH 不是装饰：它必须恰好是 build.gradle 里钉死的 UPDATE_APK_URL 的路径，
+        // 且与 APP_URL 同 host。漂移的样子是"规则放行一个根本没人监听的地址"。
+        // backend/tests/test_android_shell.py 从后端数那三个地址的同源；这条从壳这边数
+        // 白名单常量与钉死地址的一致——两处各数各的，合起来没有缝。
+        java.io.File gradle = new java.io.File("android/app/build.gradle");
+        if (!gradle.isFile()) gradle = new java.io.File("../android/app/build.gradle");
+        assertTrue("找不到 build.gradle：" + gradle.getAbsolutePath(), gradle.isFile());
+        StringBuilder sb = new StringBuilder();
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader(gradle))) {
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append('\n');
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "buildConfigField\\s+\"String\",\\s+\"(APP_URL|UPDATE_APK_URL)\",\\s+\"\\\\\"(.*?)\\\\\"\"")
+                .matcher(sb);
+        java.util.Map<String, String> pinned = new java.util.LinkedHashMap<>();
+        while (m.find()) pinned.put(m.group(1), m.group(2));
+        assertEquals("build.gradle 里的钉死地址少了字段：" + pinned.keySet(),
+                2, pinned.size());
+        java.net.URL apk = new java.net.URL(pinned.get("UPDATE_APK_URL"));
+        java.net.URL app = new java.net.URL(pinned.get("APP_URL"));
+        assertEquals("UPDATE_APK_URL 的路径不再是白名单常量那一个",
+                ReleasePlan.SELF_APK_PATH, apk.getPath());
+        assertTrue("白名单的第二条与钉死地址不同源",
+                apk.getHost().equalsIgnoreCase(app.getHost()));
+        // 拿钉死的真值走一遍完整判定：真链路必须被放行，这是规则与现实的接缝检查
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(pinned.get("UPDATE_APK_URL"),
+                "ai-assistant-0.15.apk", pinned.get("APP_URL")));
+    }
+
     // ---------- 校验值：形状不对等于没有 ----------
 
     private static final String DIGEST = "a" + "b".repeat(62) + "c"; // 64 位小写十六进制
