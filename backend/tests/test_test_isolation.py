@@ -109,3 +109,24 @@ def test_decay_via_default_client_cannot_reach_the_real_store(client):
     # 那条断言就成了空转（与上面"这一轮连偏好分析都没跑"同一类毛病）。
     assert resp.status_code == 200, f"请求没走到写入，这条断言就成了空转：{resp.status_code}"
     assert weights() == before, "测试客户端把衰减写进了用户真实的记忆池"
+
+
+def test_fresh_provider_store_is_not_seeded_from_the_local_env(tmp_path):
+    """空路径上的 ProviderStore 必须是空的——不许被开发机那份 .env 播种。
+
+    2026-09-26 的形状：三条断言"私有记录不越权 / 首条不自动当默认 / 别人的私有 id
+    回落站级默认"的用例，在带真 `.env` 的本机全红、在 CI 上全绿。根因不在那三条断言，
+    而在 `ProviderStore._load()` 撞没见过文件时走 `_seed_from_env()`，把
+    `DEEPSEEK_API_KEY` 播种成一条 `is_default` 记录，于是"回落默认"回落到的
+    是这台机器自己的真凭据。同一份代码在两种机器上给出相反结果，比红更糟——
+    红会被人按"我机器的问题"忽略掉。
+
+    这条用例在 CI 上恒绿（那里本来就没有 .env），它的价值在本机：conftest 一旦
+    忘了清这颗变量，它第一时间红，并且红在原因上而不是红在三条不相干的断言上。
+    """
+    from app.core import providers
+
+    store = providers.ProviderStore(path=str(tmp_path / "providers.json"))
+    assert store.all() == [], (
+        "测试进程里的 ProviderStore 被本机 .env 播种成了真模型："
+        f"{[p.get('id') for p in store.all()]}。conftest 需要把 DEEPSEEK_API_KEY 置空。")
