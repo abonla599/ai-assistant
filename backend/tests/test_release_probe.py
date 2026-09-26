@@ -482,7 +482,7 @@ def test_the_native_shell_ships_byte_identical_core_classes():
 
     repo = Path(releases.__file__).resolve().parents[3]
     shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java",
-              "ExportName.java")
+              "ExportName.java", "ExportRedeem.java")
     for name in shared:
         old = repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
             / "assistant" / "core" / name
@@ -641,3 +641,73 @@ def test_the_native_export_row_goes_through_the_gates():
     assert 'android.permission.WRITE_EXTERNAL_STORAGE' in manifest \
         and 'android:maxSdkVersion="28"' in manifest, \
         "API≤28 写公共 Downloads 需要旧存储权限，清单里没了这一条"
+
+
+# ---------- v0.23 T2.5：票据过期重签与异常文案的两端接缝 ----------
+
+def test_expired_ticket_detail_is_the_same_sentence_on_both_sides():
+    """客户端识别过期用的字符串，必须与服务端回的那句逐字同值。
+
+    判据是字节级子串查找——差一个标点，过期就会被当成普通网络失败：
+    不触发自动重签、通知文案也说错原因，正是 R2 边缘case要防的事。
+    """
+    from pathlib import Path
+    import app.main as main_mod
+
+    java = (_repo_root() / "android" / "app" / "src" / "main" / "java" / "xyz"
+            / "fenever" / "assistant" / "core" / "ExportRedeem.java").read_text(encoding="utf-8")
+    m = re.search(r'TICKET_INVALID_DETAIL\s*=\s*"([^"]+)"', java)
+    assert m, "Java 侧的过期判据字面量不见了"
+    assert m.group(1) == main_mod.EXPORT_TICKET_INVALID_DETAIL, \
+        (f"两端判据不同值：Java {m.group(1)!r} vs 服务端 "
+         f"{main_mod.EXPORT_TICKET_INVALID_DETAIL!r}——改服务端文案必须同步 Java")
+
+
+def test_the_expired_ticket_gets_exactly_one_reissue():
+    """过期 → 自动重签一次；再败才报错。预算按会话记，且重签走的是签票端点。
+
+    PRD 的原话是"票据 5 分钟过期未兑换 → 自动重新签一次，仍失败则报错"。
+    两次签发之间没有别的凭据面可钻：预算 set 加过一次就不再进重签分支。
+    """
+    from pathlib import Path
+    from tests.test_android_shell import _code
+
+    tracker = (_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+               / "xyz" / "fenever" / "assistant" / "nativeapp" / "export"
+               / "ExportTracker.kt")
+    body = _code(tracker)
+    assert "Api.exportTicket(sid)" in body, "重签没有回到签票端点？"
+    assert "retriedSids.add(sid)" in body and "SessionDownloads.enqueue" in body, \
+        "过期之后没有『重签→重新入队』这一拍"
+    assert "ExportRedeem.looksExpired" in body, "没有先认服务端那句 detail 再决定重签？"
+    assert "retriedSids" in body, "重签预算的记账不见了——套娃重签就回来了"
+
+
+def test_the_permission_denied_fallback_names_the_private_path():
+    """≤28 拒权 → 先弹一次系统授权；仍拒则落 App 私有目录并把路径说全（R2 边缘）。
+
+    这一格防的是"默默降级"：文件存到了人找不到的地方却不告诉人在哪，
+    等于没导出。所以路径必须进用户可见的文案，且兜底兑换依旧走匿名票据
+    （fetchTicketBytes 不带 Authorization 且自带形状门）。
+    """
+    from pathlib import Path
+    from tests.test_android_shell import _code
+
+    ui = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+               / "xyz" / "fenever" / "assistant" / "nativeapp" / "ui" / "SettingsUi.kt")
+    assert "ExportTracker.hasLegacyStorage" in ui, "≤28 的存储权限门不见了？"
+    assert "storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)" in ui, \
+        "拒权路径不再先征求一次授权？"
+    assert "viaPrivate = !granted" in ui and "已导出到应用私有目录" in ui, \
+        "拒绝后没有落私有目录并把路径念给用户"
+    assert "网络似乎不通" in ui, "断网那一格又没有专属文案了"
+
+    api = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+                / "xyz" / "fenever" / "assistant" / "nativeapp" / "Api.kt")
+    assert "fetchTicketBytes" in api and "ExportName.isTicketPath(path)" in api, \
+        "兜底字节路没有复用票据形状门？"
+    tracker = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+                    / "xyz" / "fenever" / "assistant" / "nativeapp" / "export"
+                    / "ExportTracker.kt")
+    assert "Api.fetchTicketBytes" in tracker and "getExternalFilesDir" in tracker, \
+        "私有目录兜底的落盘点不见了？"

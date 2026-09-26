@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -86,6 +87,7 @@ import xyz.fenever.assistant.nativeapp.AuthResult
 import xyz.fenever.assistant.nativeapp.BuildConfig
 import xyz.fenever.assistant.core.ExportName
 import xyz.fenever.assistant.core.ReleasePlan
+import xyz.fenever.assistant.nativeapp.export.ExportTracker
 import xyz.fenever.assistant.nativeapp.export.SessionDownloads
 import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.Prefs
@@ -324,6 +326,42 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          onModelsChanged: () -> Unit, canExport: Boolean) {
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
+
+    // ---------- 导出（T2.5）：一次点击的三条路都汇到 startExport ----------
+    // 授权框回来说"不给"时，得记得是给哪个会话导过——票据不缓存（R2-AC-3），
+    // 记的只是会话 id，重签新票再走兜底路。
+    var pendingSid by remember { mutableStateOf<String?>(null) }
+
+    fun startExport(sid: String, viaPrivate: Boolean) {
+        scope.launch {
+            runCatching {
+                // 先取服务端标题再签票：标题拿不到就不浪费一张一次性票据；
+                // 用服务端算好的 title 而不是本地消息重切，避免第二份截断规则。
+                val title = Api.getSession(sid).title
+                val ticket = Api.exportTicket(sid)
+                if (!ExportName.isTicketPath(ticket.path))
+                    throw IllegalStateException("服务端给的票据形状不对")
+                val fileName = ExportName.exportFileName(title)
+                if (viaPrivate) {
+                    ExportTracker.savePrivateCopy(ctx, ticket.path, fileName)
+                } else {
+                    SessionDownloads.enqueue(ctx,
+                        Prefs.baseUrl.trimEnd('/') + ticket.path, fileName)
+                        .also { ExportTracker.watch(ctx, it, sid) }
+                }
+            }.onSuccess { dest ->
+                if (viaPrivate) onNote("未获存储权限：已导出到应用私有目录 $dest", true)
+            }.onFailure { onNote(exportClickFailure(it), true) }
+        }
+    }
+
+    val storageAsk = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val s = pendingSid
+        pendingSid = null
+        if (s != null) startExport(s, viaPrivate = !granted)
+    }
     // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
     // 值槽与两个对话框都从它读——这里不再另起一份 remember 状态做第二真相。
     val light = isWebLight()
@@ -410,21 +448,20 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             // 字节流交给 DownloadManager 落系统 Downloads，完成通知是系统下载队列的。
             // 曾经这里是 onOpenUrl(票据)：把一次性兑换权递给外部浏览器，既拿不到
             // 落盘通知也多一个能看见 URL 的人，按 R2-AC-3 判负，别再改回去。
+            //
+            // v0.23 T2.5 补上三条异常路径（R2-AC-2/3）：空会话文案沿用 T2.4（与网页
+            // 逐字同值）；≤28 写公共 Downloads 先要旧存储权限，被拒改走 App 私有目录
+            // 并把完整路径念给人听；签票/取标题阶段的断网给专属文案，不是"未知错误"。
+            // 票据过期（DownloadManager 侧的秒失败/迟到失败）由 ExportTracker 轮询
+            // 识别后自动重签一次，仍失败才发通知报错。
             if (!canExport) { onNote("当前没有可导出的对话", true); return@SetRow }
-            scope.launch {
-                runCatching {
-                    val sid = Prefs.lastSessionId
-                    // 先取服务端标题再签票：标题拿不到就不浪费一张一次性票据；
-                    // 用服务端算好的 title 而不是本地消息重切，避免第二份截断规则。
-                    val title = Api.getSession(sid).title
-                    val ticket = Api.exportTicket(sid)
-                    if (!ExportName.isTicketPath(ticket.path))
-                        throw IllegalStateException("服务端给的票据形状不对")
-                    SessionDownloads.enqueue(ctx,
-                        Prefs.baseUrl.trimEnd('/') + ticket.path,
-                        ExportName.exportFileName(title))
-                }.onFailure { onNote("导出失败：" + (it.message ?: ""), true) }
+            val sid = Prefs.lastSessionId
+            if (!ExportTracker.hasLegacyStorage(ctx)) {
+                pendingSid = sid
+                storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                return@SetRow
             }
+            startExport(sid, viaPrivate = false)
         }
     }
 
@@ -1433,4 +1470,12 @@ private fun fmtFiredHistory(firedAt: Long, missed: Long): String {
     if (firedAt > 0) parts.add("上次发出 " + fmtReminderAt(firedAt))
     if (missed > 0) parts.add("$missed 次到点没发出")
     return if (parts.isEmpty()) "到点还没响过" else parts.joinToString(" · ")
+}
+
+/* 点击即败的专属文案（T2.5，R2-AC-2「断网」那一格）。
+   只分两类：够不着服务（IOException 一族）说网络话；服务端给了明确回答的
+   把 detail 原样念出来——与网页 setStatus("导出失败：" + e.message) 同一口径。 */
+private fun exportClickFailure(e: Throwable): String = when {
+    e is java.io.IOException -> "导出失败：网络似乎不通，请检查连接后重试"
+    else -> "导出失败：" + (e.message ?: "未知原因")
 }
