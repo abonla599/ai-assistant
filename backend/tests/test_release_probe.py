@@ -481,7 +481,8 @@ def test_the_native_shell_ships_byte_identical_core_classes():
     from pathlib import Path
 
     repo = Path(releases.__file__).resolve().parents[3]
-    shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java")
+    shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java",
+              "ExportName.java")
     for name in shared:
         old = repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
             / "assistant" / "core" / name
@@ -519,3 +520,124 @@ def test_the_native_shell_never_talks_to_github_directly():
                     / "update" / "Updater.kt")
     assert "/v1/update/info" in updater, "native 的检查更新不再问自家端点了？"
     assert "ReleasePlan.SELF_APK_PATH" in updater, "native 的字节流不再走 /site/android.apk 了？"
+
+
+# ---------- v0.23 T2.4：导出文件名与票据链路的接缝 ----------
+
+def _repo_root():
+    from pathlib import Path
+    return Path(releases.__file__).resolve().parents[3]
+
+
+def _decode_java_literal(s):
+    """把 Java 字符串字面量的转义还原成真实字符（只需覆盖测试里用到的几种）。"""
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt == "u":
+                out.append(chr(int(s[i + 2:i + 6], 16)))
+                i += 6
+                continue
+            out.append({"\\":"\\", '"':'"', "r":"\r", "n":"\n", "t":"\t"}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _java_exportname_cases():
+    """从 ExportNameTest.java 里把 safeFilename 的用例行读出来（同 _java_compare_cases 的招）。"""
+    path = (_repo_root() / "android" / "app" / "src" / "test" / "java" / "xyz"
+            / "fenever" / "assistant" / "core" / "ExportNameTest.java")
+    text = path.read_text(encoding="utf-8")
+    pairs = [(_decode_java_literal(a), _decode_java_literal(b)) for b, a in
+             re.findall(
+                 r'assertEquals\("((?:[^"\\]|\\.)*)",\s*'
+                 r'ExportName\.safeFilename\("((?:[^"\\]|\\.)*)"\)\)', text)]
+    return path.name, pairs
+
+
+def test_python_and_the_shell_agree_on_every_exportname_case_the_shell_tests():
+    """Java ExportName 测过的清洗用例，Python _safe_filename 必须给同样的答案。"""
+    from app.session.export_store import _safe_filename
+
+    source, cases = _java_exportname_cases()
+    assert len(cases) >= 8, f"从 {source} 里只读到 {len(cases)} 条用例，这条锁快空转了"
+    for inp, expected in cases:
+        got = _safe_filename(inp)
+        assert got == expected, f"_safe_filename({inp!r}) 两边答案不同：{got!r} vs {expected!r}"
+
+
+def test_exportname_mirrors_the_python_rules_verbatim():
+    """清洗规则、票据形状、兜底常量：Java 侧的字面量与 Python 侧逐条对位。
+
+    行为用例对上不等于规则同源——两条 40 截断的用例碰巧一致，正则字符集却少一个
+    竖线，这种缝只有把字面量并排钉住才看得见。native 壳改走 DownloadManager 后，
+    客户端算的文件名必须与服务端 Content-Disposition 的 filename* 同规则，否则
+    两端下载文件悄悄改名。
+    """
+    from pathlib import Path
+    from app.session import export_store
+
+    java = (_repo_root() / "android" / "app" / "src" / "main" / "java" / "xyz"
+            / "fenever" / "assistant" / "core" / "ExportName.java").read_text(encoding="utf-8")
+    py = Path(export_store.__file__).read_text(encoding="utf-8")
+
+    # 禁用字符集：Java 字符串解完转义后必须与 Python r 字面量的正则体逐字符相同
+    m = re.search(r'FORBIDDEN_RUNS\s*=\s*\n?\s*Pattern\.compile\("((?:[^"\\]|\\.)*)"\)', java)
+    assert m, "Java 侧找不到禁用字符正则，形状改了要两边一起改"
+    java_regex = _decode_java_literal(m.group(1))
+    p = re.search(r"re\.sub\(r'(\[[^']*\]\+)'", py)
+    assert p, "Python 侧清洗正则找不到形状"
+    assert java_regex == p.group(1), f"禁用字符集漂移：{java_regex} vs {p.group(1)}"
+
+    # 票据形状：字节数实算对 Java 字面量 {22}，前缀对 EXPORT_PATH_PREFIX
+    assert "{%d}" % export_store.TICKET_ID_CHARS in java, \
+        "票据长度字面量与生成侧实算不再同值——改 TICKET_BYTES 时忘了改 Java"
+    assert f'TICKET_PATH_PREFIX = "{export_store.EXPORT_PATH_PREFIX}"' in java, \
+        "票据前缀两端不同值"
+
+    # 兜底名 / 上限 / 扩展名：逐字对位
+    assert 'EMPTY_FALLBACK = "对话"' in java and '(cleaned or "对话")[:40]' in py, \
+        "空名兜底漂移"
+    assert "NAME_LIMIT = 40" in java and '[:40]' in py, "截断上限漂移"
+    assert 'MARKDOWN_EXT = ".md"' in java and "f'{name}.md'" in py, "扩展名漂移"
+
+
+def test_the_native_export_row_goes_through_the_gates():
+    """原生导出行的接线必须走：空会话守卫 → exportTicket → isTicketPath → DownloadManager。
+
+    曾经的形状是把票据 URL 交给 onOpenUrl（外部浏览器）——那等于让第三个 App
+    持有兑换权，也拿不到"落系统 Downloads + 已下载通知"。这条锁同时钉住：
+    票据不经浏览器外流、兑换只走 DownloadManager、空会话文案与网页逐字同值。
+    """
+    from tests.test_android_shell import _code
+
+    repo = _repo_root()
+    ui = repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
+        / "assistant" / "nativeapp" / "ui" / "SettingsUi.kt"
+    body = _code(ui)
+    assert 'Api.exportTicket' in body, "导出行不再签票了？"
+    assert "ExportName.isTicketPath" in body, "兑换地址没有过票据形状门——服务端字段不该裸拼进下载器"
+    assert "ExportName.exportFileName" in body, "落盘文件名没有走同源清洗？"
+    assert "SessionDownloads.enqueue" in body, "导出不再经 DownloadManager 落系统 Downloads？"
+    assert "onOpenUrl(Prefs.baseUrl" not in body, "票据 URL 又被递给外部浏览器了"
+
+    appjs = (repo / "backend" / "app" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    assert '"当前没有可导出的对话"' in appjs and "当前没有可导出的对话" in body, \
+        "空会话文案与网页版不再逐字同值（R2 场景 3）"
+
+    dl = repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
+        / "assistant" / "nativeapp" / "export" / "SessionDownloads.kt"
+    dl_body = _code(dl)
+    assert "DIRECTORY_DOWNLOADS" in dl_body and "VISIBILITY_VISIBLE_NOTIFY_COMPLETED" in dl_body, \
+        "下载器不再落系统 Downloads / 不再保留完成通知（D2 的『已下载通知』）"
+
+    manifest = (repo / "android-native" / "app" / "src" / "main" / "AndroidManifest.xml") \
+        .read_text(encoding="utf-8")
+    assert 'android.permission.WRITE_EXTERNAL_STORAGE' in manifest \
+        and 'android:maxSdkVersion="28"' in manifest, \
+        "API≤28 写公共 Downloads 需要旧存储权限，清单里没了这一条"

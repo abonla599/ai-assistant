@@ -16,6 +16,12 @@
          （不弹框，在系统「安装未知应用」页里给）。拿不到时 Updater 不硬闯——
          抛 SecurityException 会被接住，改弹「去设置」引导对话框。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- v0.23 T2.4 会话导出：DownloadManager 写公共 Downloads 只在 API ≤ 28 上需要
+         旧存储权限；API 29+ 的分区存储下系统下载器自带写入位。maxSdkVersion 封顶
+         28，新系统装了个用不上的危险权限只会吃商店审查。权限被拒时的私有目录
+         兜底在 T2.5（清单：docs/v0.23-研发任务拆解清单.md）。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- Android 11+ 的包可见性：SpeechRecognizer 绑的是系统识别服务，
          不声明这条，isRecognitionAvailable 在部分 ROM 上会假报"没有服务"。 -->

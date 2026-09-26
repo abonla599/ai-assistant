@@ -690,6 +690,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         onOpenUrl = onOpenUrl,
                         onModelsChanged = { scope.launch { loadModelsNow() } },
                         onLoggedOut = { settingsPage = null; onLoggedOut() },
+                        // 网页 exportCurrent 的空会话判据：transient 的 ⚠️ 气泡不算话
+                        canExport = messages.any { !it.transient },
                     )
                 }
             }
