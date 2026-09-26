@@ -97,6 +97,19 @@ async function dropIdentity(userId) {
   return true;
 }
 
+/** 服务端已经认出人、这台机器却一个人都没记过 —— AUTH_MODE=disabled 的本机管理员
+ *  就是这一路：不需要登录，/v1/auth/me 直接回 default_user。此时清单为空，
+ *  currentEntry() 回 null，patchCurrent 整块空转，于是 pref.sessionId / pref.provider
+ *  写进去就蒸发：每条消息各自新建一个会话（replaceMessages 第一句 return 走人，
+ *  服务端里留下若干条空「新对话」而正文一个字都没有），刷新即丢对话，导出永远
+ *  换不到票据（拼出 /v1/sessions//export-ticket），连选中的模型也不落地。
+ *  只在清单为空时补这一条；清单里已有任何人的时候一个字都不动——那是别人在这台
+ *  机器上的账户面。写入仍走 addIdentity 这个唯一出口，不另开第二条写路径。 */
+function ensureIdentityFromMe(me) {
+  if (!me || !me.user_id || currentEntry()) return;
+  addIdentity(me);
+}
+
 /** loadWho 成功之后把服务端说的"我是谁"写回当前那条：清单里的 username/role
  *  只是显示用的，真身永远以 /v1/auth/me 为准。 */
 function touchIdentity(me) {
@@ -677,6 +690,7 @@ async function loadWho() {
   try {
     state.me = await API.me();
     setStatus("");      // 认出人了：上一轮"还没登录/连不上"那句已经过期
+    ensureIdentityFromMe(state.me);   // 清单还空着就先把他记进来，否则下面三行全是空转
     touchIdentity(state.me);
     // 冷启动已登录、以及切换之后都走这一条：服务端说他是谁，壳那边就按谁隔离提醒
     // 与分享件。身份只多这一处出口，是因为清单里的 userId 只是本机记的，可能已作废。
