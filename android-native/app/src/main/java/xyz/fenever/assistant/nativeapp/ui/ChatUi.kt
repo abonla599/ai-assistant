@@ -156,6 +156,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var streamJob by remember { mutableStateOf<Job?>(null) }
     var stopRequested by remember { mutableStateOf(false) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
+    // v0.23 T2.2 AC-3：提交失败回编辑态时，草稿要原样还在——父侧存一份，
+    // 只给 MessageRow 当初始值（子侧照常自己维护输入），重试成功即清空。
+    var editingDraft by remember { mutableStateOf<String?>(null) }
     var copyTip by remember { mutableStateOf<Pair<Int, String>?>(null) }
     val listState = rememberLazyListState()
     val inputFocus = remember { FocusRequester() }
@@ -198,6 +201,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // switchSession：getSession 拉全量消息（含服务端留存的附件条目）
     fun openSession(id: String) {
         sessionId = id; Prefs.lastSessionId = id
+        // 换会话必关编辑态：编辑框是【这一条会话里第 index 行】的承诺，换列表不兑现
+        editingIndex = null; editingDraft = null
         scope.launch {
             runCatching { Api.getSession(id) }.onSuccess { d ->
                 messages = d.messages.map { m ->
@@ -265,13 +270,29 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     }
 
     // ---------- 持久化与出站（app.js replaceMessages / outbound 的原生对位） ----------
-    suspend fun persist(list: List<UiMsg>) {
-        if (sessionId.isEmpty()) return
-        try {
+    /** 返回是否落到了服务端。true 也涵盖"本地草稿会话根本没 id"——那没什么可落。 */
+    suspend fun persist(list: List<UiMsg>): Boolean {
+        if (sessionId.isEmpty()) return true
+        return try {
             Api.replaceMessages(sessionId, list.filter { !it.transient }
                 .map { StoredMessage(it.role, it.content, it.messageId, it.model) })
+            true
         } catch (e: Exception) {
-            if (!logoutIf401(e)) setStatus("同步到服务端失败：" + e.message, true)
+            when {
+                logoutIf401(e) -> false
+                // 7.1-4 多端场景：会话在别的端被删了。提示后会话刷新——
+                // 回空态重开，绝不让用户对着一条不存在的会话继续编辑重试。
+                e is ApiException && e.status == 404 -> {
+                    setStatus("这个会话已在其他端被删除，已为你刷新", true)
+                    sessionId = ""
+                    Prefs.lastSessionId = ""
+                    messages = emptyList()
+                    editingIndex = null; editingDraft = null
+                    runCatching { sessions = Api.listSessions() }
+                    false
+                }
+                else -> { setStatus("同步到服务端失败：" + e.message, true); false }
+            }
         }
     }
 
@@ -500,15 +521,25 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             isLastAssistant = m.role == "assistant" &&
                                 index == messages.lastIndex && streamText == null,
                             editing = editingIndex == index,
+                            streaming = busy || streamText != null,
+                            seedDraft = editingDraft,
                             copyTip = copyTip?.takeIf { it.first == index }?.second,
-                            onStartEdit = { editingIndex = index },
-                            onCancelEdit = { editingIndex = null },
+                            onStartEdit = { editingDraft = null; editingIndex = index },
+                            onCancelEdit = { editingIndex = null; editingDraft = null },
                             onSaveEdit = { text ->
-                                editingIndex = null
                                 scope.launch {
                                     val next = messages.take(index).toMutableList()
                                     next.add(messages[index].copy(content = text))
-                                    persist(next)
+                                    // T2.2 AC-3：先落服务端，失败就退回编辑态且草稿原样保留
+                                    // （网页同判据：commit 里 await 抛错就不 renderMessages，
+                                    // 编辑框和字都还在，按下一次「保存」即重试）。
+                                    if (!persist(next)) {
+                                        if (index <= messages.lastIndex) {
+                                            editingIndex = index; editingDraft = text
+                                        } else { editingIndex = null; editingDraft = null }
+                                        return@launch
+                                    }
+                                    editingIndex = null; editingDraft = null
                                     messages = next
                                     // 网页：编辑用户消息后重新生成后续（重走一轮流式）
                                     if (next[index].role == "user") streamInto()
@@ -861,6 +892,7 @@ private fun SuggestionPill(text: String, onClick: () -> Unit) {
  * classList.toggle 同规则。 */
 @Composable
 private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
+                       streaming: Boolean, seedDraft: String?,
                        copyTip: String?,
                        onStartEdit: () -> Unit, onCancelEdit: () -> Unit,
                        onSaveEdit: (String) -> Unit,
@@ -869,7 +901,7 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
     val mine = m.role == "user"
     val scheme = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
-    var draft by remember(editing) { mutableStateOf(m.content) }
+    var draft by remember(editing) { mutableStateOf(seedDraft ?: m.content) }
     Column(Modifier.fillMaxWidth(),
         horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -932,10 +964,12 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
                 }.getOrDefault(false)
                 onCopy(ok)
             }
-            if (editing) ToolBtn("保存") {
+            if (editing) ToolBtn("保存", enabled = !streaming) {
                 val t = draft.trim(); if (t.isNotEmpty()) onSaveEdit(t) else onCancelEdit()
-            } else ToolBtn("编辑") { onStartEdit() }
-            if (!mine && isLastAssistant) ToolBtn("重新生成") { onRegen() }
+            } else ToolBtn("编辑", enabled = !streaming) { onStartEdit() }
+            // R1 边界条款：流式进行中禁止编辑类提交（置灰不隐藏）——网页没有这道闸，
+            // 是 PRD R1-AC 明确要求原生补上的唯一有意偏差，核对记录见 T2.3 文档。
+            if (!mine && isLastAssistant) ToolBtn("重新生成", enabled = !streaming) { onRegen() }
             if (!mine) {
                 ToolBtn("👍", on = m.feedback == 1) { onFeedback(1) }
                 ToolBtn("👎", on = m.feedback == -1) { onFeedback(-1) }
@@ -948,17 +982,23 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
 private fun UiMsg.textOrEmpty(): String = content
 
 
-/* .msg-tools button：无边、透明底、12px text-3、padding 3/8、圆角 7；.on 吃强调色对。 */
+/* .msg-tools button：无边、透明底、12px text-3、padding 3/8、圆角 7；.on 吃强调色对。
+ * enabled=false 是 R1 的"流式中编辑置灰"：字色再淡一档、不吃点击，按钮还在原位。 */
 @Composable
-private fun ToolBtn(label: String, on: Boolean = false, onClick: () -> Unit) {
+private fun ToolBtn(label: String, on: Boolean = false, enabled: Boolean = true,
+                    onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Box(Modifier.background(
             if (on) scheme.primaryContainer else Color.Transparent,
             RoundedCornerShape(7.dp))
-        .clickable(onClick = onClick)
+        .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
         .padding(horizontal = 8.dp, vertical = 3.dp)) {
         Text(label, fontSize = 12.sp,
-            color = if (on) scheme.primary else text3Color())
+            color = when {
+                !enabled -> text3Color().copy(alpha = 0.35f)
+                on -> scheme.primary
+                else -> text3Color()
+            })
     }
 }
 

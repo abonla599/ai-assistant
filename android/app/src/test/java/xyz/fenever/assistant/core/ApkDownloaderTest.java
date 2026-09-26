@@ -153,6 +153,21 @@ public class ApkDownloaderTest {
         assertFalse(target.exists());
     }
 
+    /** T1.9「篡改 1 字节残包拒装」的可自动化半份：整包只翻最后一个比特也绝不过关。
+     *  真机上那一字节来自 ROM 下载通道或中间盒，这里从 JVM 侧证明字节层的对账颗粒度。 */
+    @Test
+    public void oneFlippedBitInAnOtherwisePerfectPackageIsRefused() throws Exception {
+        files();
+        byte[] tampered = PAYLOAD.clone();
+        tampered[tampered.length - 1] ^= 0x01;
+        ApkDownloader.Result r = ApkDownloader.download("https://x/y", temp, target,
+                16L * 1024 * 1024, PAYLOAD_SHA,
+                connector(200, tampered.length, tampered, null), null);
+        assertEquals("校验值不一致，这个包不是发布的那一份", r.error);
+        assertFalse("差一个字节也要就地焚掉，不许留给下一次", temp.exists());
+        assertFalse(target.exists());
+    }
+
     @Test
     public void anEmptyBodyIsRefusedEvenIfItsDigestWouldMatch() throws Exception {
         files();

@@ -263,15 +263,32 @@ public class ReleasePlanTest {
         // 且与 APP_URL 同 host。漂移的样子是"规则放行一个根本没人监听的地址"。
         // backend/tests/test_android_shell.py 从后端数那三个地址的同源；这条从壳这边数
         // 白名单常量与钉死地址的一致——两处各数各的，合起来没有缝。
-        java.io.File gradle = new java.io.File("android/app/build.gradle");
-        if (!gradle.isFile()) gradle = new java.io.File("../android/app/build.gradle");
-        assertTrue("找不到 build.gradle：" + gradle.getAbsolutePath(), gradle.isFile());
+        //
+        // 找文件不赌工作目录：JVM 台架从仓库根跑（"android/app/build.gradle" 命中），
+        // Gradle 的 testDebugUnitTest 在模块目录 android/app 里跑（"build.gradle" 命中）——
+        // CI 第一次红就红在只认了前一种。候选逐个试，用【内容】认货：没有那两个
+        // buildConfigField 的文件哪怕同名也不算找到，免得 root 的 android/build.gradle 混进来。
         StringBuilder sb = new StringBuilder();
-        try (java.io.BufferedReader r = new java.io.BufferedReader(
-                new java.io.FileReader(gradle))) {
-            String line;
-            while ((line = r.readLine()) != null) sb.append(line).append('\n');
+        String[] candidates = {"android/app/build.gradle", "build.gradle",
+                "../android/app/build.gradle"};
+        for (String cand : candidates) {
+            java.io.File f = new java.io.File(cand);
+            if (!f.isFile()) {
+                continue;
+            }
+            StringBuilder text = new StringBuilder();
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader(f))) {
+                String line;
+                while ((line = r.readLine()) != null) text.append(line).append('\n');
+            }
+            if (text.indexOf("APP_URL") >= 0 && text.indexOf("UPDATE_APK_URL") >= 0) {
+                sb.append(text);
+                break;
+            }
         }
+        assertTrue("在 " + java.util.Arrays.toString(candidates) + " 里没找到钉死地址所在的 build.gradle（cwd="
+                + new java.io.File("").getAbsolutePath() + "）", sb.length() > 0);
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
                 "buildConfigField\\s+\"String\",\\s+\"(APP_URL|UPDATE_APK_URL)\",\\s+\"\\\\\"(.*?)\\\\\"\"")
                 .matcher(sb);
