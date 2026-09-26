@@ -80,6 +80,59 @@ def test_unreachable_github_is_a_502_with_a_reason_not_a_silent_ok(client, enfor
     assert "问不到发布信息" in out.json()["detail"]
 
 
+# ---------- AC-4 后半个词：旧快照也不许冒充"最新" ----------
+# v0.23 拆解清单 T1.3 三查（sha256 注入 / 10 分钟缓存 / 5xx 带理由）里，前两项的
+# 判据在上面的透传与缓存用例；这一组补的是曾经真实存在的洞：拉取失败时缓存节流的
+# 时间照样前进，于是"GitHub 断供后"手里的旧快照会在整个断供期被当成最新用 200 发出——
+# 症状不是报错，是老用户在壳上看到一个不存在的"已最新"。新鲜度从此看 `_payload_at`
+# （最近一次**成功**），不再只看 `_fetched_at`（最近一次**尝试**）。
+
+def test_a_stale_snapshot_never_masquerades_as_the_latest(client, enforced, monkeypatch):
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_release(f"本版修了点东西。\n\nAPK-SHA256: {DIGEST}\n")))
+    assert client.get("/v1/update/info").status_code == 200   # 先攒出一份好快照
+    # 时间旅行：这份快照"放旧"了——等价于 GitHub 已断供超过一个缓存期
+    releases._payload_at -= releases.CACHE_SECONDS + 1
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(urllib.error.URLError("github down")))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 502, \
+        f"旧快照被当最新发出去了（{out.status_code}）：壳会把过期数据当成『已是最新』"
+    detail = out.json()["detail"]
+    assert "不把旧快照冒充最新" in detail, f"理由要说清是过期不是没货：{detail!r}"
+
+
+def test_github_recovers_and_the_fresh_release_is_served_again(client, enforced, monkeypatch):
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_release(f"APK-SHA256: {DIGEST}")))
+    assert client.get("/v1/update/info").status_code == 200
+    releases._payload_at -= releases.CACHE_SECONDS + 1
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(urllib.error.URLError("github down")))
+    assert client.get("/v1/update/info").status_code == 502
+    # 恢复：下一次成功读取必须把 200 与正确校验值带回来，不留"永久 502"的坏状态
+    newer = _release(f"APK-SHA256: {'b' * 64}")
+    newer["tag_name"] = "v0.19"
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(newer))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 200, "GitHub 恢复后端点没能自愈"
+    assert out.json()["tag_name"] == "v0.19"
+    assert out.json()["apk_sha256"] == "b" * 64
+
+
+def test_a_failed_attempt_inside_the_window_still_serves_the_fresh_cache(client, enforced, monkeypatch):
+    """收紧只针对**过期**的快照：缓存期内（<10 分钟）偶发一次失败不该把好消息扣住——
+    那正是"一次拉取全员共享"要买的抗抖性，两条断言各钉一头，不许互相越界。"""
+    fake_ok = _Urlopen(_release(f"APK-SHA256: {DIGEST}"))
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake_ok)
+    assert client.get("/v1/update/info").status_code == 200
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(urllib.error.URLError("flaky")))
+    out = client.get("/v1/update/info")
+    assert out.status_code == 200 and out.json()["apk_sha256"] == DIGEST
+    assert len(fake_ok.calls) == 1, "缓存期内的第二枪不该出网"
+
+
 # ---------- 免鉴权与缓存 ----------
 
 def test_the_door_is_open_without_credentials(client, enforced, monkeypatch):

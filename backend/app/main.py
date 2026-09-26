@@ -334,7 +334,10 @@ def update_info():
 
     与那条卡片端点的分工：卡片要的是"要不要提一句"（拉不到就**不弹**，ok:false）；
     这条要的是"人主动点了检查"，拉不到必须说出来——所以拉不到时是 502 带理由，
-    而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款。
+    而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款；
+    AC-4 的后半句「不伪装最新」在这一头还意味着：GitHub 恢复前，超过缓存期的旧快照
+    对这条端点等同于读不出来（判据在 `releases.latest_release_manifest`，
+    钉在 test_update_channel 的 stale 用例组）。
     """
     from fastapi.responses import JSONResponse
     from app.core import releases
